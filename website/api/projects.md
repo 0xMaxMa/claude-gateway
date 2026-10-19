@@ -16,18 +16,18 @@ A project-bound chat belongs to its agent and follows the agent's rules like any
 [Sessions](/api/sessions#post-apiv1agentsagentidsessions).
 
 **Feature detection.** `GET /api/v1/capabilities` lists
-`"projects": ["list", "create", "git", "chat", "run", "start", "delete", "stop", "disk"]` for an admin key.
+`"projects": ["list", "create", "git", "chat", "run", "start", "delete", "stop", "disk", "cleanup"]` for an admin key.
 A key that is not an admin key gets `["list", "git", "chat", "run", "disk"]`. Show the project list
 only when the array includes `"list"`, project create only when it includes `"create"`, the git status view only when it includes `"git"` (read-only: the gateway has no route that changes a repository),
 and [project-bound chat](/api/sessions#post-apiv1agentsagentidsessions) only when
-it includes `"chat"`. Show running status only when it includes `"run"`, the Stop button only when it includes `"stop"`, the Start button only when it includes `"start"`, the Delete action only when it includes `"delete"`, and disk sizes only when it includes `"disk"`.
+it includes `"chat"`. Show running status only when it includes `"run"`, the Stop button only when it includes `"stop"`, the Start button only when it includes `"start"`, the Delete action only when it includes `"delete"`, disk sizes only when it includes `"disk"`, and [Free up space](#cleanup) only when it includes `"cleanup"`.
 When the array is empty, `projectsUnavailable` is `"disabled"`: the gateway serves no Projects API. The field is
 absent when Projects is usable. An older gateway omits the key, lists projects without
-`"git"`, `"chat"`, `"run"`, `"stop"` or `"disk"`, or answers `"admin_required"` for a key that is not an admin key.
+`"git"`, `"chat"`, `"run"`, `"stop"`, `"disk"` or `"cleanup"`, or answers `"admin_required"` for a key that is not an admin key.
 
 **On by default.** The routes are on for every install, with the root `~/projects`, and
 need no configuration. Every valid key can list the projects in that folder and read their git and running status, and every key with
-`admin: true` can also create, start, stop and delete projects there. To switch Projects off, set
+`admin: true` can also create, start, stop and delete projects there, and free up space in them. To switch Projects off, set
 `gateway.projects.enabled` to `false` and restart. Only a boolean counts: the string `"false"`, `0` or `null` is
 ignored with a warning in `gateway.log`, and Projects keeps its default, which is on:
 
@@ -99,7 +99,8 @@ downgrade.
 
 Every error has the shape `{ "error": string, "code": string }`. Branch on
 `code`; `error` is human-readable and may change. The git routes add their own
-codes, listed under [Git errors](#git-errors).
+codes, listed under [Git errors](#git-errors). The one exception is a malformed
+[`POST /api/v1/projects/cleanup`](#post-cleanup) body, which answers `400` with `error` only.
 
 | Status | `code` | When |
 |--------|--------|------|
@@ -107,12 +108,13 @@ codes, listed under [Git errors](#git-errors).
 | 400 | `not_a_directory` | The project is a link to a file, or the root exists but is not a directory. |
 | 403 | `path_escape` | The project's real path (after symlinks) leaves the root or is the root itself (for example a link `all -> .`). |
 | 403 | `permission_denied` | The gateway's user cannot read it. |
-| 403 | `forbidden_key` | Create, delete, stop or start with a key that is not an admin key. |
+| 403 | `forbidden_key` | Create, delete, stop, start or [Free up space](#cleanup) with a key that is not an admin key. |
 | 404 | `not_found` | The project does not exist. |
 | 400 | `confirm_mismatch` | `DELETE` did not send `confirm` equal to the project name. |
 | 409 | `project_exists` | `POST` named a project, file or symlink that already exists, compared case-insensitively (`Site` collides with `site`). |
 | 409 | `project_running` | `DELETE` found a process listening from inside the project, a chat turn running in it (a turn still starting, an accepted message not yet handled, or a task that has not finished), a `running/start` still waiting for its listener, or a chat or task that works in the folder through a symlink alias. Deleting the chat session does not release it while its turn, accepted message or task is still live. |
 | 409 | `project_deleting` | The project is being deleted. `running/start` arrived meanwhile, or a second `DELETE` of the same folder (by its name or through a symlink alias) found the delete already in progress. |
+| 409 | `cleanup_in_progress` | `POST /api/v1/projects/cleanup` while another cleanup runs. |
 | 500 | `internal` | Anything else. |
 
 **Project name.** Matches `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`. Directories under
@@ -431,6 +433,108 @@ curl -H "Authorization: Bearer $KEY" http://localhost:10850/api/v1/projects/disk
 skips the cache but still joins a measurement already running, and the gateway honours it at most once every 5 seconds:
 a refresh sooner than that is answered like a plain read, so check `cached` and `computedAt` rather than assuming a
 fresh measurement. A root that cannot be listed answers the same errors as `GET /api/v1/projects` and is not cached.
+
+## Free up space {#cleanup}
+
+Removes folders that a project's own tools can create again, to give disk space back. Both routes need an admin key; any
+other key gets `403 forbidden_key`. Only these folders, at the top level of a project folder, are ever removed:
+
+| Folder | `kind` | Removed only when |
+|--------|--------|-------------------|
+| `node_modules` | `node_modules` | The project root has a `package.json` file. |
+| `.venv`, `venv` | `venv` | The project root has one of `requirements.txt`, any `requirements*.txt`, `pyproject.toml`, `Pipfile`, `Pipfile.lock`, `poetry.lock`, `uv.lock` or `setup.py`, and the folder holds a `pyvenv.cfg` file. |
+
+The folder must be a real directory, not a symlink, on the same filesystem as the project. Source code, `.git`, `.env`,
+databases, build output (`dist`, `build`, `target`, `.next`) and caches are never removed. Folders deeper in the
+project are not looked at, so the packages of a monorepo keep their own `node_modules`. A project that is a symlink
+alias of another project is not listed; its target is listed under its own name.
+
+### GET /api/v1/projects/cleanup {#get-cleanup}
+
+What a cleanup would remove now. Reads only: nothing is changed. Sizes come from the same `du -s -k -x` as
+[disk usage](#get-disk), 3 at a time, 10 seconds per folder and 30 seconds for the request. Only projects with at least
+one folder that qualifies are listed.
+
+```bash
+curl -H "Authorization: Bearer $KEY" http://localhost:10850/api/v1/projects/cleanup
+```
+
+```json
+{
+  "supported": true,
+  "projects": [
+    {
+      "name": "api",
+      "skipped": null,
+      "folders": [
+        { "path": ".venv", "kind": "venv", "bytes": 98304000, "restore": "uv sync" }
+      ]
+    },
+    {
+      "name": "web",
+      "skipped": "running",
+      "folders": [
+        { "path": "node_modules", "kind": "node_modules", "bytes": 431194112, "restore": "npm ci" }
+      ]
+    }
+  ],
+  "totalBytes": 98304000,
+  "computedAt": "2026-01-01T12:00:00.000Z"
+}
+```
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `supported` | `boolean` | `false` on Windows, where `projects` is empty. |
+| `projects[].skipped` | `null`, `"running"`, `"chat_active"`, `"deleting"` | Why the project cannot be cleaned now. `running`: a process listens on a port from inside the project, or a `running/start` is waiting for its listener. `chat_active`: a chat bound to the project has a turn in flight. `deleting`: the project is being deleted. A skipped project still lists its folders and sizes. |
+| `projects[].folders[].bytes` | integer or `null` | Bytes the folder occupies. `null` when `du` gave no total in time. |
+| `projects[].folders[].restore` | string or `null` | A command that creates the folder again. `node_modules`: `npm ci` with `package-lock.json`, `pnpm install` with `pnpm-lock.yaml`, `yarn install` with `yarn.lock`, `bun install` with `bun.lock` or `bun.lockb`, `npm install` without a lockfile. A virtual environment: `uv sync` with `uv.lock`, `python3 -m venv <folder> && <folder>/bin/pip install -r requirements.txt` with `requirements.txt`, `poetry install` with `poetry.lock`, `null` otherwise. The first lockfile in that order wins. |
+| `totalBytes` | integer | Sum of the known sizes in projects that are not skipped. |
+
+### POST /api/v1/projects/cleanup {#post-cleanup}
+
+Removes the chosen folders. The gateway decides again, for every folder, whether it qualifies, with the same rules as
+the preview: a folder the client names that does not qualify is skipped, never removed.
+
+```bash
+curl -X POST -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"items":[{"project":"api","folders":[".venv"]},{"project":"web","folders":["node_modules"]}]}' \
+  http://localhost:10850/api/v1/projects/cleanup
+```
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `items` | Yes | 1 to 200 `{ "project": string, "folders": string[] }` entries. `project` follows the project name rules. `folders` holds one or more of `node_modules`, `.venv`, `venv`. A project named twice is merged. |
+
+A body over 64 KiB, or any other value, answers `400` with an `error` message and no `code`.
+
+```json
+{
+  "results": [
+    { "project": "api", "folder": ".venv", "state": "removed", "bytes": 98304000 },
+    { "project": "web", "folder": "node_modules", "state": "skipped", "bytes": null, "reason": "running" }
+  ],
+  "freedBytes": 98304000
+}
+```
+
+| `state` | `reason` | Meaning |
+|---------|----------|---------|
+| `removed` | none | The folder is gone. `bytes` is its size just before removal, `null` if `du` gave no total. |
+| `skipped` | `running`, `chat_active`, `deleting` | The project became busy, as in the preview. Checked when its turn comes and again before each folder is removed. |
+| `skipped` | `not_eligible` | The folder does not qualify, or stopped qualifying while it was measured. |
+| `skipped` | `not_found` | The project does not exist, or is a symlink alias. |
+| `skipped` | `unsupported` | Windows. |
+| `failed` | `rename_failed`, `remove_failed` | See below. `bytes` is `null`. |
+
+Projects are handled one at a time, in request order. Each folder is moved to a hidden sibling
+`.pod-cleanup-<id>` in the same project, then that folder is removed. Links inside it are removed, not followed. If
+the removal fails partway, the result is `failed` with `remove_failed`, and what is left stays in `.pod-cleanup-<id>`;
+the next cleanup of that project removes it first. `freedBytes` is the sum of `bytes` of the removed folders. Each
+removed folder is logged with its project, folder and size. The [disk usage](#get-disk) cache is dropped, so the next
+read measures again.
+
+Only one cleanup runs at a time: another `POST` meanwhile answers `409 cleanup_in_progress`.
 
 ## Running processes {#running}
 
