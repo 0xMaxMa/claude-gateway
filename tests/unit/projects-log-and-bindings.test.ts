@@ -57,7 +57,8 @@ describe('a project start that never launched', () => {
   it('logs the message and errno to the gateway logger and returns only the bare reason', async () => {
     const warn = sink();
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'start-fail-'));
-    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ scripts: { dev: 'vite' } }));
+    fs.mkdirSync(path.join(dir, '.pod'));
+    fs.writeFileSync(path.join(dir, '.pod', 'start.sh'), 'exit 0\n');
     const sys = { listeners: async () => [], sleep: async () => {} } as never;
     const launcher = async () => { throw Object.assign(new Error('spawn sh ENOENT /secret/path'), { code: 'ENOENT' }); };
     const res = await startProject(sys, launcher as never, { realProject: dir, name: 'site', logPath: path.join(dir, 'x.log') });

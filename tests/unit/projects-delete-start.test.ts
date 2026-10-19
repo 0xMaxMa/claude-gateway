@@ -19,7 +19,8 @@ beforeEach(() => {
   base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'projects-delete-start-')));
   root = path.join(base, 'projects');
   fs.mkdirSync(path.join(root, 'site'), { recursive: true });
-  fs.writeFileSync(path.join(root, 'site', 'package.json'), JSON.stringify({ scripts: { dev: 'vite' } }));
+  fs.mkdirSync(path.join(root, 'site', '.pod'));
+  fs.writeFileSync(path.join(root, 'site', '.pod', 'start.sh'), 'exec sleep 4\n');
 });
 afterEach(() => {
   jest.restoreAllMocks();
@@ -67,7 +68,7 @@ it('answers 409 project_running to a delete while a started project is still boo
   await new Promise((resolve) => setTimeout(resolve, 300));
   const del = await request(app).delete('/api/v1/projects/site').set(H).send({ confirm: 'site' });
   expect([del.status, del.body.code]).toEqual([409, 'project_running']);
-  expect(fs.existsSync(path.join(root, 'site', 'package.json'))).toBe(true);
+  expect(fs.existsSync(path.join(root, 'site', '.pod', 'start.sh'))).toBe(true);
   await starting;
 });
 

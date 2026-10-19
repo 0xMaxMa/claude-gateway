@@ -6,7 +6,7 @@ import * as path from 'path';
 import request from 'supertest';
 import { createProjectsRouter } from '../../src/api/projects-router';
 import { StopLimiter, systemSys } from '../../src/projects/running';
-import { pickPort, planStart, StartFacts } from '../../src/projects/start';
+import { pickPort } from '../../src/projects/start';
 import type { ApiKey } from '../../src/types';
 
 const apiKeys: ApiKey[] = [
@@ -15,55 +15,9 @@ const apiKeys: ApiKey[] = [
 ];
 const as = (key: string) => ({ Authorization: `Bearer ${key}` });
 
-const facts = (over: Partial<Omit<StartFacts, 'rootNames'>> & { names?: string[] } = {}): StartFacts => ({
-  packageJson: over.packageJson ?? null,
-  rootNames: new Set(over.names ?? []),
-  mainPy: over.mainPy ?? null,
-  appPy: over.appPy ?? null,
-});
 const pkg = (scripts: Record<string, string>) => JSON.stringify({ scripts });
-
-describe('planStart', () => {
-  it('pins the port and host for vite, astro and next, by what the script runs', () => {
-    expect(planStart(facts({ packageJson: pkg({ dev: 'vite' }) }))?.command(3001)).toEqual({
-      file: 'npm',
-      args: ['run', 'dev', '--', '--port', '3001', '--strictPort', '--host', '0.0.0.0'],
-      env: { PORT: '3001' },
-    });
-    expect(planStart(facts({ packageJson: pkg({ dev: 'astro dev' }) }))?.command(3001).args).toEqual(['run', 'dev', '--', '--port', '3001', '--host', '0.0.0.0']);
-    expect(planStart(facts({ packageJson: pkg({ dev: 'next dev' }) }))?.command(3001).args).toEqual(['run', 'dev', '--', '-p', '3001', '-H', '0.0.0.0']);
-  });
-
-  it('gives an unknown script only PORT, and never an argument it might choke on', () => {
-    const plan = planStart(facts({ packageJson: pkg({ start: 'node server.js' }) }));
-    expect(plan?.command(3005)).toEqual({ file: 'npm', args: ['run', 'start'], env: { PORT: '3005' } });
-    expect(plan?.display(3005)).toBe('PORT=3005 npm run start');
-  });
-
-  it('prefers dev over start, and uses the lockfile runner without npm-style --', () => {
-    const plan = planStart(facts({ packageJson: pkg({ start: 'node .', dev: 'vite' }), names: ['yarn.lock'] }));
-    expect(plan?.command(3001)).toMatchObject({ file: 'yarn', args: ['run', 'dev', '--port', '3001', '--strictPort', '--host', '0.0.0.0'] });
-  });
-
-  it('runs a FastAPI app in its .venv, and only then', () => {
-    const main = 'from fastapi import FastAPI\napp = FastAPI()\n';
-    expect(planStart(facts({ mainPy: main, names: ['.venv', 'main.py'] }))?.command(3002)).toEqual({
-      file: '.venv/bin/uvicorn',
-      args: ['main:app', '--host', '0.0.0.0', '--port', '3002'],
-      env: {},
-    });
-    expect(planStart(facts({ mainPy: main, names: ['main.py'] }))).toBeNull();
-    expect(planStart(facts({ mainPy: 'print("hi")', names: ['.venv'] }))).toBeNull();
-  });
-
-  it('has no plan for what only says it exists: notes, a static page, build-only scripts, broken json', () => {
-    expect(planStart(facts())).toBeNull();
-    expect(planStart(facts({ names: ['index.html', 'README.md'] }))).toBeNull();
-    expect(planStart(facts({ packageJson: pkg({ build: 'tsc', test: 'jest' }) }))).toBeNull();
-    expect(planStart(facts({ packageJson: '{nope' }))).toBeNull();
-    expect(planStart(facts({ packageJson: '{"scripts":{"dev":5}}' }))).toBeNull();
-  });
-});
+const SCRIPT = '.pod/start.sh';
+const serve = 'exec node server.js\n';
 
 describe('pickPort', () => {
   it('takes the first free port from 3000, skipping the taken ones', () => {
@@ -95,7 +49,10 @@ describe('POST /v1/projects/:name/running/start', () => {
   };
   const project = (name: string, files: Record<string, string>) => {
     fs.mkdirSync(path.join(root, name), { recursive: true });
-    for (const [f, text] of Object.entries(files)) fs.writeFileSync(path.join(root, name, f), text);
+    for (const [f, text] of Object.entries(files)) {
+      fs.mkdirSync(path.dirname(path.join(root, name, f)), { recursive: true });
+      fs.writeFileSync(path.join(root, name, f), text);
+    }
   };
   const start = (a: express.Express, name: string, body: object = {}, key = 'k-write') =>
     request(a).post(`/api/v1/projects/${name}/running/start`).set(as(key)).send(body);
@@ -124,7 +81,7 @@ describe('POST /v1/projects/:name/running/start', () => {
 
   afterEach(async () => {
     for (const pid of pids.splice(0)) {
-      // The start route runs the command detached, so it leads its own process group. Killing only the npm
+      // The start route runs the command detached, so it leads its own process group. Killing only the sh
       // pid leaves its `node server.js` child listening on a port in 3000-3099 after the suite ends.
       for (const target of [-pid, pid]) {
         try {
@@ -138,13 +95,13 @@ describe('POST /v1/projects/:name/running/start', () => {
   });
 
   it('starts the project on the port, answers once it listens, and stop then ends it', async () => {
-    project('web', { 'package.json': pkg({ start: 'node server.js' }), 'server.js': SERVER });
+    project('web', { [SCRIPT]: serve, 'server.js': SERVER });
     const a = app();
     const port = await freePort();
 
     const res = await start(a, 'web', { port });
     expect(res.status).toBe(200);
-    expect(res.body).toMatchObject({ port, command: `PORT=${port} npm run start` });
+    expect(res.body).toMatchObject({ port, command: `PORT=${port} sh .pod/start.sh` });
     pids.push(res.body.pid);
 
     const running = await request(a).get('/api/v1/projects/web/running').set(as('k-write'));
@@ -157,7 +114,7 @@ describe('POST /v1/projects/:name/running/start', () => {
   }, 20000);
 
   it('picks a free port itself when none is asked for', async () => {
-    project('web', { 'package.json': pkg({ start: 'node server.js' }), 'server.js': SERVER });
+    project('web', { [SCRIPT]: serve, 'server.js': SERVER });
     const res = await start(app(), 'web');
     expect(res.status).toBe(200);
     pids.push(res.body.pid);
@@ -166,7 +123,7 @@ describe('POST /v1/projects/:name/running/start', () => {
   }, 20000);
 
   it('says already_running instead of starting a second server', async () => {
-    project('web', { 'package.json': pkg({ start: 'node server.js' }), 'server.js': SERVER });
+    project('web', { [SCRIPT]: serve, 'server.js': SERVER });
     const a = app();
     const first = await start(a, 'web', { port: await freePort() });
     pids.push(first.body.pid);
@@ -176,7 +133,7 @@ describe('POST /v1/projects/:name/running/start', () => {
   }, 20000);
 
   it('refuses a port something else holds', async () => {
-    project('web', { 'package.json': pkg({ start: 'node server.js' }), 'server.js': SERVER });
+    project('web', { [SCRIPT]: serve, 'server.js': SERVER });
     const held = net.createServer();
     await new Promise<void>((r) => held.listen(0, '0.0.0.0', r));
     const { port } = held.address() as net.AddressInfo;
@@ -189,16 +146,17 @@ describe('POST /v1/projects/:name/running/start', () => {
     }
   });
 
-  it('has no command for a folder whose files do not say how to run it', async () => {
-    project('site', { 'index.html': '<h1>hi</h1>' });
+  it('has no command for a folder without a start script, even with a package.json that has one', async () => {
+    project('site', { 'index.html': '<h1>hi</h1>', 'package.json': pkg({ start: 'node server.js' }) });
     const res = await start(app(), 'site');
     expect(res.status).toBe(422);
     expect(res.body.code).toBe('no_start_command');
+    expect(res.body.error ?? res.body.message).toContain('no start script');
   });
 
   it('answers start_failed with what the process printed, credentials redacted', async () => {
     project('bad', {
-      'package.json': pkg({ start: 'node boom.js' }),
+      [SCRIPT]: 'exec node boom.js\n',
       'boom.js': "console.log('cannot bind, token ghp_abcdefghijklmnopqrstuvwxyz0123456789'); process.exit(1)",
     });
     const res = await start(app(), 'bad', { port: await freePort() });
@@ -209,7 +167,7 @@ describe('POST /v1/projects/:name/running/start', () => {
   }, 20000);
 
   it('says why a start failed before the process ran: a log folder that cannot be created', async () => {
-    project('site', { 'package.json': pkg({ start: 'node server.js' }), 'server.js': SERVER });
+    project('site', { [SCRIPT]: serve, 'server.js': SERVER });
     fs.writeFileSync(logs, 'a file where the log folder should be');
     const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
     try {
@@ -224,7 +182,7 @@ describe('POST /v1/projects/:name/running/start', () => {
   });
 
   it('stops what it started when nothing listens in time', async () => {
-    project('idle', { 'package.json': pkg({ start: 'node idle.js' }), 'idle.js': "console.log('up');setInterval(()=>{},1e6)" });
+    project('idle', { [SCRIPT]: 'exec node idle.js\n', 'idle.js': "console.log('up');setInterval(()=>{},1e6)" });
     const res = await start(app(1000), 'idle', { port: await freePort() });
     expect(res.status).toBe(504);
     expect(res.body.code).toBe('start_timeout');
@@ -241,18 +199,55 @@ describe('POST /v1/projects/:name/running/start', () => {
     expect(leftover.filter((pid) => alive(Number(pid)))).toEqual([]);
   }, 20000);
 
-  it('tells GET /running whether the project can be started, and how', async () => {
-    project('web', { 'package.json': pkg({ dev: 'vite' }) });
-    project('site', { 'index.html': 'x' });
+  it('tells GET /running whether the project has a start script', async () => {
+    project('web', { [SCRIPT]: serve, 'index.html': 'x' });
+    project('site', { 'index.html': 'x', 'package.json': pkg({ dev: 'vite' }) });
     const a = app();
     const web = await request(a).get('/api/v1/projects/web/running').set(as('k-write'));
-    expect(web.body.start).toEqual({ command: 'npm run dev -- --port 3000 --strictPort --host 0.0.0.0' });
+    expect(web.body.start).toEqual({ command: 'sh .pod/start.sh' });
     const site = await request(a).get('/api/v1/projects/site/running').set(as('k-write'));
     expect(site.body.start).toBeNull();
   });
 
+  it('hands the script PORT, and runs it from the project folder', async () => {
+    project('web', { [SCRIPT]: 'echo "$PORT $(pwd)" > seen.txt\nexec node server.js\n', 'server.js': SERVER });
+    const port = await freePort();
+    const res = await start(app(), 'web', { port });
+    expect(res.status).toBe(200);
+    pids.push(res.body.pid);
+    expect(fs.readFileSync(path.join(root, 'web', 'seen.txt'), 'utf8').trim()).toBe(`${port} ${path.join(root, 'web')}`);
+  }, 20000);
+
+  it('refuses a script that is a symlink, even to a file inside the project', async () => {
+    project('web', { 'real.sh': serve, 'server.js': SERVER });
+    fs.mkdirSync(path.join(root, 'web', '.pod'));
+    fs.symlinkSync(path.join(root, 'web', 'real.sh'), path.join(root, 'web', SCRIPT));
+    const a = app();
+    expect((await start(a, 'web')).body.code).toBe('no_start_command');
+    expect((await request(a).get('/api/v1/projects/web/running').set(as('k-write'))).body.start).toBeNull();
+  });
+
+  it('refuses a script over 64 KiB and accepts one at the limit', async () => {
+    const pad = (n: number) => `${serve}#${'x'.repeat(n - serve.length - 1)}`;
+    project('big', { [SCRIPT]: pad(64 * 1024 + 1), 'server.js': SERVER });
+    expect((await start(app(), 'big')).body.code).toBe('no_start_command');
+    project('edge', { [SCRIPT]: pad(64 * 1024), 'server.js': SERVER });
+    const res = await start(app(), 'edge', { port: await freePort() });
+    expect(res.status).toBe(200);
+    pids.push(res.body.pid);
+  }, 20000);
+
+  it('refuses a script whose folder is a symlink out of the project', async () => {
+    const outside = path.join(base, 'outside');
+    fs.mkdirSync(outside);
+    fs.writeFileSync(path.join(outside, 'start.sh'), serve);
+    project('web', { 'server.js': SERVER });
+    fs.symlinkSync(outside, path.join(root, 'web', '.pod'));
+    expect((await start(app(), 'web')).body.code).toBe('no_start_command');
+  });
+
   it('needs a write key, and a name that exists', async () => {
-    project('web', { 'package.json': pkg({ start: 'node server.js' }), 'server.js': SERVER });
+    project('web', { [SCRIPT]: serve, 'server.js': SERVER });
     expect((await start(app(), 'web', {}, 'k-read')).status).toBe(403);
     expect((await start(app(), 'ghost')).status).toBe(404);
   });
