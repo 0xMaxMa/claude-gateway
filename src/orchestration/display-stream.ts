@@ -1,6 +1,8 @@
+import { PAYLOAD_OPENING, RESPONSE_FIELDS } from './response-schema';
+
 /** Extract only the display string from an incomplete flat response JSON object.
  * Incomplete escapes/surrogate pairs are held until the next provider chunk.
- * Other fields of the union response schema (spoken_text, notify_user) are skipped
+ * Other fields of the union response schema (spoken_text, notify_user, follow_up) are skipped
  * without ever being published, whatever order the model emits them in. */
 export function partialDisplay(raw: string): string {
   return partialField(raw, 'display_text')?.text ?? '';
@@ -59,8 +61,7 @@ export function partialField(raw: string, field: 'display_text' | 'spoken_text')
 /** An object opening with one of the union response schema's own field names. Ordinary
  * replies contain braces and fenced code blocks legitimately, so only this shape counts
  * as our payload; anything looser would hold back or mangle real answers. */
-const UNION_KEYS = ['display_text', 'spoken_text', 'notify_user'];
-const PAYLOAD_OBJECT = /\{\s*"(?:display_text|spoken_text|notify_user)"\s*:/;
+const PAYLOAD_OBJECT = new RegExp(PAYLOAD_OPENING);
 
 /** `index` moved back over the opening fence that announces the object there, if any: a
  * fenced payload is announced by its fence, so the fence belongs to the payload rather than
@@ -96,5 +97,5 @@ export function displayPrefix(raw: string): string {
   // JSON a user actually asked for) keep streaming.
   const opening = /\{\s*(?:"([a-z_]*)"?\s*:?)?$/.exec(raw);
   const typed = opening?.[1] ?? '';
-  return opening && UNION_KEYS.some(key => key.startsWith(typed)) ? raw.slice(0, opening.index) : raw;
+  return opening && RESPONSE_FIELDS.some(key => key.startsWith(typed)) ? raw.slice(0, opening.index) : raw;
 }

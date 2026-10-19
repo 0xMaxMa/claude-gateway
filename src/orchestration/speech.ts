@@ -1,4 +1,4 @@
-import { SPOKEN_TEXT_LIMIT } from './response-schema';
+import { FOLLOW_UPS, PAYLOAD_OPENING, SPOKEN_TEXT_LIMIT, type FollowUp } from './response-schema';
 import { fenceAdjusted } from './display-stream';
 import { stripAudioTags } from '../voice/audio-tags';
 
@@ -64,7 +64,7 @@ const TRAILING_SIGN_OFF_LIMIT = 120;
  * merely quotes the format is left alone, because unwrapping one would publish the example
  * in place of the answer and stripping one would edit the answer. */
 function payloadSpan(text: string): { body: string; start: number; end: number } | undefined {
-  const matches = [...text.matchAll(/\{(?=\s*"(?:display_text|spoken_text|notify_user)"\s*:)/g)];
+  const matches = [...text.matchAll(new RegExp(PAYLOAD_OPENING, 'g'))];
   // Only the last object can qualify: anything earlier has even more text after it.
   const opening = matches[matches.length - 1]?.index;
   if (opening === undefined) {
@@ -84,7 +84,7 @@ function payloadSpan(text: string): { body: string; start: number; end: number }
     ? { body: text.slice(opening, closed), start, end } : undefined;
 }
 
-export function splitSpeechResponse(raw: string): { display: string; spoken: string; outcome: ResponseTextOutcome } {
+export function splitSpeechResponse(raw: string): { display: string; spoken: string; outcome: ResponseTextOutcome; followUp?: FollowUp } {
   const text = raw.trim();
   // A short conversational answer is already suitable speech. Preserve its language and
   // wording; never truncate reports or read code/URLs/JSON aloud. Applied to whatever text
@@ -100,12 +100,13 @@ export function splitSpeechResponse(raw: string): { display: string; spoken: str
   if (!payload) return { display: raw, spoken: speakable(text), outcome: 'plain' };
   let value: unknown;
   try { value = JSON.parse(payload.body); } catch { /* Truncated or invalid; degrade below. */ }
-  const fields = (value && typeof value === 'object' ? value : {}) as { display_text?: unknown; spoken_text?: unknown };
+  const fields = (value && typeof value === 'object' ? value : {}) as { display_text?: unknown; spoken_text?: unknown; follow_up?: unknown };
   if (typeof fields.display_text === 'string' && fields.display_text.trim()) {
     const spoken = typeof fields.spoken_text === 'string' ? fields.spoken_text.trim() : '';
     // Fail closed for malformed/over-budget speech, rather than reading the full report, and for
     // audio tags alone, which leave a model that does not perform them nothing to say.
-    return { display: fields.display_text, spoken: spoken.length <= SPOKEN_TEXT_LIMIT && !/```/.test(spoken) && stripAudioTags(spoken).trim() ? spoken : '', outcome: 'structured' };
+    const followUp = FOLLOW_UPS.find(value => value === fields.follow_up);
+    return { display: fields.display_text, spoken: spoken.length <= SPOKEN_TEXT_LIMIT && !/```/.test(spoken) && stripAudioTags(spoken).trim() ? spoken : '', outcome: 'structured', ...(followUp ? { followUp } : {}) };
   }
   // No usable display_text. Publishing `raw` here is what used to put the JSON object itself
   // into the user's chat, so publish the prose around it instead, and an explicit notice when
@@ -117,20 +118,6 @@ export function splitSpeechResponse(raw: string): { display: string; spoken: str
   return { display, spoken: speakable(display), outcome: value ? 'empty_display' : 'unreadable' };
 }
 
-
-/** A Latin-script token, joined by . _ - / into one identifier (npm, package.json, follow-up). */
-const LATIN_TOKEN = /[A-Za-z][A-Za-z0-9]*(?:[._\-/][A-Za-z0-9]+)*/g;
-/** Latin-script words of the latest user input that display_text answers and spoken_text leaves out
- * (issue #624). No model call and no word list: only a message that also uses another script has
- * words that stand out (npm in a Thai question), and only plain words count, because identifiers
- * are not read aloud. SPEECH_OVERLAY keeps those words spelled as written in speech. A Latin-only or
- * Thai-only message is never reported. A diagnostic, not a rewrite. */
-export function speechCoverageGap(input: string, display: string, spoken: string): string[] {
-  if (!/[^\P{L}\p{Script=Latin}]/u.test(input)) return [];
-  const words = (text: string) => new Set((text.match(LATIN_TOKEN) ?? []).filter(token => /^[A-Za-z]{2,}$/.test(token)).map(token => token.toLowerCase()));
-  const answered = words(display), heard = words(spoken);
-  return [...words(input)].filter(word => answered.has(word) && !heard.has(word)).slice(0, 5);
-}
 
 export function speechVoiceStyle(gender?: string): string {
   if (gender !== 'female' && gender !== 'male') return '';

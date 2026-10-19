@@ -99,14 +99,15 @@ test('a reply stopped by a stop control is not an utterance fragment, and a type
   } finally { await f.close(); }
 });
 
-test('speech that leaves out the latest question records a coverage gap; speech that answers it records nothing', async () => {
+// Coverage is the model's job under the rules above. The gateway does not guess it from the
+// words of the input and the two surfaces (issue #629): no token heuristic, no event.
+test('the words of a reply are not scanned for coverage of the latest question', async () => {
   const f = await fixture();
   try {
-    f.setReply(JSON.stringify({ display_text: 'จะแก้ทั้ง 4 ข้อแล้ว push ขึ้น branch เดิมค่ะ\n- npm: แสดงเป็น package ใหม่ใน registry', spoken_text: 'ได้ค่ะ จะแก้ทั้ง 4 ข้อแล้ว push ขึ้น branch เดิม ยังไม่ merge นะคะ' }));
+    const spoken = 'ได้ค่ะ จะแก้ทั้ง 4 ข้อแล้ว push ขึ้น branch เดิม ยังไม่ merge นะคะ';
+    f.setReply(JSON.stringify({ display_text: 'จะแก้ทั้ง 4 ข้อแล้ว push ขึ้น branch เดิมค่ะ\n- npm: แสดงเป็น package ใหม่ใน registry', spoken_text: spoken }));
     await f.send('แล้วส่วนของ npm จะขึ้นยังไง');
-    expect(f.events('response.speech_coverage_gap')).toEqual([{ responseId: expect.any(String), missing: ['npm'] }]);
-    f.setReply(JSON.stringify({ display_text: '- npm: แสดงเป็น package ใหม่ใน registry', spoken_text: 'ส่วน npm จะขึ้นเป็น package ใหม่ใน registry ค่ะ' }));
-    await f.send('แล้วส่วนของ npm จะขึ้นยังไง');
-    expect(f.events('response.speech_coverage_gap')).toHaveLength(1);
+    expect(f.events('response.speech_coverage_gap')).toEqual([]);
+    expect(f.runtime.store.all('SELECT text FROM response_speech').map(row => String(row.text))).toEqual([spoken]);
   } finally { await f.close(); }
 });

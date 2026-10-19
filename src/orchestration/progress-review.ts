@@ -1,4 +1,4 @@
-import { SPOKEN_TEXT_LIMIT } from './response-schema';
+import { PAYLOAD_OPENING, SPOKEN_TEXT_LIMIT } from './response-schema';
 import { OrchestrationStore } from './store';
 
 // Internal reviews may choose silence. They must finish before any prose/TTS
@@ -30,7 +30,7 @@ export function recentCommunicatedProgress(store: OrchestrationStore, conversati
 export type ProgressReviewOutcome = 'reported' | 'silent' | 'duplicate' | 'unparsed';
 export function progressReviewResult(raw: string, previous: string[]): { display: string; spoken: string; silent: boolean; outcome: ProgressReviewOutcome } {
   const normalized = raw.trim().replace(/^```(?:json)?\s*\n/, '').replace(/\n```$/, '');
-  const starts = [...normalized.matchAll(/\{(?=\s*"(?:notify_user|display_text|spoken_text)"\s*:)/g)].slice(-32).map(m => m.index!);
+  const starts = [...normalized.matchAll(new RegExp(PAYLOAD_OPENING, 'g'))].slice(-32).map(m => m.index!);
   for (const candidate of [normalized, ...starts.map(index => normalized.slice(index))]) {
     try {
       const value = JSON.parse(candidate);

@@ -29,6 +29,10 @@
  * CLI args are the whole point.
  */
 export const SPOKEN_TEXT_LIMIT = 600;
+/** What a task-report reply declares happens next (follow_up): nothing more on its own, a
+ * question the user must answer, or work that continues without another request. */
+export const FOLLOW_UPS = ['none', 'asks_user', 'continues'] as const;
+export type FollowUp = typeof FOLLOW_UPS[number];
 
 function deepFreeze<T>(value: T): T {
   if (value && typeof value === 'object') for (const nested of Object.values(value)) deepFreeze(nested);
@@ -52,6 +56,16 @@ export const ORCHESTRATION_RESPONSE_SCHEMA: Record<string, unknown> = deepFreeze
       type: 'boolean',
       description: 'Only on an internal progress-review turn, where the instructions define it: whether the user should receive this update. Omit this field entirely on every other turn.',
     },
+    follow_up: {
+      type: 'string',
+      enum: [...FOLLOW_UPS],
+      description: 'Only on an automatic task-report turn, where the instructions define it: what your reply tells the user happens next. Omit this field entirely on every other turn.',
+    },
   },
   required: ['display_text'],
 });
+
+/** The union's field names. A payload may open with any of them, whatever order the model emits. */
+export const RESPONSE_FIELDS: readonly string[] = Object.freeze(Object.keys(ORCHESTRATION_RESPONSE_SCHEMA.properties as object));
+/** A JSON object opening with one of RESPONSE_FIELDS: the shape that marks our payload in a turn. */
+export const PAYLOAD_OPENING = `\\{(?=\\s*"(?:${RESPONSE_FIELDS.join('|')})"\\s*:)`;
