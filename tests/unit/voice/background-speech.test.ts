@@ -1,11 +1,11 @@
 import { BoundedQueue } from '../../../src/voice/queue';
-import { PCM16 } from '../../../src/voice/types';
+import { PCM16, VOICE_CALL_VAD } from '../../../src/voice/types';
 import { ElevenLabsStt } from '../../../src/voice/providers/elevenlabs-stt';
 import { sttProvider } from '../../../src/voice/providers/registry';
 import { SocketFactory } from '../../../src/voice/providers/socket';
 import { ORCHESTRATION_DEFAULTS, AGENT_VOICE_DEFAULTS, resolveOrchestrationConfig } from '../../../src/orchestration/config';
 import { generateVoiceCallPage } from '../../../src/ui/voice-call-ui';
-import { VOICE_CALL_VAD, createVoiceCallVad } from '../../../src/ui/voice-call-client';
+import { createVoiceCallVad } from '../../../src/ui/voice-call-client';
 
 // Every provider socket the registry opens, by URL.
 const opened: string[] = [];
@@ -76,6 +76,12 @@ describe('voice config', () => {
     expect(() => resolveOrchestrationConfig(undefined, voice({ stt: { filterBackgroundAudio: 'yes' } }))).toThrow('voice.stt.filterBackgroundAudio');
   });
 
+  test('the VAD bounds keep the browser detector able to start and end speech', () => {
+    // minLevel 0 lets the threshold sit at a zero noise floor, so speech never ends; a level of 1 is never exceeded.
+    expect(resolveOrchestrationConfig(undefined, voice({ live: { vad: { minLevel: 0.5, initialNoise: 0, noiseAdapt: 0, ratio: 1, bargeInRatio: 100 } } })).voice.live.vad)
+      .toMatchObject({ minLevel: 0.5, initialNoise: 0, noiseAdapt: 0, ratio: 1, bargeInRatio: 100 });
+  });
+
   test('a partial VAD override merges over the defaults and keeps the other live settings', () => {
     const resolved = resolveOrchestrationConfig(undefined, voice({ live: { fastAck: false, vad: { minLevel: 0.03, ratio: 4.5, startMs: 200 } } })).voice;
     expect(resolved.live.vad).toEqual({ ...VOICE_CALL_VAD, minLevel: 0.03, ratio: 4.5, startMs: 200 });
@@ -83,7 +89,7 @@ describe('voice config', () => {
   });
 
   test.each([
-    ['minLevel', -0.01], ['minLevel', Number.NaN], ['minLevel', 2], ['ratio', -1], ['ratio', 0.5], ['bargeInRatio', 0], ['ratio', Number.POSITIVE_INFINITY], ['noiseAdapt', 1.5],
+    ['minLevel', -0.01], ['minLevel', Number.NaN], ['minLevel', 2], ['minLevel', 0], ['minLevel', 1], ['initialNoise', 1], ['ratio', -1], ['ratio', 0.5], ['bargeInRatio', 0], ['ratio', Number.POSITIVE_INFINITY], ['noiseAdapt', 1.5],
     ['initialNoise', '0.004'], ['startMs', 0], ['startMs', 12.5], ['bargeInMs', -1], ['typo', 1],
   ])('an invalid VAD value %s=%p fails validation', (key, value) => {
     expect(() => resolveOrchestrationConfig(undefined, voice({ live: { vad: { [key]: value } } }))).toThrow(/INVALID_CONFIG|voice\.live\.vad/);

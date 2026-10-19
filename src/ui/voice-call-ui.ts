@@ -6,7 +6,8 @@
  * `gateway.publicUrl`, and the WebSocket path comes from the ticket response.
  */
 import { BASE_STYLE, TG_WEBAPP_JS, htmlEscape, page } from './cli-viewer-ui';
-import { VOICE_CALL_PLAYBACK, VOICE_CALL_VAD, createResampler, createVoiceCallPlayback, createVoiceCallUplink, createVoiceCallVad, encodeVoiceCallFrame, formatCallDuration, voiceCallErrorView, voiceCallLevel, voiceCallReplyText, voiceCallTheme, voiceCallTicketFailure } from './voice-call-client';
+import { VOICE_CALL_PLAYBACK, createResampler, createVoiceCallPlayback, createVoiceCallUplink, createVoiceCallVad, encodeVoiceCallFrame, formatCallDuration, voiceCallErrorView, voiceCallLevel, voiceCallReplyText, voiceCallTheme, voiceCallTicketFailure } from './voice-call-client';
+import { VOICE_CALL_VAD } from '../voice/types';
 
 export interface VoiceCallPageOpts {
   pairingId: string;

@@ -4,7 +4,7 @@ import { PCM16, TtsProvider } from '../../../src/voice/types';
 import { BoundedQueue } from '../../../src/orchestration/bounded-queue';
 import { fastAckText, fastAcknowledgement } from '../../../src/voice/fast-ack';
 import { resolveOrchestrationConfig, ORCHESTRATION_DEFAULTS } from '../../../src/orchestration/config';
-import { VOICE_CALL_VAD } from '../../../src/ui/voice-call-client';
+import { VOICE_CALL_VAD } from '../../../src/voice/types';
 
 /** One admitted turn with a fast acknowledgement wired in; the reply speaks when the test pushes to `stream`. */
 async function call(ackAfterMs: number, ackReply: string | undefined) {

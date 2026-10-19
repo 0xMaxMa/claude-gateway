@@ -4,7 +4,7 @@ import { OrchestrationError } from './types';
 import { isAbsolute } from 'path';
 import { PROVIDER_ADMISSION_DEFAULTS, ProviderAdmissionPolicy } from './provider-admission';
 import { SKILL_CATALOG_BUDGET_BYTES } from './skill-catalog-budget';
-import { VOICE_CALL_VAD } from '../ui/voice-call-client';
+import { VOICE_CALL_VAD } from '../voice/types';
 
 export interface OrchestrationConfig {
   providerAdmission?: Partial<ProviderAdmissionPolicy>;
@@ -127,8 +127,9 @@ export const NARRATE_LIMITS = { targetChars: 4000, maxParts: 200, partTimeoutMs:
 // Validate the complete tree, including unknown keys: a misspelled capacity or
 // secret field must not be silently accepted as a working configuration.
 // The call page's VAD levels and ratios are fractions, unlike the integer ms and counts elsewhere.
-// A ratio below 1 would put the threshold under the noise floor, so noise or echo would start speech.
-const VAD_FRACTION_LIMITS: Record<string, [number, number]> = { ratio: [1, 100], bargeInRatio: [1, 100], minLevel: [0, 1], initialNoise: [0, 1], noiseAdapt: [0, 1] };
+// Each range keeps the detector able to start and end speech: a ratio below 1 puts the threshold
+// under the noise floor, a zero minLevel lets it sit at a silent floor, and an RMS level near 1 is never exceeded.
+const VAD_FRACTION_LIMITS: Record<string, [number, number]> = { ratio: [1, 100], bargeInRatio: [1, 100], minLevel: [0.001, 0.5], initialNoise: [0, 0.5], noiseAdapt: [0, 1] };
 export function validateTree(value: unknown, template: unknown, prefix: string): void {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new OrchestrationError('INVALID_CONFIG', `${prefix} must be an object`);
   const shape = template as Record<string, unknown>;

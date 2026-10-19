@@ -10,7 +10,7 @@ import { join } from 'path';
 import WebSocket from 'ws';
 import { VoiceApi } from '../../../src/api/voice-router';
 import { createVoiceCallRouter } from '../../../src/api/voice-call-router';
-import { VOICE_CALL_VAD } from '../../../src/ui/voice-call-client';
+import { VOICE_CALL_VAD } from '../../../src/voice/types';
 import { voiceCallPairings } from '../../../src/voice/call-pairing';
 import { TelegramBotAvatars } from '../../../src/voice/telegram-avatar';
 import { FakeSttProvider, FakeTtsProvider } from '../../../src/voice/providers/fake';

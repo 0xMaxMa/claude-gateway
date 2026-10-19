@@ -208,9 +208,9 @@ The browser removes echo and steady noise, but not other people talking nearby. 
 | --- | --- | --- |
 | `startMs` | `120` | Milliseconds above the threshold before speech starts |
 | `endMs` | `350` | Milliseconds below the threshold before speech ends |
-| `minLevel` | `0.012` | Lowest speech threshold, as RMS level from 0 to 1 |
+| `minLevel` | `0.012` | Lowest speech threshold, as RMS level (0.001–0.5) |
 | `ratio` | `3` | The threshold is at least this many times the adaptive noise floor (1–100) |
-| `initialNoise` | `0.004` | Starting noise floor, as RMS level from 0 to 1 |
+| `initialNoise` | `0.004` | Starting noise floor, as RMS level (0–0.5) |
 | `noiseAdapt` | `0.05` | How fast the noise floor follows quiet input (0–1) |
 | `bargeInRatio` | `2` | While the reply is audible, speech must be this many times the threshold (1–100) |
 | `bargeInMs` | `250` | While the reply is audible, milliseconds above that level before speech interrupts it |
