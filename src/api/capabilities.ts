@@ -44,13 +44,13 @@ export const CROSS_CHANNEL_MESSAGE_CHANNELS: readonly ChatChannel[] = [...CHAT_C
  * Project operations served by projects-router.ts. Clients gate listing on `includes('list')`, the git routes on
  * `includes('git')`, project-bound chat on `includes('chat')`, running status on `includes('run')`, creating a project
  * on `includes('create')`, starting one on `includes('start')`, stopping what runs in one on `includes('stop')`, and
- * deleting one on `includes('delete')`, and disk usage on `includes('disk')`. The gateway serves no project files; they are viewed in code-server.
+ * deleting one on `includes('delete')`, disk usage on `includes('disk')`, and Free up space on `includes('cleanup')`. The gateway serves no project files; they are viewed in code-server.
  */
-export const PROJECTS_CAPABILITIES = ['list', 'create', 'git', 'chat', 'run', 'start', 'delete', 'stop', 'disk'] as const;
+export const PROJECTS_CAPABILITIES = ['list', 'create', 'git', 'chat', 'run', 'start', 'delete', 'stop', 'disk', 'cleanup'] as const;
 export type ProjectsCapability = (typeof PROJECTS_CAPABILITIES)[number];
 
 /** The operations projects-router.ts serves only to an admin key; every other token is open to any key. */
-export const PROJECTS_ADMIN_CAPABILITIES: ReadonlySet<ProjectsCapability> = new Set(['create', 'start', 'delete', 'stop']);
+export const PROJECTS_ADMIN_CAPABILITIES: ReadonlySet<ProjectsCapability> = new Set(['create', 'start', 'delete', 'stop', 'cleanup']);
 
 export interface CapabilitiesResponse {
   /** Gateway version from package.json. Informational — clients should key off `capabilities`, not parse this. */

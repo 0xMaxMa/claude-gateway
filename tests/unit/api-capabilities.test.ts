@@ -71,17 +71,17 @@ describe('GET /api/v1/capabilities', () => {
 
   it('advertises every project token to an admin key', async () => {
     const res = await request(buildApp(apiKeys)).get('/api/v1/capabilities').set(AUTH);
-    expect(res.body.capabilities.projects).toEqual(['list', 'create', 'git', 'chat', 'run', 'start', 'delete', 'stop', 'disk']);
+    expect(res.body.capabilities.projects).toEqual(['list', 'create', 'git', 'chat', 'run', 'start', 'delete', 'stop', 'disk', 'cleanup']);
   });
 
   it('drops chat without orchestration and everything when the Projects API is disabled', () => {
     const gw = (g: Record<string, unknown>) => ({ gateway: g, agents: [] }) as never;
-    expect(buildCapabilitiesResponse('1', gw({ orchestration: false })).capabilities.projects).toEqual(['list', 'create', 'git', 'run', 'start', 'delete', 'stop', 'disk']);
-    expect(buildCapabilitiesResponse('1', gw({ orchestration: true })).capabilities.projects).toEqual(['list', 'create', 'git', 'chat', 'run', 'start', 'delete', 'stop', 'disk']);
+    expect(buildCapabilitiesResponse('1', gw({ orchestration: false })).capabilities.projects).toEqual(['list', 'create', 'git', 'run', 'start', 'delete', 'stop', 'disk', 'cleanup']);
+    expect(buildCapabilitiesResponse('1', gw({ orchestration: true })).capabilities.projects).toEqual(['list', 'create', 'git', 'chat', 'run', 'start', 'delete', 'stop', 'disk', 'cleanup']);
     expect(buildCapabilitiesResponse('1', gw({ orchestration: true, projects: { enabled: false } })).capabilities.projects).toEqual([]);
   });
 
-  it.each(['sk-pod-write', 'sk-pod-read', 'sk-agent'])('%s gets every project token but create, start, delete and stop (disk included)', async (key) => {
+  it.each(['sk-pod-write', 'sk-pod-read', 'sk-agent'])('%s gets every project token but create, start, delete, stop and cleanup (disk included)', async (key) => {
     const res = await request(buildApp(apiKeys)).get('/api/v1/capabilities').set(as(key));
     expect(res.status).toBe(200);
     expect(res.body.capabilities.projects).toEqual(['list', 'git', 'chat', 'run', 'disk']);

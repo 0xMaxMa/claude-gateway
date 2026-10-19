@@ -647,7 +647,7 @@ describe('capabilities follow orchestration', () => {
     try {
       const res = await supertest(h.app).get('/api/v1/capabilities').set('Authorization', `Bearer ${KEYS.admin!.key}`);
       const projects = res.body.capabilities.projects as string[];
-      expect(projects).toEqual(['list', 'create', 'git', ...(chat ? ['chat'] : []), 'run', 'start', 'delete', 'stop', 'disk']);
+      expect(projects).toEqual(['list', 'create', 'git', ...(chat ? ['chat'] : []), 'run', 'start', 'delete', 'stop', 'disk', 'cleanup']);
     } finally {
       await teardown(h);
     }
