@@ -4,7 +4,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { randomUUID } from 'crypto';
 import { AgentOrchestrationRuntime } from '../../../src/orchestration/runtime';
-import { LIVE_VOICE_STT_NOTE, SPEECH_OVERLAY, SPEECH_REMINDER } from '../../../src/orchestration/speech';
+import { LIVE_VOICE_ACK_NOTE, LIVE_VOICE_STT_NOTE, SPEECH_OVERLAY, SPEECH_REMINDER } from '../../../src/orchestration/speech';
 import { SessionStore } from '../../../src/session/store';
 import { HistoryDB } from '../../../src/history/db';
 import type { SessionProcess } from '../../../src/session/process';
@@ -128,5 +128,21 @@ test('live-voice turns carry the realtime STT caveat on both the full and remind
     expect(f.prompts[2]).not.toContain(LIVE_VOICE_STT_NOTE);
     await f.send('Plain text');
     expect(f.prompts[3]).not.toContain(LIVE_VOICE_STT_NOTE);
+  } finally { await f.close(); }
+});
+
+test('a live turn that may get a fast acknowledgement is told not to open with another receipt; workers never see it (#625)', async () => {
+  const f = await fixture();
+  try {
+    await f.send('ช่วยเปิด PR 623 ให้หน่อย', { modality: 'live_voice', metadata: { fastAck: true } });
+    await f.send('เอ่อ', { modality: 'live_voice' });
+    await f.send('Typed', { metadata: { fastAck: true } });
+    expect(f.prompts[0]).toContain(LIVE_VOICE_ACK_NOTE);
+    expect(f.prompts[1]).not.toContain(LIVE_VOICE_ACK_NOTE);
+    // Only a live-voice turn can have played an acknowledgement.
+    expect(f.prompts[2]).not.toContain(LIVE_VOICE_ACK_NOTE);
+    // The flag is not composer text that a spawned worker would inherit.
+    const ingress = f.runtime.store.all('SELECT ingress_json FROM conversation_inputs').map(row => JSON.parse(String(row.ingress_json ?? '{}')));
+    for (const input of ingress) expect(input.metadata?.promptContext).toBeUndefined();
   } finally { await f.close(); }
 });
