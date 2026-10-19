@@ -4,7 +4,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { randomUUID } from 'crypto';
 import { AgentOrchestrationRuntime } from '../../../src/orchestration/runtime';
-import { splitSpeechResponse } from '../../../src/orchestration/speech';
+import { SPEECH_OVERLAY, SPEECH_REMINDER, splitSpeechResponse } from '../../../src/orchestration/speech';
 import { displayPrefix } from '../../../src/orchestration/display-stream';
 import { progressReviewResult } from '../../../src/orchestration/progress-review';
 import { SessionStore } from '../../../src/session/store';
@@ -125,4 +125,6 @@ test('the scheduled report turn asks the reply to declare follow_up', async () =
   await withRuntime(payload('Review finished.', 'none'), async (_runtime, report) => {
     expect(await report('auto')).toContain('set follow_up to "continues" only when your reply tells the user work will continue');
   });
+  // A voice report turn may carry it too: the speech rules do not cap the object at two fields.
+  for (const rules of [SPEECH_OVERLAY, SPEECH_REMINDER]) expect(rules).toContain("plus any other field this turn's instructions explicitly ask for");
 });

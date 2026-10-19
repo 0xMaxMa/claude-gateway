@@ -101,6 +101,7 @@ const ALLOWED: Array<{ file: string; kind: Kind; count: number; category: 'struc
   { file: 'src/share/session-image-catalog.ts', kind: 'english-words', count: 1, category: 'structural', reason: 'Placeholder tokens such as "(photo)" that channel receivers write for captionless media.' },
   { file: 'src/share/session-video-catalog.ts', kind: 'english-words', count: 1, category: 'structural', reason: 'Placeholder tokens such as "(photo)" that channel receivers write for captionless media.' },
   { file: 'src/telegram/markdown.ts', kind: 'english-words', count: 1, category: 'structural', reason: 'Telegram HTML tag names.' },
+  { file: 'mcp/tools/telegram/lib/markdown.ts', kind: 'english-words', count: 1, category: 'structural', reason: 'Telegram HTML tag names.' },
   // ── debt: semantic heuristics to migrate (issue #629) ─────────────────────
   // Group B: direct Browser/Computer command shortcuts that parse user phrasing (PR #525, #570).
   { file: 'src/automation/browser-command.ts', kind: 'thai-regex', count: 3, category: 'debt', reason: 'Direct-command shortcut that parses user phrasing (group B).' },
@@ -119,12 +120,14 @@ const ALLOWED: Array<{ file: string; kind: Kind; count: number; category: 'struc
 function sourceFiles(dir: string): string[] {
   return readdirSync(dir, { withFileTypes: true }).flatMap(entry => {
     const path = join(dir, entry.name);
-    return entry.isDirectory() ? sourceFiles(path) : /\.tsx?$/.test(entry.name) && !entry.name.endsWith('.d.ts') ? [path] : [];
+    if (entry.isDirectory()) return entry.name === 'node_modules' ? [] : sourceFiles(path);
+    return /\.tsx?$/.test(entry.name) && !entry.name.endsWith('.d.ts') ? [path] : [];
   });
 }
 
 const root = join(__dirname, '..', '..');
-const findings = sourceFiles(join(root, 'src')).flatMap(path => scanSource(relative(root, path).split(sep).join('/'), readFileSync(path, 'utf8')));
+// Gateway source, the Bun MCP server and the shared lib/ modules: every runtime code path.
+const findings = ['src', 'mcp', 'lib'].flatMap(dir => sourceFiles(join(root, dir))).flatMap(path => scanSource(relative(root, path).split(sep).join('/'), readFileSync(path, 'utf8')));
 const counts = new Map<string, Finding[]>();
 for (const finding of findings) counts.set(`${finding.file} ${finding.kind}`, [...counts.get(`${finding.file} ${finding.kind}`) ?? [], finding]);
 const allowance = new Map(ALLOWED.map(entry => [`${entry.file} ${entry.kind}`, entry.count]));

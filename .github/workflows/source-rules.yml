@@ -6,12 +6,16 @@ on:
   pull_request:
     paths:
       - 'src/**'
+      - 'mcp/**'
+      - 'lib/**'
       - 'tests/unit/no-semantic-regex.test.ts'
       - '.github/workflows/source-rules.yml'
   push:
     branches: [main]
     paths:
       - 'src/**'
+      - 'mcp/**'
+      - 'lib/**'
       - 'tests/unit/no-semantic-regex.test.ts'
       - '.github/workflows/source-rules.yml'
   workflow_dispatch:
