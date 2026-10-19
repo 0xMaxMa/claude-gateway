@@ -5,6 +5,7 @@ set -euo pipefail
 
 PACKAGE='@0xmaxma/claude-gateway'
 FOLLOW_UP_WINDOW_SECONDS=86400
+MIN_SOAK_SECONDS=86400
 
 fail() {
   echo "FAIL: $*" >&2
@@ -62,9 +63,21 @@ main() {
   local times published_iso published_at
   times="$(npm view "$PACKAGE" time --json)"
   published_iso="$(jq -r --arg v "$version" '.[$v] // empty' <<<"$times")"
-  published_at="$(publish_epoch "$times" "$version")"
+  published_at="$(publish_epoch "$times" "$version")" \
+    || fail "could not parse publish time for $version"
   [[ -n "$published_at" ]] || fail "no publish time recorded for $version"
   pass "published $published_iso"
+
+  # Without a soak, the follow-up check below passes trivially because no fix has had time to ship.
+  local age=$(($(date +%s) - published_at))
+  ((age >= MIN_SOAK_SECONDS)) \
+    || fail "$version was published $((age / 3600))h ago; it must soak on next for at least $((MIN_SOAK_SECONDS / 3600))h"
+  pass "soaked on next for $((age / 3600))h"
+
+  # Capture first: a jq failure inside process substitution would not stop the loop.
+  local candidates
+  candidates="$(stable_versions_published_between "$times" "$published_at" $((published_at + FOLLOW_UP_WINDOW_SECONDS)))" \
+    || fail "could not parse npm publish times"
 
   local follow_ups=() candidate
   while IFS= read -r candidate; do
@@ -72,7 +85,7 @@ main() {
     if semver_lt "$version" "$candidate"; then
       follow_ups+=("$candidate")
     fi
-  done < <(stable_versions_published_between "$times" "$published_at" $((published_at + FOLLOW_UP_WINDOW_SECONDS)))
+  done <<<"$candidates"
   [[ ${#follow_ups[@]} -eq 0 ]] \
     || fail "follow-up release within 24h of $version: ${follow_ups[*]}"
   pass "no newer stable release within 24h after $version"

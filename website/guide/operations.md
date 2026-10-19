@@ -45,7 +45,7 @@ The package publishes to two npm [dist-tags](https://docs.npmjs.com/cli/v10/comm
 npm install -g @0xmaxma/claude-gateway@next
 ```
 
-A version moves from `next` to `latest` once it has been tested there and no follow-up fix came after it. Promotion re-tags the same published package, so the stable build is byte-for-byte the one that ran on `next`.
+A version moves from `next` to `latest` after it has been on `next` for at least 24 hours and no follow-up fix came after it. Promotion re-tags the same published package, so the stable build is byte-for-byte the one that ran on `next`.
 
 ```bash
 claude-gateway update
