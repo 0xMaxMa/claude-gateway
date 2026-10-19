@@ -317,6 +317,30 @@ describe("DiskUsage", () => {
     expect(calls.length).toBe(3);
   });
 
+  it("measures again after invalidate, and a run that started before it is not cached", async () => {
+    mkProject("a");
+    const calls: string[] = [];
+    let release!: () => void;
+    let gate: Promise<void> | null = null;
+    const d = new DiskUsage(root, {
+      sys: fakeSys({ a: async () => (await gate, sized(1)) }, calls),
+    });
+    await d.get(false);
+    d.invalidate();
+    const fresh = await d.get(false);
+    expect([fresh.ok && fresh.value.cached, calls.length]).toEqual([false, 2]);
+
+    gate = new Promise<void>((r) => (release = r));
+    d.invalidate();
+    const running = d.get(false);
+    await new Promise((r) => setTimeout(r, 20));
+    d.invalidate();
+    release();
+    await running;
+    const after = await d.get(false);
+    expect([after.ok && after.value.cached, calls.length]).toEqual([false, 4]);
+  });
+
   it("does not cache a root that cannot be listed", async () => {
     fs.rmSync(root, { recursive: true });
     fs.writeFileSync(root, "file");

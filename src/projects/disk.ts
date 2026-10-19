@@ -141,7 +141,8 @@ export interface DiskOptions {
  * is served like a plain read.
  */
 export class DiskUsage {
-  private readonly sys: DiskSys;
+  /** Also measures the folders Free up space offers, so both answers come from one du. */
+  readonly sys: DiskSys;
   private readonly now: () => number;
   private readonly projectTimeoutMs: number;
   private readonly overallTimeoutMs: number;
@@ -151,6 +152,8 @@ export class DiskUsage {
   private inflight: Promise<Result<DiskReport, ProjectsErrorCode>> | null =
     null;
   private lastRefreshAt = -Infinity;
+  /** Bumped by `invalidate`, so a run that started before it does not cache its stale answer. */
+  private generation = 0;
 
   constructor(
     private readonly root: string,
@@ -191,7 +194,14 @@ export class DiskUsage {
     return run;
   }
 
+  /** Drops the cached answer after the projects changed on disk. */
+  invalidate(): void {
+    this.cache = null;
+    this.generation++;
+  }
+
   private async compute(): Promise<Result<DiskReport, ProjectsErrorCode>> {
+    const generation = this.generation;
     const list = await listProjects(this.root);
     if (!list.ok) return list;
     const startedAt = this.now();
@@ -220,7 +230,7 @@ export class DiskUsage {
       computedAt: new Date(this.now()).toISOString(),
       cached: false,
     };
-    this.cache = { report, at: this.now() };
+    if (generation === this.generation) this.cache = { report, at: this.now() };
     return ok(report);
   }
 }
