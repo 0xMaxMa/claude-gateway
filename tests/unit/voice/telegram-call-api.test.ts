@@ -33,7 +33,7 @@ jest.mock('../../../src/voice/providers/registry', () => ({ sttProvider: jest.fn
   return tts;
 } }));
 // voice.live.fastAck is on by default: keep its acknowledgement call off the network.
-jest.mock('../../../src/voice/fast-ack', () => ({ fastAcknowledgement: jest.fn(async () => ({ outcome: 'skipped', elapsedMs: 0 })) }));
+jest.mock('../../../src/voice/fast-ack', () => ({ ...jest.requireActual('../../../src/voice/fast-ack'), fastAcknowledgement: jest.fn(async () => ({ outcome: 'skipped', elapsedMs: 0 })) }));
 
 const BOT_TOKEN = '123456:fixture-bot-token';
 /** initData exactly as Telegram signs it for a Mini App launch. */
@@ -196,7 +196,7 @@ test('a Telegram call speaks in the DM scope over the shared voice WebSocket, su
     stt.sessions[0].emit({ type: 'commit_done', commitId: stt.sessions[0].commitId! });
     await until(() => f.submit.mock.calls.length === 1);
     expect(f.submit.mock.calls[0]).toEqual(['tg-session', { kind: 'telegram', principalId: 'telegram:42', chatId: '42', threadKey: '' },
-      'what is on my calendar', listening.utterance_id, true, undefined, undefined, expect.any(Function)]);
+      'what is on my calendar', listening.utterance_id, true, undefined, undefined, expect.any(Function), { fastAck: true }]);
 
     // API keys authorize API calls only; reloading them must not drop a Telegram call.
     f.api.invalidateAuthorization();

@@ -211,7 +211,7 @@ test('short speech segments merge once; resuming speech defers admission and man
     expect(submit).not.toHaveBeenCalled(); // Candidate speech is still being transcribed.
     await say('หมามีปีก', true);
     expect(submit).toHaveBeenCalledTimes(1);
-    expect(submit.mock.calls[0]).toEqual(['ช่วยสร้างรูป หมามีปีก', expect.any(String), expect.any(Function)]);
+    expect(submit.mock.calls[0]).toEqual(['ช่วยสร้างรูป หมามีปีก', expect.any(String), expect.any(Function), { fastAck: false }]);
     expect(controls.filter(c => c.type === 'stt.final').map(c => c.text)).toEqual(['ช่วยสร้างรูป หมามีปีก']);
     expect(controls.filter(c => c.type === 'utterance.accepted')).toHaveLength(1);
   } finally { await session.close(); }
@@ -636,7 +636,7 @@ test('mute right after speech answers it without the silence timer, and the repl
     stt.sessions.at(-1)!.emit({ type: 'commit_done', commitId: stt.sessions.at(-1)!.commitId! });
     await muting;
     expect(submit).toHaveBeenCalledTimes(1);
-    expect(submit).toHaveBeenCalledWith('สรุปให้หน่อย', listening.utterance_id, expect.any(Function));
+    expect(submit).toHaveBeenCalledWith('สรุปให้หน่อย', listening.utterance_id, expect.any(Function), { fastAck: false });
     expect(controls.at(-1)).toMatchObject({ type: 'voice.state', state: 'muted' });
     stream.push({ responseId: 'reply', text: 'ได้ครับ' });
     await waitFor(() => audio.length === 1);
