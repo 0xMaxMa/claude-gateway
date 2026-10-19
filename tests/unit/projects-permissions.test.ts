@@ -22,7 +22,7 @@ const ADMIN_ONLY_ROUTES = [
   'POST /v1/projects', 'DELETE /v1/projects/:name', 'POST /v1/projects/:name/running/stop', 'POST /v1/projects/:name/running/start',
 ];
 const READ_ROUTES = [
-  'GET /v1/projects', 'GET /v1/projects/git-summary',
+  'GET /v1/projects', 'GET /v1/projects/git-summary', 'GET /v1/projects/disk',
   'GET /v1/projects/running', 'GET /v1/projects/:name/git', 'GET /v1/projects/:name/running',
 ];
 
@@ -54,7 +54,7 @@ describe('the /v1/projects routes', () => {
     return (key ? req.set('Authorization', `Bearer ${key.key}`) : req).send({ name: 'made-by-test', confirm: 'app' });
   };
 
-  it('registers the nine routes, and marks exactly create, delete, stop and start as admin', () => {
+  it('registers the ten routes, and marks exactly create, delete, stop and start as admin', () => {
     const all = routes().map((r) => `${r.method} ${r.path}`);
     expect(all.sort()).toEqual([...ADMIN_ONLY_ROUTES, ...READ_ROUTES].sort());
     expect(routes().filter((r) => r.auth === 'admin').map((r) => `${r.method} ${r.path}`).sort()).toEqual([...ADMIN_ONLY_ROUTES].sort());

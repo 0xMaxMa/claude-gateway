@@ -1,9 +1,9 @@
-import { spawn } from 'child_process';
-import { promises as fsp } from 'fs';
-import { listProjects, mapLimit, resolveProjectDir } from './fs';
-import { ok, ProjectName, ProjectsErrorCode, Result } from './paths';
+import { spawn } from "child_process";
+import { promises as fsp } from "fs";
+import { listProjects, mapLimit, resolveProjectDir } from "./fs";
+import { ok, ProjectName, ProjectsErrorCode, Result } from "./paths";
 
-export type DiskState = 'ok' | 'partial' | 'failed';
+export type DiskState = "ok" | "partial" | "failed";
 
 export interface DiskNumbers {
   total: number;
@@ -51,13 +51,13 @@ export interface DiskSys {
  * and `-x` keeps du on the folder's own filesystem so a mount inside a project is not charged to it.
  */
 export function duArgs(dir: string): string[] {
-  return ['-s', '-k', '-x', '--', dir];
+  return ["-s", "-k", "-x", "--", dir];
 }
 
 /** The first output line is `<kilobytes><TAB><path>`. Anything else is not a total. */
 export function parseDu(stdout: string): number | null {
-  const first = stdout.split('\n', 1)[0];
-  const tab = first.indexOf('\t');
+  const first = stdout.split("\n", 1)[0];
+  const tab = first.indexOf("\t");
   if (tab <= 0) return null;
   const digits = first.slice(0, tab);
   const kb = Number(digits);
@@ -66,17 +66,20 @@ export function parseDu(stdout: string): number | null {
 }
 
 function duEnv(): NodeJS.ProcessEnv {
-  return { PATH: process.env.PATH, LC_ALL: 'C' };
+  return { PATH: process.env.PATH, LC_ALL: "C" };
 }
 
 function runDu(dir: string, timeoutMs: number): Promise<DuOutcome> {
   return new Promise((resolve) => {
-    const child = spawn('du', duArgs(dir), { env: duEnv(), stdio: ['ignore', 'pipe', 'ignore'] });
+    const child = spawn("du", duArgs(dir), {
+      env: duEnv(),
+      stdio: ["ignore", "pipe", "ignore"],
+    });
     const chunks: Buffer[] = [];
     let size = 0;
     let timedOut = false;
     let settled = false;
-    child.stdout.on('data', (c: Buffer) => {
+    child.stdout.on("data", (c: Buffer) => {
       size += c.length;
       if (size <= 64 * 1024) chunks.push(c);
     });
@@ -84,13 +87,19 @@ function runDu(dir: string, timeoutMs: number): Promise<DuOutcome> {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve({ bytes: timedOut ? null : parseDu(Buffer.concat(chunks).toString('utf8')), exitCode, timedOut });
+      resolve({
+        bytes: timedOut
+          ? null
+          : parseDu(Buffer.concat(chunks).toString("utf8")),
+        exitCode,
+        timedOut,
+      });
     };
-    child.on('error', () => settle(null));
-    child.on('close', settle);
+    child.on("error", () => settle(null));
+    child.on("close", settle);
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill('SIGKILL');
+      child.kill("SIGKILL");
       setTimeout(() => settle(null), KILL_GRACE_MS).unref();
     }, timeoutMs);
   });
@@ -111,10 +120,10 @@ export function systemDiskSys(platform: string = process.platform): DiskSys {
 }
 
 function toProjectDisk(name: ProjectName, o: DuOutcome): ProjectDisk {
-  if (o.timedOut) return { name, bytes: o.bytes, state: 'partial' };
-  if (o.bytes === null) return { name, bytes: null, state: 'failed' };
+  if (o.timedOut) return { name, bytes: o.bytes, state: "partial" };
+  if (o.bytes === null) return { name, bytes: null, state: "failed" };
   // du exits 1 when it could not read part of the tree but still prints the total of what it read.
-  return { name, bytes: o.bytes, state: o.exitCode === 0 ? 'ok' : 'partial' };
+  return { name, bytes: o.bytes, state: o.exitCode === 0 ? "ok" : "partial" };
 }
 
 export interface DiskOptions {
@@ -139,7 +148,8 @@ export class DiskUsage {
   private readonly cacheMs: number;
   private readonly refreshGapMs: number;
   private cache: { report: DiskReport; at: number } | null = null;
-  private inflight: Promise<Result<DiskReport, ProjectsErrorCode>> | null = null;
+  private inflight: Promise<Result<DiskReport, ProjectsErrorCode>> | null =
+    null;
   private lastRefreshAt = -Infinity;
 
   constructor(
@@ -155,12 +165,21 @@ export class DiskUsage {
   }
 
   get(refresh: boolean): Promise<Result<DiskReport, ProjectsErrorCode>> {
-    if (this.sys.platform === 'win32') {
-      return Promise.resolve(ok({ supported: false, disk: null, projects: [], computedAt: new Date(this.now()).toISOString(), cached: false }));
+    if (this.sys.platform === "win32") {
+      return Promise.resolve(
+        ok({
+          supported: false,
+          disk: null,
+          projects: [],
+          computedAt: new Date(this.now()).toISOString(),
+          cached: false,
+        }),
+      );
     }
     if (this.inflight) return this.inflight;
     const now = this.now();
-    const wantsRefresh = refresh && now - this.lastRefreshAt >= this.refreshGapMs;
+    const wantsRefresh =
+      refresh && now - this.lastRefreshAt >= this.refreshGapMs;
     if (!wantsRefresh && this.cache && now - this.cache.at < this.cacheMs) {
       return Promise.resolve(ok({ ...this.cache.report, cached: true }));
     }
@@ -177,17 +196,31 @@ export class DiskUsage {
     if (!list.ok) return list;
     const startedAt = this.now();
     const deadline = startedAt + this.overallTimeoutMs;
-    const projects = await mapLimit(list.value.projects, CONCURRENCY, async ({ name }): Promise<ProjectDisk> => {
-      const dir = await resolveProjectDir(this.root, name);
-      if (!dir.ok) return { name, bytes: null, state: 'failed' };
-      const left = deadline - this.now();
-      if (left <= 0) return { name, bytes: null, state: 'partial' };
-      return toProjectDisk(name, await this.sys.du(dir.value, Math.min(this.projectTimeoutMs, left)));
-    });
-    const disk = list.value.exists ? await this.sys.statfs(list.value.root) : null;
-    const report: DiskReport = { supported: true, disk, projects, computedAt: new Date(this.now()).toISOString(), cached: false };
+    const projects = await mapLimit(
+      list.value.projects,
+      CONCURRENCY,
+      async ({ name }): Promise<ProjectDisk> => {
+        const dir = await resolveProjectDir(this.root, name);
+        if (!dir.ok) return { name, bytes: null, state: "failed" };
+        const left = deadline - this.now();
+        if (left <= 0) return { name, bytes: null, state: "partial" };
+        return toProjectDisk(
+          name,
+          await this.sys.du(dir.value, Math.min(this.projectTimeoutMs, left)),
+        );
+      },
+    );
+    const disk = list.value.exists
+      ? await this.sys.statfs(list.value.root)
+      : null;
+    const report: DiskReport = {
+      supported: true,
+      disk,
+      projects,
+      computedAt: new Date(this.now()).toISOString(),
+      cached: false,
+    };
     this.cache = { report, at: this.now() };
     return ok(report);
   }
 }
-
