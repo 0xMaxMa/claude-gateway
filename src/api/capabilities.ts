@@ -1,8 +1,11 @@
 import { Router, Request, Response } from 'express';
 import { ApiKey } from '../types';
 import { CHAT_CHANNELS, type ChatChannel } from '../history/types';
-import { createApiAuthMiddleware } from './auth';
+import { createApiAuthMiddleware, isAdmin } from './auth';
 import { GATEWAY_VERSION } from './gateway-version';
+import { gatewayOrchestrationEnabled } from '../orchestration/gateway-config';
+import { projectsEnabled } from '../projects/chat';
+import type { GatewayConfig } from '../types';
 
 /**
  * Capability manifest — the single place that declares which optional features
@@ -37,20 +40,50 @@ import { GATEWAY_VERSION } from './gateway-version';
  */
 export const CROSS_CHANNEL_MESSAGE_CHANNELS: readonly ChatChannel[] = [...CHAT_CHANNELS];
 
+/**
+ * Project operations served by projects-router.ts. Clients gate listing on `includes('list')`, the git routes on
+ * `includes('git')`, project-bound chat on `includes('chat')`, running status on `includes('run')`, creating a project
+ * on `includes('create')`, starting one on `includes('start')`, stopping what runs in one on `includes('stop')`, and
+ * deleting one on `includes('delete')`, disk usage on `includes('disk')`, and Free up space on `includes('cleanup')`. The gateway serves no project files; they are viewed in code-server.
+ */
+export const PROJECTS_CAPABILITIES = ['list', 'create', 'git', 'chat', 'run', 'start', 'delete', 'stop', 'disk', 'cleanup'] as const;
+export type ProjectsCapability = (typeof PROJECTS_CAPABILITIES)[number];
+
+/** The operations projects-router.ts serves only to an admin key; every other token is open to any key. */
+export const PROJECTS_ADMIN_CAPABILITIES: ReadonlySet<ProjectsCapability> = new Set(['create', 'start', 'delete', 'stop', 'cleanup']);
+
 export interface CapabilitiesResponse {
   /** Gateway version from package.json. Informational — clients should key off `capabilities`, not parse this. */
   version: string;
   capabilities: {
     cross_channel_message: ChatChannel[];
+    projects: ProjectsCapability[];
   };
+  /** Why `projects` is empty; absent when Projects is usable. */
+  projectsUnavailable?: ProjectsUnavailable;
 }
 
-export function buildCapabilitiesResponse(version: string = GATEWAY_VERSION): CapabilitiesResponse {
+/** `disabled`: the gateway serves no Projects API. */
+export type ProjectsUnavailable = 'disabled';
+
+/**
+ * The tokens `apiKey` may use. Project-bound chat is accepted through the queued-admission path, which needs
+ * orchestration, so a gateway with orchestration off does not advertise `chat`. A non-admin key gets every token but
+ * the admin-only ones. Without a config or a key (tests) the gateway-wide answer is given.
+ */
+export function projectsAvailability(config?: GatewayConfig, apiKey?: ApiKey): { projects: ProjectsCapability[]; projectsUnavailable?: ProjectsUnavailable } {
+  if (config && !projectsEnabled(config)) return { projects: [], projectsUnavailable: 'disabled' };
+  const orchestrated = !config || gatewayOrchestrationEnabled(config.gateway.orchestration);
+  const admin = !apiKey || isAdmin(apiKey);
+  return { projects: PROJECTS_CAPABILITIES.filter((c) => (c !== 'chat' || orchestrated) && (admin || !PROJECTS_ADMIN_CAPABILITIES.has(c))) };
+}
+
+export function buildCapabilitiesResponse(version: string = GATEWAY_VERSION, config?: GatewayConfig, apiKey?: ApiKey): CapabilitiesResponse {
+  const { projects, projectsUnavailable } = projectsAvailability(config, apiKey);
   return {
     version,
-    capabilities: {
-      cross_channel_message: [...CROSS_CHANNEL_MESSAGE_CHANNELS],
-    },
+    capabilities: { cross_channel_message: [...CROSS_CHANNEL_MESSAGE_CHANNELS], projects },
+    ...(projectsUnavailable ? { projectsUnavailable } : {}),
   };
 }
 
@@ -63,11 +96,11 @@ export function buildCapabilitiesResponse(version: string = GATEWAY_VERSION): Ca
  * endpoint 404s rather than serving open access. `apiKeys` is therefore always
  * the configured, non-empty key set.
  */
-export function createCapabilitiesRouter(apiKeys: ApiKey[]): Router {
+export function createCapabilitiesRouter(apiKeys: ApiKey[], config?: GatewayConfig): Router {
   const router = Router();
   router.use(createApiAuthMiddleware(apiKeys));
-  router.get('/v1/capabilities', (_req: Request, res: Response) => {
-    res.json(buildCapabilitiesResponse());
+  router.get('/v1/capabilities', (req: Request, res: Response) => {
+    res.json(buildCapabilitiesResponse(GATEWAY_VERSION, config, (req as Request & { apiKey: ApiKey }).apiKey));
   });
   return router;
 }

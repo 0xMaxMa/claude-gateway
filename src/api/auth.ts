@@ -73,3 +73,6 @@ export function canWriteAgent(apiKey: ApiKey, agentId: string): boolean {
 export function isAdmin(apiKey: ApiKey): boolean {
   return apiKey.admin === true;
 }
+
+/** The 403 body for creating, starting, stopping or deleting a project without an admin key. */
+export const PROJECTS_ADMIN_REQUIRED = { error: 'An admin API key is required for Projects', code: 'forbidden_key' } as const;

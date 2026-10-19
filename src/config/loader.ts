@@ -6,6 +6,8 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { GatewayConfig, Logger } from '../types';
+import { expandHome, pathWithin } from '../utils/paths';
+import { DEFAULT_PROJECTS_ROOT, parseProjectName } from '../projects/paths';
 import { resolveGatewayPublicUrl } from './public-url';
 import { upgradeAgentWhatsAppAccounts } from './whatsapp-accounts';
 import { resolveOrchestrationConfig, OrchestrationConfig } from '../orchestration/config';
@@ -164,6 +166,11 @@ export interface LoadConfigOptions {
    * diagnosable there too — see issue #472.
    */
   onPublicUrlUnset?: () => void;
+  /**
+   * Called with the text of each Projects warning (an unusable root, a malformed `enabled`, unknown keys). Same
+   * rationale as the callbacks above: the `console.warn` alone never reaches `logs/gateway.log`.
+   */
+  onWarning?: (message: string) => void;
 }
 
 /**
@@ -186,6 +193,77 @@ export function logSkippedAgents(
   }
 }
 
+const PROJECTS_KEYS = ['root', 'trusted', 'enabled'];
+
+/** The spelling every check and the runtime agree on: no surrounding spaces, no trailing slashes (`/` stays). */
+function cleanProjectsRoot(raw: string): string {
+  const trimmed = raw.trim();
+  return trimmed.replace(/\/+$/, '') || (trimmed.startsWith('/') ? '/' : trimmed);
+}
+
+/** Unset, or spelled like the default in any clean or unclean way (config.template.json ships it): both mean "the operator chose nothing". */
+function isDefaultProjectsRoot(raw: unknown): boolean {
+  return raw === undefined || (typeof raw === 'string' && expandHome(cleanProjectsRoot(raw)) === expandHome(DEFAULT_PROJECTS_ROOT));
+}
+
+/** The folder a root resolves to when that path (not the spelling) holds ":", else null. A link into `a:b` breaks the fence like a typed `a:b`. */
+function colonRealRoot(root: unknown): string | null {
+  if (typeof root !== 'string') return null;
+  try {
+    const real = fs.realpathSync(expandHome(root));
+    return real.includes(':') ? real : null;
+  } catch {
+    return null;
+  }
+}
+
+function validateProjectsRoot(raw: unknown, configPath: string): void {
+  if (typeof raw !== 'string' || !raw.trim()) {
+    throw new ConfigValidationError('gateway.projects.root must be a non-empty string');
+  }
+  const root = expandHome(raw);
+  if (!path.isAbsolute(root)) {
+    throw new ConfigValidationError(`gateway.projects.root must be an absolute path or start with ~/ (got "${raw}")`);
+  }
+  const exposed = exposedByProjectsRoot(root, configPath);
+  if (exposed !== null) {
+    throw new ConfigValidationError(
+      `gateway.projects.root "${raw}" must not be or contain ${exposed}; the Projects API would expose it`,
+    );
+  }
+}
+
+/**
+ * The Projects API serves every file under its root with no denylist, so a root
+ * at or above HOME or the config dir would expose ~/.ssh and config.json.
+ * Returns the guarded directory the root contains, or null.
+ */
+function exposedByProjectsRoot(root: string, configPath: string): string | null {
+  // realpath when the path exists, so a symlink to HOME is caught too.
+  const real = (p: string) => {
+    try {
+      return fs.realpathSync(p);
+    } catch {
+      return path.resolve(p);
+    }
+  };
+  const resolved = real(root);
+  const home = os.homedir();
+  const guards = [home, path.join(home, '.claude-gateway'), path.dirname(path.resolve(configPath))];
+  return guards.find((guarded) => pathWithin(resolved, real(guarded))) ?? null;
+}
+
+/** Trust is operator config only, so a name the API could never resolve is a typo worth failing on. */
+function validateTrustedProjects(raw: unknown): void {
+  if (!Array.isArray(raw) || raw.some((n) => typeof n !== 'string')) {
+    throw new ConfigValidationError('gateway.projects.trusted must be an array of project names');
+  }
+  const bad = raw.find((n) => !parseProjectName(n).ok);
+  if (bad !== undefined) {
+    throw new ConfigValidationError(`gateway.projects.trusted contains an invalid project name "${bad}"`);
+  }
+}
+
 /**
  * Load and validate config.json from the given path.
  * Interpolates ${VAR} env vars throughout the config.
@@ -203,6 +281,11 @@ export function loadConfig(configPath: string, options?: LoadConfigOptions): Gat
     console.warn(`[gateway] Skipping agent "${id}": ${reason}`);
     skippedAgents.push(id);
     options?.onSkippedAgent?.({ id, reason, ...(missingVar ? { missingVar } : {}) });
+  };
+
+  const warnProjects = (message: string): void => {
+    console.warn(message);
+    options?.onWarning?.(message);
   };
 
   let raw: string;
@@ -381,6 +464,55 @@ export function loadConfig(configPath: string, options?: LoadConfigOptions): Gat
       );
     }
     interpolatedGateway.publicUrl = normalizedPublicUrl;
+  }
+
+  const projects = interpolatedGateway.projects;
+  if (projects !== undefined) {
+    if (typeof projects !== 'object' || projects === null || Array.isArray(projects)) {
+      throw new ConfigValidationError('gateway.projects must be an object');
+    }
+    const projectsConfig = projects as Record<string, unknown>;
+    if (typeof projectsConfig.root === 'string' && projectsConfig.root.trim()) projectsConfig.root = cleanProjectsRoot(projectsConfig.root);
+    const root = projectsConfig.root;
+    if (root !== undefined && !isDefaultProjectsRoot(root)) validateProjectsRoot(root, configPath);
+    const colonRoot = typeof root === 'string' && root.includes(':') ? root : colonRealRoot(root ?? DEFAULT_PROJECTS_ROOT);
+    if (colonRoot !== null && projectsConfig.enabled !== false) {
+      warnProjects(
+        `[gateway] gateway.projects.root "${colonRoot}" holds ":", which git's discovery fence (GIT_CEILING_DIRECTORIES) cannot express, so the Projects API is disabled.\n` +
+        '          Set gateway.projects.root to a path without ":".',
+      );
+      projectsConfig.enabled = false;
+    }
+    if ('enabled' in projectsConfig && typeof projectsConfig.enabled !== 'boolean') {
+      warnProjects(`[gateway] gateway.projects.enabled must be true or false (got ${JSON.stringify(projectsConfig.enabled)}); ignoring it, so Projects keeps its default, which is on.`);
+      delete projectsConfig.enabled;
+    }
+    const trusted = (projects as Record<string, unknown>).trusted;
+    if (trusted !== undefined) validateTrustedProjects(trusted);
+    const unknown = Object.keys(projects).filter((key) => !PROJECTS_KEYS.includes(key));
+    if (unknown.length > 0) {
+      warnProjects(`[gateway] Ignoring unknown gateway.projects keys: ${unknown.join(', ')}. Known keys: ${PROJECTS_KEYS.join(', ')}.`);
+    }
+  }
+  // An operator who never chose a root, or whose config.json only carries the template's default, gets a warning, not a gateway that refuses to start.
+  if (isDefaultProjectsRoot((projects as { root?: unknown } | undefined)?.root)) {
+    const exposed = exposedByProjectsRoot(expandHome(DEFAULT_PROJECTS_ROOT), configPath);
+    if (exposed !== null) {
+      warnProjects(
+        `[gateway] The default projects root ${DEFAULT_PROJECTS_ROOT} is or contains ${exposed}, so the Projects API is disabled.\n` +
+        '          Set gateway.projects.root to a folder that holds only projects.',
+      );
+      interpolatedGateway.projects = { ...(projects as object | undefined), enabled: false };
+    } else if (projects === undefined) {
+      const colonRoot = colonRealRoot(DEFAULT_PROJECTS_ROOT);
+      if (colonRoot !== null) {
+        warnProjects(
+          `[gateway] The default projects root ${DEFAULT_PROJECTS_ROOT} resolves to "${colonRoot}", which holds ":", so the Projects API is disabled.\n` +
+          '          Set gateway.projects.root to a path without ":".',
+        );
+        interpolatedGateway.projects = { enabled: false };
+      }
+    }
   }
 
   // Interpolate each agent individually — skip agents with missing env vars

@@ -83,6 +83,23 @@ Sessions are stored at `sessions/api-{chat_id}/` — symmetric with `telegram-{i
 | `GET` | `/api/v1/agents/:agentId/files/:filename` | Key | Read a workspace file |
 | `PUT` | `/api/v1/agents/:agentId/files/:filename` | Write | Write a workspace file |
 
+## Projects API {#projects-api}
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `GET` | `/api/v1/projects` | Key | List projects under the projects root (default `~/projects`) |
+| `POST` | `/api/v1/projects` | Admin key | Create a project directory, optionally with `git init` |
+| `DELETE` | `/api/v1/projects/:name` | Admin key | Delete a project directory and everything in it |
+| `GET` | `/api/v1/projects/git-summary` | Key | Git sync summary of every project that is a repository |
+| `GET` | `/api/v1/projects/disk` | Key | Disk space each project occupies and how full the disk is |
+| `GET` | `/api/v1/projects/cleanup` | Admin key | Folders Free up space would remove, with sizes |
+| `POST` | `/api/v1/projects/cleanup` | Admin key | Remove chosen `node_modules` and virtual environment folders |
+| `GET` | `/api/v1/projects/:name/git` | Key | Git status of one project |
+| `GET` | `/api/v1/projects/running` | Key | Listening processes of every project |
+| `GET` | `/api/v1/projects/:name/running` | Key | Listening processes of one project |
+| `POST` | `/api/v1/projects/:name/running/stop` | Admin key | Stop a project's listening processes |
+| `POST` | `/api/v1/projects/:name/running/start` | Admin key | Start a project without an agent |
+
 ## Telegram Channel API {#telegram-channel-api}
 
 | Method | Path | Auth | Description |
@@ -165,6 +182,7 @@ Boot restore (`gateway.appRestore`): at startup every app stored as `running` is
 |--------|------|------|-------------|
 | `GET` | `/api/v1/connectors` | Key | List every connector with its connected state |
 | `GET` | `/api/v1/connectors/:id/status` | Key | Connected boolean for a single connector (for polling) |
+| `GET` | `/api/v1/connectors/github/account` | Admin | GitHub account behind the `github` connector token, checked live against GitHub |
 | `POST` | `/api/v1/connectors/:id/connect` | Admin | Store a pasted token |
 | `POST` | `/api/v1/connectors/:id/oauth/receive` | Admin | Accept an `access_token` + connector shape pushed by an external control plane |
 | `DELETE` | `/api/v1/connectors/:id` | Admin | Disconnect — clears the credential; removes the whole entry for `none`/`external` connectors |

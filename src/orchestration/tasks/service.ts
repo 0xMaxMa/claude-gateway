@@ -6,7 +6,10 @@ import {computerActionText,computerOutcomeText} from '../../automation/computer-
 import {browserOutcomeText} from '../../automation/browser-outcome';
 import {textCommand} from '../../automation/direct-command';
 import { parentVerifiableBrowserResult } from '../../jev/browser-contract';
+import { promises as fsp } from 'fs';
 import { isAbsolute } from 'path';
+import { resolveInProject, type ProjectChatError, type ProjectCwd } from '../../projects/chat';
+import type { Result } from '../../projects/paths';
 import { parseWorkflow, advanceWorkflow } from '../workflow';
 import { advanceTiming } from './timing';
 import { taskDirective } from './task-directive';
@@ -19,7 +22,7 @@ import { createHash, randomUUID } from 'crypto';
 import { OrchestrationStore, LISTED_TASK_SQL, boundedText, payloadHash } from '../store';
 import { resolveOrchestrationConfig, OrchestrationConfig } from '../config';
 import { MAX_INTAKE_INPUTS } from '../conversation-intake';
-import { CommandContext, OrchestrationError, TaskSnapshot, TaskRevision, TaskAttempt, TaskResult, WorkerOutcome, TERMINAL_TASK_STATES, ChangeMode, PublicTaskSnapshot, publicTask } from '../types';
+import { CommandContext, ConversationScope, OrchestrationError, TaskSnapshot, TaskRevision, TaskAttempt, TaskResult, WorkerOutcome, TERMINAL_TASK_STATES, ChangeMode, PublicTaskSnapshot, publicTask } from '../types';
 import type { Effort } from '../../agent/model-registry';
 import { SUBAGENT_MAX_DEPTH } from '../subagent-tool-schemas';
 import { markRestartRecovery, restartResumable, resumeAfterRestart } from '../restart-resume';
@@ -46,7 +49,11 @@ export function mergeContextRefs(supplied: unknown, inputRefs: string[]): unknow
   return [...new Set([...assertAgentContextRefs(supplied), ...inputRefs])];
 }
 
-export interface SpawnTask { browserFields?:unknown; computerInputs?:TaskRevision["computerInputs"]; gatewayTarget?: import("../types").GatewayTaskTarget; workingDirectory?: string; title: string; instructions: string; targetProfile: string; skill?: import('../skills').TaskSkill; contextRefs?: string[]; continueTaskId?: string; continuationPolicy?: 'after_success' | 'after_terminal';
+/** Which project, if any, a conversation's session is bound to. Only the gateway session store knows. */
+export type SessionProject = (scope: Pick<ConversationScope, 'source' | 'agentSessionId' | 'chatId'>) => Promise<Result<ProjectCwd, ProjectChatError> | undefined>;
+export interface ProjectPin { name: string; dir: string }
+
+export interface SpawnTask { project?: ProjectPin; browserFields?:unknown; computerInputs?:TaskRevision["computerInputs"]; gatewayTarget?: import("../types").GatewayTaskTarget; workingDirectory?: string; title: string; instructions: string; targetProfile: string; skill?: import('../skills').TaskSkill; contextRefs?: string[]; continueTaskId?: string; continuationPolicy?: 'after_success' | 'after_terminal';
   /** Model id already resolved against the registry by the caller; `requestedModel` is what was asked for. */
   model?: string; requestedModel?: string; effort?: import('../../agent/model-registry').Effort; }
 
@@ -134,8 +141,31 @@ function recordAction(task: TaskSnapshot, revision: number, command: string, out
 export class TaskService {
   private config;
   readonly pool: WorkerPool;
-  constructor(readonly store: OrchestrationStore, config?: OrchestrationConfig, private readonly defaultProjectRoot = '') { this.config = resolveOrchestrationConfig(config); this.pool = new WorkerPool(store); }
+  constructor(readonly store: OrchestrationStore, config?: OrchestrationConfig, private readonly defaultProjectRoot = '', private readonly sessionProject?: SessionProject,
+    private readonly workerHarness?: (model?: string) => 'claude' | 'codex') { this.config = resolveOrchestrationConfig(config); this.pool = new WorkerPool(store); }
   configure(config?: OrchestrationConfig): void { this.config = resolveOrchestrationConfig(config); }
+
+  /** A project-bound chat's tasks run in its project folder. Resolved before the synchronous spawn transaction. */
+  async projectPin(context: CommandContext, workingDirectory?: unknown, continueTaskId?: unknown): Promise<ProjectPin | undefined> {
+    if (this.store.get('SELECT action_id FROM task_commands WHERE action_id=?', context.actionId)) return undefined;
+    const conversation = this.store.get('SELECT source,agent_session_id,chat_id FROM conversations WHERE id=?', context.conversationId);
+    const project = conversation && await this.sessionProject?.({ source: String(conversation.source) as ConversationScope['source'], agentSessionId: String(conversation.agent_session_id), chatId: String(conversation.chat_id) });
+    if (!project) return undefined;
+    if (this.config.tasks.workspaceMode !== 'host') throw new OrchestrationError('PROJECT_UNSUPPORTED_AGENT', 'No task was queued: project chats need host workspace mode.');
+    if (this.workerHarness?.(context.model) === 'codex') throw new OrchestrationError('PROJECT_UNSUPPORTED_AGENT', 'No task was queued: project tasks cannot run on the Codex worker harness.');
+    if (!project.ok) throw new OrchestrationError('PROJECT_UNAVAILABLE', 'No task was queued: this chat\'s project folder is no longer available.');
+    if (workingDirectory === undefined) return { name: project.value.name, dir: await this.priorProjectDir(context, project.value, continueTaskId) ?? project.value.dir };
+    const dir = typeof workingDirectory === 'string' ? await resolveInProject(project.value.dir, workingDirectory) : undefined;
+    if (!dir?.ok || !(await fsp.stat(dir.value).catch(() => null))?.isDirectory()) throw new OrchestrationError('WORKING_DIRECTORY_OUTSIDE_PROJECT', `No task was queued: working_directory must be an existing folder inside this chat's project folder ${project.value.dir}, absolute or relative to it.`);
+    return { name: project.value.name, dir: dir.value };
+  }
+  /** A follow-up stays in the folder its prior task ran in, while that folder is still inside the project. */
+  private async priorProjectDir(context: CommandContext, project: ProjectCwd, continueTaskId: unknown): Promise<string | undefined> {
+    const prior = typeof continueTaskId === 'string' ? this.store.task(continueTaskId) : undefined;
+    const dir = prior?.conversationId === context.conversationId && prior.project === project.name ? prior.resourceProfile?.projectRoot : undefined;
+    const inside = dir ? await resolveInProject(project.dir, dir) : undefined;
+    return inside?.ok ? inside.value : undefined;
+  }
 
   /** Admission feedback reaches the agent before a doomed task is committed. */
   async validateSpawnProfile(context: CommandContext, targetProfile: string): Promise<void> {
@@ -285,7 +315,8 @@ export class TaskService {
   }
   spawn(context: CommandContext, command: SpawnTask): TaskSnapshot {
     if(command.computerInputs!==undefined){command.computerInputs=ComputerInputs.parse(command.computerInputs);if(command.gatewayTarget?.adapter!=='computer')throw new OrchestrationError('INVALID_INPUT');}
-    if (command.workingDirectory !== undefined) {
+    // A project pin already validated working_directory and is the root the task runs in; the raw value is only payload.
+    if (command.workingDirectory !== undefined && !command.project) {
       if (this.config.tasks.workspaceMode !== 'host') throw new OrchestrationError('WORKING_DIRECTORY_HOST_ONLY');
       if (typeof command.workingDirectory !== 'string' || !isAbsolute(command.workingDirectory) || /[\r\n\0]/.test(command.workingDirectory) || Buffer.byteLength(command.workingDirectory) > 4096) throw new OrchestrationError('INVALID_WORKING_DIRECTORY');
     }
@@ -299,7 +330,9 @@ export class TaskService {
     if (!['default-worker', 'media-worker', 'skill-worker', 'gateway-managed'].includes(command.targetProfile)) throw new OrchestrationError('UNKNOWN_WORKER_PROFILE');
     if ((command.targetProfile === 'gateway-managed') !== Boolean(command.gatewayTarget)) throw new OrchestrationError('INVALID_GATEWAY_TARGET');
     if (command.gatewayTarget && (command.workingDirectory || command.skill || command.contextRefs?.length || command.model || command.effort)) throw new OrchestrationError('INVALID_GATEWAY_TARGET');
-    return this.command(context, 'spawn', command, true, () => {
+    // The pin is the gateway's, not the caller's: a retry skips resolving it and must still match.
+    const { project: _pin, ...payload } = command;
+    return this.command(context, 'spawn', payload, true, () => {
       const conversation = this.store.get('SELECT * FROM conversations WHERE id=?', context.conversationId)!;
       let replaced:TaskSnapshot|undefined;
       if(['browser','computer'].includes(command.gatewayTarget?.adapter ?? '')) {
@@ -357,8 +390,9 @@ export class TaskService {
       else if (context.model && !command.gatewayTarget) task.model = context.model;
       const effort = command.effort ?? (command.model ? undefined : prior?.effort);
       if (effort) task.effort = effort;
-      const projectRoot = command.workingDirectory || (this.config.tasks.workspaceMode === 'host' && prior?.resourceProfile?.mode === 'host' ? prior.resourceProfile.projectRoot : undefined) || this.config.tasks.projectRoot || this.defaultProjectRoot;
+      const projectRoot = command.project?.dir || command.workingDirectory || (this.config.tasks.workspaceMode === 'host' && prior?.resourceProfile?.mode === 'host' ? prior.resourceProfile.projectRoot : undefined) || this.config.tasks.projectRoot || this.defaultProjectRoot;
       if (projectRoot && !command.gatewayTarget) task.resourceProfile = { projectRoot, mode: this.config.tasks.workspaceMode };
+      if (command.project && !command.gatewayTarget) task.project = command.project.name;
       this.store.run('INSERT INTO tasks VALUES(?,?,?,?,?,?,?,?,?)', task.taskId, task.conversationId, task.state, 1, 1, null, JSON.stringify(task), now, now);
       const revision: TaskRevision = { requestBrowserConsent:command.gatewayTarget?.adapter==='browser', taskId: task.taskId, revision: 1, instructions: command.instructions, computerInputs:command.computerInputs,
         answers:prepared, contextRefs: command.contextRefs ?? [], mode: 'when_ready', originatingInputId: context.inputId };

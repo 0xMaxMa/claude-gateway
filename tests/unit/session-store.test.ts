@@ -240,6 +240,31 @@ describe('session-store', () => {
     ).rejects.toThrow('Cannot delete the last session');
   });
 
+  it('U3c: a poisoned index entry never points an unlink or a write outside the chat folder', async () => {
+    // The store lives one level down, so every escape below lands inside tmpDir.
+    const poisoned = new SessionStore(path.join(tmpDir, 'agents'));
+    const chatDir = path.join(tmpDir, 'agents', 'alfred', 'sessions', 'api-web');
+    fs.mkdirSync(chatDir, { recursive: true });
+    fs.writeFileSync(path.join(tmpDir, 'victim.json'), 'victim');
+    fs.writeFileSync(path.join(tmpDir, 'agents', 'alfred', 'sessions', 'canary.json'), 'canary');
+    const ids = ['../../../../victim', '../canary', '..', '.', '/etc/passwd', 'a/b', 'a\\..\\b', 'a\0b'];
+    const meta = (id: string) => ({ id, name: id, createdAt: 1, lastActive: 1, messageCount: 0, totalTokensUsed: 0 });
+    fs.writeFileSync(path.join(chatDir, 'index.json'), JSON.stringify({ activeSessionId: 'keep', sessions: [meta('keep'), ...ids.map(meta)] }));
+    fs.writeFileSync(path.join(chatDir, 'keep.json'), '[]');
+
+    for (const id of ids) {
+      await poisoned.deleteTelegramSession('alfred', 'web', id, 'api');
+      await expect(poisoned.appendTelegramMessage('alfred', 'web', id, makeMsg('user', 'x'), 'discord')).rejects.toThrow('Invalid session id');
+      await expect(poisoned.loadTelegramSession('alfred', 'web', id, 'discord')).rejects.toThrow('Invalid session id');
+    }
+
+    expect(fs.readFileSync(path.join(tmpDir, 'victim.json'), 'utf8')).toBe('victim');
+    expect(fs.readFileSync(path.join(tmpDir, 'agents', 'alfred', 'sessions', 'canary.json'), 'utf8')).toBe('canary');
+    expect(fs.readdirSync(path.join(tmpDir, 'agents', 'alfred', 'sessions')).sort()).toEqual(['api-web', 'canary.json']);
+    expect((await poisoned.listSessions('alfred', 'web', 'api')).sessions.map((s) => s.id)).toEqual(['keep']);
+    expect(fs.readdirSync(chatDir).sort()).toEqual(['index.json', 'keep.json']);
+  });
+
   // -------------------------------------------------------------------------
   // U4: Migration — existing flat {chatId}.jsonl auto-migrates to new layout
   // -------------------------------------------------------------------------

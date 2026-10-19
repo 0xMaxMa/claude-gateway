@@ -12,6 +12,7 @@ import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { expandHome } from '../utils/paths';
 import { Server } from 'http';
 import { WebSocketServer, WebSocket, type RawData } from 'ws';
 import { AgentRunner } from '../agent/runner';
@@ -49,6 +50,9 @@ import { createMetaRouter } from './meta-router';
 import { createCapabilitiesRouter } from './capabilities';
 import { GATEWAY_VERSION } from './gateway-version';
 import { createWorkspaceRouter } from './workspace-router';
+import { createProjectsRouter } from './projects-router';
+import { StopLimiter, systemSys } from '../projects/running';
+import { projectsEnabled, resolveProjectsRoot } from '../projects/chat';
 import { createSkillsRouter } from './skills-router';
 import { createPackagesRouter } from './packages';
 import { createWebhooksRouter } from './webhooks-router';
@@ -743,6 +747,16 @@ export class GatewayRouter {
       this.app.use('/api', workspaceRouter);
     }
 
+    // Mount the pod-wide Projects API (gateway.projects.root, default ~/projects)
+    if (this.gatewayConfig?.gateway?.api?.keys && projectsEnabled(this.gatewayConfig)) {
+      this.app.use('/api', createProjectsRouter(this.gatewayConfig.gateway.api.keys, resolveProjectsRoot(this.gatewayConfig), {
+        sys: systemSys(),
+        limiter: new StopLimiter(),
+        logDir: this.gatewayConfig.gateway.logDir ? path.join(expandHome(this.gatewayConfig.gateway.logDir), 'projects') : undefined,
+        chatTurnActive: async (name) => (await Promise.all([...this.agents.values()].map((runner) => runner.hasActiveProjectTurn(name)))).some(Boolean),
+      }));
+    }
+
     // Mount skills routes
     if (this.gatewayConfig?.gateway?.api?.keys) {
       const skillsRouter = createSkillsRouter(
@@ -817,7 +831,7 @@ export class GatewayRouter {
     // Mount the capability manifest (GET /api/v1/capabilities) so clients can
     // feature-detect this build instead of pinning to a version number.
     if (this.gatewayConfig?.gateway?.api?.keys?.length) {
-      this.app.use('/api', createCapabilitiesRouter(this.gatewayConfig.gateway.api.keys));
+      this.app.use('/api', createCapabilitiesRouter(this.gatewayConfig.gateway.api.keys, this.gatewayConfig));
     }
 
     // Mount apps router (admin routes for installing/managing apps)

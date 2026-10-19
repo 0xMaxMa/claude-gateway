@@ -17,6 +17,16 @@ export class SessionNotInIndexError extends Error {
   }
 }
 
+/** The only shape of session id the API accepts or a binding file may name; anything else names no session. */
+export const SESSION_ID_RE = /^[a-zA-Z0-9_-]{1,64}$/;
+
+/** True when `name` joined to a folder stays a file directly inside it: no separator, no `.` or `..`, no NUL. */
+function isPlainFileName(name: string): boolean {
+  return name !== '' && name !== '.' && name !== '..' && !/[/\\\0]/.test(name) && path.basename(name) === name;
+}
+
+export type ProjectBinding = { kind: 'unbound' } | { kind: 'bound'; project: string } | { kind: 'unreadable' };
+
 export class SessionStore {
   private readonly agentsBaseDir: string;
   private readonly queues = new Map<string, PQueue>();
@@ -229,6 +239,7 @@ export class SessionStore {
    * Resolve the path to a specific session's message file.
    */
   private resolveTelegramSessionPath(agentId: string, chatId: string, sessionId: string, channel: ChatChannelOrApi = 'telegram'): string {
+    if (!isPlainFileName(sessionId)) throw new Error('Invalid session id');
     return path.join(this.resolveTelegramDir(agentId, chatId, channel), `${sessionId}.json`);
   }
 
@@ -352,13 +363,14 @@ export class SessionStore {
    * Create a new session for a chat, add it to the index, and return the SessionMeta.
    * If name is not provided, auto-generates "Session N" based on current session count.
    */
-  async createTelegramSession(agentId: string, chatId: string, name?: string, channel: ChatChannelOrApi = 'telegram'): Promise<SessionMeta> {
+  async createTelegramSession(agentId: string, chatId: string, name?: string, channel: ChatChannelOrApi = 'telegram', project?: string): Promise<SessionMeta> {
     const queue = this.getTelegramQueue(agentId, chatId);
     return queue.add(async () => {
       const index = await this.loadOrCreateIndexUnlocked(agentId, chatId, channel);
       const newId = randomUUID();
       const now = Date.now();
       const sessionName = name ?? `Session ${index.sessions.length + 1}`;
+      if (project) this.saveProjectBinding(agentId, newId, project);
       const meta: SessionMeta = {
         id: newId,
         name: sessionName,
@@ -367,6 +379,7 @@ export class SessionStore {
         lastActive: now,
         messageCount: 0,
         totalTokensUsed: 0,
+        ...(project ? { project } : {}),
       };
 
       // Write empty messages file
@@ -377,7 +390,14 @@ export class SessionStore {
 
       // Update index
       index.sessions.push(meta);
-      await this.saveIndex(agentId, chatId, index, channel);
+      try {
+        await this.saveIndex(agentId, chatId, index, channel);
+      } catch (error) {
+        index.sessions.pop();
+        fs.rmSync(sessionPath, { force: true });
+        if (project) fs.rmSync(this.projectBindingPath(agentId, newId), { force: true });
+        throw error;
+      }
 
       return meta;
     }) as Promise<SessionMeta>;
@@ -434,7 +454,9 @@ export class SessionStore {
 
       await this.saveIndex(agentId, chatId, index, channel);
 
-      // Delete the session messages file
+      // An index entry whose id is not a plain file name never had a file in this folder: it leaves the index and
+      // nothing is unlinked, so a poisoned index.json cannot point the unlink outside the chat folder.
+      if (!isPlainFileName(sessionId)) return;
       const sessionPath = this.resolveTelegramSessionPath(agentId, chatId, sessionId, channel);
       try {
         fs.unlinkSync(sessionPath);
@@ -660,9 +682,93 @@ export class SessionStore {
     });
   }
 
+  private projectBindingPath(agentId: string, sessionId: string): string {
+    if (!SESSION_ID_RE.test(sessionId)) throw new Error('Invalid session id');
+    const dir = path.resolve(this.agentsBaseDir, agentId, 'project-bindings');
+    const file = path.resolve(dir, `${sessionId}.json`);
+    if (path.dirname(file) !== dir) throw new Error('Invalid session id');
+    return file;
+  }
+
+  /** Written once when a project chat is created; looked up by session id alone, whichever chat asks. */
+  private saveProjectBinding(agentId: string, sessionId: string, project: string): void {
+    const file = this.projectBindingPath(agentId, sessionId);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(`${file}.tmp`, JSON.stringify({ project }) + '\n', 'utf-8');
+    fs.renameSync(`${file}.tmp`, file);
+  }
+
+  async deleteProjectBinding(agentId: string, sessionId: string): Promise<void> {
+    await fs.promises.rm(this.projectBindingPath(agentId, sessionId), { force: true });
+  }
+
+  /** Every session with a binding file, readable or not: a file that cannot be parsed still means the session is bound. */
+  async listBoundSessionIds(agentId: string): Promise<Set<string>> {
+    let names: string[];
+    try {
+      names = await fs.promises.readdir(path.dirname(this.projectBindingPath(agentId, 'x')));
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'ENOENT') return new Set();
+      throw e;
+    }
+    return new Set(names.filter((n) => n.endsWith('.json')).map((n) => n.slice(0, -'.json'.length)));
+  }
+
+  /** No file means the session was never bound. A file that cannot be read is not the same thing. */
+  async loadProjectBinding(agentId: string, sessionId: string): Promise<ProjectBinding> {
+    if (!SESSION_ID_RE.test(sessionId)) return { kind: 'unbound' };
+    let raw: string;
+    try {
+      raw = await fs.promises.readFile(this.projectBindingPath(agentId, sessionId), 'utf-8');
+    } catch (e) {
+      return (e as NodeJS.ErrnoException).code === 'ENOENT' ? { kind: 'unbound' } : { kind: 'unreadable' };
+    }
+    try {
+      const project = (JSON.parse(raw) as { project?: unknown }).project;
+      return typeof project === 'string' ? { kind: 'bound', project } : { kind: 'unreadable' };
+    } catch {
+      return { kind: 'unreadable' };
+    }
+  }
+
+  /**
+   * Removes the binding files of sessions that no index or session file names, which a crash between a delete and the
+   * reap, or between the binding and the index write, leaves behind. Returns how many it removed. It removes nothing
+   * unless every session folder was read cleanly, since a session wrongly taken for gone would turn unbound.
+   */
+  async sweepOrphanBindings(agentId: string): Promise<number> {
+    try {
+      const bound = await this.listBoundSessionIds(agentId);
+      if (bound.size === 0) return 0;
+      const known = new Set<string>();
+      const sessionsDir = path.join(this.agentsBaseDir, agentId, 'sessions');
+      // A missing, dangling or unreadable sessions folder tells nothing about which sessions exist: keep every binding.
+      const entries = await fs.promises.readdir(sessionsDir);
+      for (const entry of entries) {
+        const dir = path.join(sessionsDir, entry);
+        // stat follows a link, so a chat folder that is a symlink still counts; one that cannot be read keeps all bindings.
+        if (!(await fs.promises.stat(dir)).isDirectory()) continue;
+        const names = await fs.promises.readdir(dir);
+        for (const name of names) if (name.endsWith('.json') && name !== 'index.json') known.add(name.slice(0, -'.json'.length));
+        if (!names.includes('index.json')) continue;
+        const index = JSON.parse(await fs.promises.readFile(path.join(dir, 'index.json'), 'utf-8')) as SessionIndex;
+        for (const session of index.sessions) known.add(session.id);
+      }
+      let removed = 0;
+      for (const id of bound) {
+        if (known.has(id)) continue;
+        await this.deleteProjectBinding(agentId, id);
+        removed++;
+      }
+      return removed;
+    } catch {
+      return 0;
+    }
+  }
+
   /** Get all session metadata (name) for an agent, keyed by sessionId. */
-  async getAllSessionMeta(agentId: string): Promise<Map<string, { name: string; imageConfig?: ImageParams; videoConfig?: VideoParams; model?: string }>> {
-    const metaMap = new Map<string, { name: string; imageConfig?: ImageParams; videoConfig?: VideoParams; model?: string }>();
+  async getAllSessionMeta(agentId: string): Promise<Map<string, { name: string; imageConfig?: ImageParams; videoConfig?: VideoParams; model?: string; project?: string }>> {
+    const metaMap = new Map<string, { name: string; imageConfig?: ImageParams; videoConfig?: VideoParams; model?: string; project?: string }>();
     const sessionsDir = path.join(this.agentsBaseDir, agentId, 'sessions');
     let entries: fs.Dirent[];
     try {
@@ -677,7 +783,7 @@ export class SessionStore {
         const chatId = e.name.slice(channel.length + 1);
         const index = await this.loadIndex(agentId, chatId, channel);
         if (index) {
-          for (const s of index.sessions) metaMap.set(s.id, { name: s.name, imageConfig: s.imageConfig, videoConfig: s.videoConfig, model: s.model });
+          for (const s of index.sessions) metaMap.set(s.id, { name: s.name, imageConfig: s.imageConfig, videoConfig: s.videoConfig, model: s.model, project: s.project });
         }
       });
     await Promise.all(reads);

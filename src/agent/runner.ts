@@ -32,7 +32,7 @@ import { AgentConfig, CustomConnectorEntry, GatewayConfig, Logger, Message, Mode
 import { withConfigWriteLock, writeConfigAtomicSync } from '../config/config-write-lock';
 import { createLogger } from '../logger';
 import { SessionProcess, MAX_HISTORY_MESSAGES, resolveMaxHistoryMessages, INTERRUPTED_NO_REPLY_TEXT } from '../session/process';
-import { SessionStore, SessionNotInIndexError } from '../session/store';
+import { ProjectBinding, SessionStore, SessionNotInIndexError } from '../session/store';
 import { startNativeCompact } from '../orchestration/native-compact';
 import { TelegramReceiver } from '../telegram/receiver';
 import { DiscordReceiver } from '../discord/receiver';
@@ -87,6 +87,11 @@ import { isChatChannel } from '../history/types';
 import type { SkillLearningManager } from './skill-learning';
 import { spawnArchiveReindex } from './knowledge';
 import { resolveEnabledConnectors } from '../connectors/resolve';
+import { ProjectChatError, ProjectCwd, ProjectUnsupportedReason, projectUnavailableError, resolveProjectCwd, resolveProjectsRoot, sessionProjectView, SessionProjectView } from '../projects/chat';
+import { resolveProjectDir } from '../projects/fs';
+import { resolveOrchestrationConfig } from '../orchestration/config';
+import { resolveWorkerHarness } from '../orchestration/worker-harness';
+import { err, ProjectName, Result } from '../projects/paths';
 
 const DEFAULT_IDLE_TIMEOUT_MINUTES = 30;
 const DEFAULT_MAX_CONCURRENT = 20;
@@ -412,6 +417,13 @@ export class AgentRunner extends EventEmitter {
   // (e.g. the app/agent identifier) is not captured at spawn. Record it here
   // keyed by sessionId so the dashboard can show the actual chat id.
   private readonly apiChatIds = new Map<string, string>();
+  private readonly boundProjects = new Map<string, string>();
+  /**
+   * Sessions deleted while a turn or orchestrated work was live, with the chat they belonged to. Their binding file
+   * and boundProjects entry stay until that work ends, so the project still counts as busy while the turn writes;
+   * `reapRetiredBindings` then purges what it wrote and drops the binding.
+   */
+  private readonly retiredBindings = new Map<string, { chatId: string; bound: boolean }>();
 
   // Skill registry for detecting /skill-name commands in user messages
   private skillRegistry: SkillRegistry = { skills: new Map() };
@@ -444,8 +456,80 @@ export class AgentRunner extends EventEmitter {
   }
 
   private orchestrationForApi(sessionId: string): boolean {
-    return Boolean((this.orchestration?.ownsSession(sessionId) && !this.orchestration.canReturnToLegacy()) ||
-      (this.agentConfig.orchestration?.enabled && (this.agentConfig.orchestration.channels ?? ['api']).includes('api')));
+    return Boolean((this.orchestration?.ownsSession(sessionId) && !this.orchestration.canReturnToLegacy()) || this.apiChannelOrchestrated());
+  }
+
+  private apiChannelOrchestrated(): boolean {
+    return Boolean(this.agentConfig.orchestration?.enabled && (this.agentConfig.orchestration.channels ?? ['api']).includes('api'));
+  }
+
+  /** By session id alone. A session once seen bound stays bound for this process's life. */
+  async apiSessionBinding(sessionId: string): Promise<ProjectBinding> {
+    const known = this.boundProjects.get(sessionId);
+    if (known) return { kind: 'bound', project: known };
+    const binding = await this.sessionStore.loadProjectBinding(this.agentConfig.id, sessionId);
+    if (binding.kind === 'bound') this.boundProjects.set(sessionId, binding.project);
+    return binding;
+  }
+
+  private isApiSessionLive(sessionId: string, orchestratedLive = this.orchestration?.liveSessionIds() ?? new Set<string>()): boolean {
+    return orchestratedLive.has(sessionId) || this.pendingApiSessions.has(sessionId) || this.sessionSpawnLocks.has(sessionId);
+  }
+
+  /** Finishes the delete of every retired session whose work has ended: purge what it wrote, then drop the binding. */
+  private async reapRetiredBindings(): Promise<void> {
+    for (const [id, { chatId, bound }] of [...this.retiredBindings]) {
+      if (this.isApiSessionLive(id)) continue;
+      this.retiredBindings.delete(id);
+      this.purgeApiSessionHistory(chatId, id);
+      if (bound) this.removeApiSessionMedia(id);
+      await this.sessionStore.deleteProjectBinding(this.agentConfig.id, id).catch((err: unknown) => {
+        this.logger.warn('Failed to remove the binding of a deleted project session', { sessionId: id, error: (err as Error).message });
+      });
+      this.boundProjects.delete(id);
+    }
+  }
+
+  private purgeApiSessionHistory(chatId: string, sessionId: string): void {
+    const mediaPaths = this.historyDb.clearSession(`api-${chatId}`, sessionId);
+    MediaStore.deleteMediaFiles(this.agentsBaseDir, this.agentConfig.id, mediaPaths);
+  }
+
+  /** Everything under media/api-<id>/ of a deleted project chat, not only the files its history named. */
+  private removeApiSessionMedia(sessionId: string): void {
+    try {
+      fs.rmSync(MediaStore.mediaDir(this.agentsBaseDir, this.agentConfig.id, `api-${sessionId}`), { recursive: true, force: true });
+    } catch (err) {
+      this.logger.warn('Failed to remove the media folder of a deleted project session', { sessionId, error: (err as Error).message });
+    }
+  }
+
+  /** Throws PROJECT_UNAVAILABLE when the session's project no longer resolves; a no-op for unbound sessions. */
+  async assertApiProjectAvailable(sessionId: string): Promise<void> {
+    const project = await this.apiSessionProjectCwd(sessionId);
+    if (project && !project.ok) throw projectUnavailableError(project.error);
+  }
+
+  private async apiSessionProjectCwd(sessionId: string): Promise<Result<ProjectCwd, ProjectChatError> | undefined> {
+    const binding = await this.apiSessionBinding(sessionId);
+    if (binding.kind === 'unbound') return undefined;
+    if (binding.kind === 'unreadable') return err({ code: 'project_unavailable', reason: 'internal' });
+    return this.resolveApiProject(binding.project as ProjectName);
+  }
+
+  async resolveApiProject(name: ProjectName): Promise<Result<ProjectCwd, ProjectChatError>> {
+    const reason = this.projectUnsupportedReason();
+    if (reason) return err({ code: 'project_unsupported_agent', reason });
+    return resolveProjectCwd(this.gatewayConfig, name);
+  }
+
+  /** Orchestrated chats run their work in tasks, so the agent's default worker setup must be able to run in the folder. */
+  private projectUnsupportedReason(): ProjectUnsupportedReason | undefined {
+    if (this.agentConfig.type === 'app-agent') return 'container';
+    if (!this.apiChannelOrchestrated()) return undefined;
+    if (resolveOrchestrationConfig(this.agentConfig.orchestration).tasks.workspaceMode !== 'host') return 'workspace_mode';
+    if (resolveWorkerHarness(this.agentConfig, this.gatewayConfig, this.agentConfig.claude.model).harness === 'codex') return 'codex';
+    return undefined;
   }
 
   private async sendLinkedOrchestrationChannel(...[binding, text, _id, file]: Parameters<ChannelSender>): ReturnType<ChannelSender> {
@@ -515,6 +599,7 @@ export class AgentRunner extends EventEmitter {
             this.sessions.set(key, agentSession);
             return agentSession;
           },
+          sessionProject: ({ source, agentSessionId }) => source === 'api' ? this.apiSessionProjectCwd(agentSessionId) : Promise.resolve(undefined),
           releaseAgentSession: async (sessionId, agentSession) => {
             await agentSession.stop();
             for (const [key, value] of this.sessions) if (value === agentSession) this.sessions.delete(key);
@@ -685,6 +770,9 @@ export class AgentRunner extends EventEmitter {
         const prior = orchestration.store.apiReceipt(scope, ingressKey, requestFingerprint);
         if (prior) return { text: '', attachments: [], inputId: prior.inputId };
       }
+      // Fail the turn here, with the code the web shows, instead of leaving a task_spawn error for the model to relay.
+      const project = await this.apiSessionProjectCwd(sessionId);
+      if (project && !project.ok) throw projectUnavailableError(project.error);
       await this.sessionStore.ensureApiSession(this.agentConfig.id, chatId, sessionId);
       this.apiChatIds.set(sessionId, chatId);
       const media = opts.mediaFiles?.length ? await promoteUiUploads(this.agentsBaseDir, this.agentConfig.id, sessionId, opts.mediaFiles, this.logger, preparationDir) : [];
@@ -2323,9 +2411,10 @@ export class AgentRunner extends EventEmitter {
         }
       }
 
-      // Restart if model changed (including switching back to the agent default)
-      if (existing.modelOverride !== effectiveOverride) {
-        this.logger.info('Model changed, restarting session', { mapKey, oldModel: existing.modelOverride, newModel: effectiveOverride ?? agentDefaultModel });
+      // Restart if model changed (including switching back to the agent default),
+      // or if the bound project moved: the respawn re-resolves it or fails.
+      if (existing.modelOverride !== effectiveOverride || await existing.projectMoved()) {
+        this.logger.info('Model or project changed, restarting session', { mapKey, oldModel: existing.modelOverride, newModel: effectiveOverride ?? agentDefaultModel });
         const respawn = (async () => {
           await existing.stop();
           this.sessions.delete(mapKey);
@@ -2392,6 +2481,8 @@ export class AgentRunner extends EventEmitter {
 
     // Apply per-session model override (caller already normalized to undefined when == agent default)
     if (modelOverride) proc.modelOverride = modelOverride;
+    const project = source === 'api' ? await this.apiSessionProjectCwd(actualSessionId) : undefined;
+    if (project) proc.projectResolver = async () => (await this.apiSessionProjectCwd(actualSessionId)) ?? err({ code: 'project_unavailable', reason: 'internal' });
 
     // Keep the searchable memory archive (planning-64) fresh for the memory_search
     // tool. Fire-and-forget, detached, OFF the event loop — never blocks the spawn.
@@ -3965,6 +4056,8 @@ export class AgentRunner extends EventEmitter {
     if (this.agentConfig.orchestration?.enabled || fs.existsSync(path.join(this.agentDir, 'orchestration.db'))) await this.getOrchestration();
     this.stopping = false;
     await this.sweepStaleSessionDirs();
+    const orphans = await this.sessionStore.sweepOrphanBindings(this.agentConfig.id);
+    if (orphans > 0) this.logger.info('Removed project bindings whose session no longer exists', { agentId: this.agentConfig.id, count: orphans });
     await this.startCallbackServer();
     if (this.agentConfig.telegram?.botToken) {
       this.receiver = new TelegramReceiver(
@@ -4731,6 +4824,8 @@ export class AgentRunner extends EventEmitter {
       throw err;
     }
 
+    this.pendingApiSessions.add(sessionId); // reserved before the first await so a project delete sees the turn while it is still preparing
+    const { session, imageParams, videoParams, imagePaths } = await (async () => {
     // Register session in api-{chatId} index.json on first use (store adds channel prefix internally)
     await this.sessionStore.ensureApiSession(this.agentConfig.id, chatId, sessionId).catch((err: unknown) => {
       this.logger.warn('Failed to register API session in index', { agentId: this.agentConfig.id, chatId, sessionId, error: (err as Error).message });
@@ -4738,8 +4833,8 @@ export class AgentRunner extends EventEmitter {
 
     // Use model from request body if provided, otherwise use agent default.
     // A spawn keys its isolated memory by the chat (#601).
-    const session = await this.getOrSpawnSession(sessionId, 'api', undefined, opts.model, chatId);
     this.apiChatIds.set(sessionId, chatId);
+    const session = await this.getOrSpawnSession(sessionId, 'api', undefined, opts.model, chatId);
 
     // Promote UI-uploaded files from staging to permanent per-session storage
     const finalMediaFiles = opts.mediaFiles?.length
@@ -4783,7 +4878,8 @@ export class AgentRunner extends EventEmitter {
       });
     }
 
-    this.pendingApiSessions.add(sessionId);
+    return { session, imageParams, videoParams, imagePaths };
+    })().catch((error: unknown) => { this.pendingApiSessions.delete(sessionId); throw error; });
     // A previous turn that died (hard timeout, crash) may have left attachments
     // buffered under this session — they belong to THAT turn; never let them
     // ride along on this one (#75).
@@ -4924,12 +5020,15 @@ export class AgentRunner extends EventEmitter {
         fail(Object.assign(new Error('Session process exited unexpectedly before responding.'), { code: 'PROCESS_EXITED' }), buffer.join(''));
       };
 
+      const onStartupError = (error: Error) => fail(error, buffer.join(''));
+
       const cleanup = () => {
         clearTimeout(globalTimer);
         if (hardCapTimer) clearTimeout(hardCapTimer);
         if (quietTimer) clearTimeout(quietTimer);
         session.off('output', onOutput);
         session.off('exit', onExit);
+        session.off('startup-error', onStartupError);
         this.pendingApiSessions.delete(sessionId);
       };
 
@@ -5008,6 +5107,7 @@ export class AgentRunner extends EventEmitter {
 
       session.on('output', onOutput);
       session.on('exit', onExit);
+    session.on('startup-error', onStartupError);
       session.setProcessing(true);
       session.sendMessage(channelXml);
       // Do NOT call resetQuiet() here — the quiet timer should only start
@@ -5061,6 +5161,8 @@ export class AgentRunner extends EventEmitter {
       throw err;
     }
 
+    this.pendingApiSessions.add(sessionId); // reserved before the first await so a project delete sees the turn while it is still preparing
+    const { session, imageParams: imageParamsStream, videoParams: videoParamsStream, imagePaths: imagePathsStream } = await (async () => {
     // Register session in api-{chatId} index.json on first use (store adds channel prefix internally)
     await this.sessionStore.ensureApiSession(this.agentConfig.id, chatId, sessionId).catch((err: unknown) => {
       this.logger.warn('Failed to register API session in index', { agentId: this.agentConfig.id, chatId, sessionId, error: (err as Error).message });
@@ -5068,8 +5170,8 @@ export class AgentRunner extends EventEmitter {
 
     // Use model from request body if provided, otherwise use agent default.
     // A spawn keys its isolated memory by the chat (#601).
-    const session = await this.getOrSpawnSession(sessionId, 'api', undefined, opts.model, chatId);
     this.apiChatIds.set(sessionId, chatId);
+    const session = await this.getOrSpawnSession(sessionId, 'api', undefined, opts.model, chatId);
 
     // Promote UI-uploaded files from staging to permanent per-session storage
     const finalMediaFilesStream = opts.mediaFiles?.length
@@ -5108,7 +5210,8 @@ export class AgentRunner extends EventEmitter {
       });
     }
 
-    this.pendingApiSessions.add(sessionId);
+    return { session, imageParams: imageParamsStream, videoParams: videoParamsStream, imagePaths: imagePathsStream };
+    })().catch((error: unknown) => { this.pendingApiSessions.delete(sessionId); throw error; });
     // A previous turn that died (hard timeout, crash) may have left attachments
     // buffered under this session — they belong to THAT turn; never let them
     // ride along on this one (#75).
@@ -5208,11 +5311,14 @@ export class AgentRunner extends EventEmitter {
       fail(Object.assign(new Error('Session process exited unexpectedly before responding.'), { code: 'PROCESS_EXITED' }), buffer.join(''));
     };
 
+    const onStartupError = (error: Error) => fail(error, buffer.join(''));
+
     const cleanup = () => {
       clearTimeout(globalTimer);
       if (hardCapTimer) clearTimeout(hardCapTimer);
       session.off('output', onOutput);
       session.off('exit', onExit);
+      session.off('startup-error', onStartupError);
       this.pendingApiSessions.delete(sessionId);
     };
 
@@ -5337,6 +5443,7 @@ export class AgentRunner extends EventEmitter {
 
     session.on('output', onOutput);
     session.on('exit', onExit);
+    session.on('startup-error', onStartupError);
 
     // Image paths only work when allowTools:true — Claude needs the Read tool to access them
     const allowToolsStream = opts.allowTools ?? false;
@@ -5398,6 +5505,32 @@ export class AgentRunner extends EventEmitter {
    */
   hasActiveApiSession(sessionId: string): boolean {
     return this.pendingApiSessions.has(sessionId);
+  }
+
+  /**
+   * A chat or task works in the folder `project` names, through any name or symlink alias: a live turn, a process
+   * still spawning, an accepted input not yet handled, or an unfinished task. Keyed on live work and on the
+   * folder, not on the session record, so deleting a session mid-turn does not unlock the project. An
+   * unreadable binding on a live session counts as active.
+   */
+  async hasActiveProjectTurn(project: string): Promise<boolean> {
+    const orchestratedLive = this.orchestration?.liveSessionIds() ?? new Set<string>();
+    await this.reapRetiredBindings();
+    const names = new Set<string>(this.orchestration?.activeTaskProjects() ?? []);
+    for (const sessionId of new Set([...this.pendingApiSessions, ...this.sessionSpawnLocks.keys(), ...orchestratedLive])) {
+      const binding = await this.apiSessionBinding(sessionId);
+      if (binding.kind === 'unreadable') return true;
+      if (binding.kind === 'bound') names.add(binding.project);
+    }
+    if (names.has(project)) return true;
+    const root = resolveProjectsRoot(this.gatewayConfig);
+    const target = await resolveProjectDir(root, project as ProjectName);
+    if (!target.ok) return false;
+    for (const name of names) {
+      const dir = await resolveProjectDir(root, name as ProjectName);
+      if (dir.ok && dir.value === target.value) return true;
+    }
+    return false;
   }
 
   /**
@@ -5537,7 +5670,11 @@ export class AgentRunner extends EventEmitter {
     return this.historyDb;
   }
 
-  getAllSessionMeta(): Promise<Map<string, { name: string; imageConfig?: ImageParams; videoConfig?: VideoParams; model?: string }>> {
+  sessionProjectView(project: string | undefined): Promise<SessionProjectView> {
+    return sessionProjectView(this.gatewayConfig, project);
+  }
+
+  getAllSessionMeta(): Promise<Map<string, { name: string; imageConfig?: ImageParams; videoConfig?: VideoParams; model?: string; project?: string }>> {
     return this.sessionStore.getAllSessionMeta(this.agentConfig.id);
   }
 
@@ -5880,6 +6017,7 @@ export class AgentRunner extends EventEmitter {
   }
 
   async listApiSessions(chatId: string): Promise<import('../types').SessionIndex> {
+    await this.reapRetiredBindings();
     return this.sessionStore.listSessions(this.agentConfig.id, chatId, 'api');
   }
 
@@ -5892,12 +6030,12 @@ export class AgentRunner extends EventEmitter {
     return this.sessionStore.apiSessionExists(this.agentConfig.id, chatId, sessionId);
   }
 
-  async createApiSession(chatId: string, prompt?: string, name?: string): Promise<import('../types').SessionMeta> {
+  async createApiSession(chatId: string, prompt?: string, name?: string, project?: ProjectName): Promise<import('../types').SessionMeta> {
     const sessionName = name ?? (prompt
       ? (prompt.length > 60 ? `${prompt.slice(0, 60)}...` : prompt)
       : undefined);
 
-    const meta = await this.sessionStore.createTelegramSession(this.agentConfig.id, chatId, sessionName, 'api');
+    const meta = await this.sessionStore.createTelegramSession(this.agentConfig.id, chatId, sessionName, 'api', project);
 
     if (!name && prompt) {
       this.generateSessionNameInBackground(chatId, meta.id, prompt);
@@ -5936,6 +6074,7 @@ export class AgentRunner extends EventEmitter {
     return {
       sessionId: meta.id,
       sessionName: meta.name,
+      ...await this.sessionProjectView(meta.project),
       messageCount: meta.messageCount,
       archivedCount: meta.archivedCount ?? 0,
       ...context,
@@ -5955,14 +6094,24 @@ export class AgentRunner extends EventEmitter {
   }
 
   async deleteApiSession(chatId: string, sessionId: string): Promise<void> {
+    let inChat = true;
+    const wasBound = (await this.apiSessionBinding(sessionId)).kind !== 'unbound';
     await this.sessionStore.deleteTelegramSession(this.agentConfig.id, chatId, sessionId, 'api').catch((err: unknown) => {
       // Legacy sessions (stored only in SQLite, no file index entry) are treated as already deleted
-      if (err instanceof SessionNotInIndexError) return;
+      if (err instanceof SessionNotInIndexError) { inChat = false; return; }
       throw err;
     });
-    // Purge from SQLite so the session no longer appears in listSessions()
-    const mediaPaths = this.historyDb.clearSession(`api-${chatId}`, sessionId);
-    MediaStore.deleteMediaFiles(this.agentsBaseDir, this.agentConfig.id, mediaPaths);
+    this.purgeApiSessionHistory(chatId, sessionId);
+    // A session this chat does not hold keeps its binding, since its transcript is still where it was.
+    if (!inChat) return;
+    // Live work keeps the binding, and in boundProjects the project guard reads it, until it ends.
+    if (this.isApiSessionLive(sessionId)) {
+      this.retiredBindings.set(sessionId, { chatId, bound: wasBound });
+      return;
+    }
+    if (wasBound) this.removeApiSessionMedia(sessionId);
+    await this.sessionStore.deleteProjectBinding(this.agentConfig.id, sessionId);
+    this.boundProjects.delete(sessionId);
   }
 
   /** The route has already authorized this API principal for the Agent. Preserve

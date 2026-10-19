@@ -82,7 +82,9 @@ import { HistoryDB } from '../history/db';
 import { RuntimeProfile } from '../session/runtime-profile';
 import { OrchestrationStore, AcceptInput, INTAKE_RECOVERY_PREFIX, channelVoiceKey, payloadHash } from './store';
 import { contextScaledTimeouts, resolveOrchestrationConfig } from './config';
-import { mergeContextRefs, TaskService, taskIndexEntry } from './tasks/service';
+import { resolveWorkerHarness } from './worker-harness';
+import { SessionProject, mergeContextRefs, TaskService, taskIndexEntry } from './tasks/service';
+import { projectLocation } from '../projects/chat';
 import { DecisionService, DecisionReceipt } from './decisions';
 import { TaskBridge } from './bridge';
 import { TaskWorkspaces } from './tasks/workspace';
@@ -137,6 +139,7 @@ export interface AgentOrchestrationHost {
   transcribeNote?: typeof transcribeVoiceNote;
   createAgentSession(sessionId: string, profile: RuntimeProfile, model?: string, scope?: ConversationScope): Promise<SessionProcess>;
   releaseAgentSession(sessionId: string, process: SessionProcess): Promise<void>;
+  sessionProject?: SessionProject;
 }
 export class AgentOrchestrationRuntime {
   private providerAdmission!: ProviderAdmissionStore;
@@ -266,7 +269,8 @@ export class AgentOrchestrationRuntime {
         if (agent.claude.extraFlags?.length) throw new OrchestrationError('PROFILE_FLAGS_CONFLICT');
       }
     } catch (error) { store.close(); releaseLock(); throw error; }
-    const tasks = new TaskService(store, agent.orchestration, agent.workspace);
+    const tasks = new TaskService(store, agent.orchestration, agent.workspace, host.sessionProject,
+      model => resolveWorkerHarness(agent, gateway, model ?? agent.claude.model).harness);
     const files = new TaskFiles(store, join(agent.workspace, '../..'), agent.type === 'app-agent' ? join(root, 'container-files') : undefined, agent.workspace);
     const safemodeAllowed = () => agent.type !== 'app-agent' && Boolean(gateway.safemode?.allowedAgentIds?.includes(agent.id));
     const gatewayAdapters = new Map<string, GatewayTaskAdapter>(agent.type === 'app-agent' ? [] : [['safemode',new SafemodeTaskAdapter(agent.id, safemodeAllowed)]]);
@@ -1289,8 +1293,9 @@ export class AgentOrchestrationRuntime {
       const pendingChanges = replayPending ? [{id:'pending',value:pendingState}] : pendingDelta;
 
       if (!semantic && input.skill && input.modality !== 'live_voice' && !channelSpeech && !visualInput.images.length && !visualInput.unavailable.length) {
-        const task = this.tasks.spawn({ ...capabilities, ...receipt, ...decision, principalId: input.scope.principalId,
-          model: options.model ?? this.agent.claude.model, actionId: `skill:${receipt.inputId}` }, {
+        const skillContext = { ...capabilities, ...receipt, ...decision, principalId: input.scope.principalId,
+          model: options.model ?? this.agent.claude.model, actionId: `skill:${receipt.inputId}` };
+        const task = this.tasks.spawn(skillContext, { project: await this.tasks.projectPin(skillContext),
           title: `/${input.skill.name}`, targetProfile: 'skill-worker', skill: input.skill,
           instructions: `Invoke the installed Skill tool named ${input.skill.name} with args ${JSON.stringify(input.skill.args)}. Follow its instructions within the worker capabilities. Report results and stage output files.`,
         });
@@ -1448,6 +1453,9 @@ export class AgentOrchestrationRuntime {
       ticket.profile.overlay += '\n' + WORKER_RESULT_FIDELITY;
       ticket.profile.connectorsAllowed = false; // Connector execution belongs to workers, never the user-facing decision.
       if (input.scope.source === 'telegram') ticket.profile.overlay += '\nTelegram response layout: use short paragraphs and numbered or bulleted lists for summaries, task status and comparisons. Avoid Markdown tables unless the user explicitly requests a table; wide tables are difficult to read on a phone. Keep command names inline and preserve their literal characters. Rewrite worker reports into this layout rather than copying their tables.';
+      // Git state changes every turn, so only the project's location belongs in this cached prefix.
+      const project = await this.host.sessionProject?.(input.scope);
+      if (project?.ok) ticket.profile.overlay += `\n${projectLocation(project.value)} Every task you start runs in that folder; working_directory may only name an existing folder inside it, absolute or relative to it.`;
       if (this.agent.type === 'app-agent') ticket.profile.overlay += '\nContainer execution is mandatory. Workers run only inside this app container. No host tools or host services are available. Use default-worker for app execution. Gateway media/browser/memory tools are unavailable in this container profile.';
       // Stable metadata belongs in the system prefix, not in every resumed user message.
       // A changed catalog intentionally invalidates that prefix so new skills stay visible.
@@ -1948,6 +1956,19 @@ export class AgentOrchestrationRuntime {
   }
   async flushHistory(): Promise<void> {
     for (const row of this.store.all("SELECT operation_id FROM history_operations WHERE state='pending' ORDER BY updated_at LIMIT 200")) await this.history.write(String(row.operation_id));
+  }
+  /** API sessions with a turn in flight, an accepted input not yet handled, or a task that has not finished. */
+  liveSessionIds(): Set<string> {
+    const ids = new Set(this.active.keys());
+    for (const row of this.store.all(`SELECT c.agent_session_id AS id FROM conversations c WHERE c.source='api' AND (
+      EXISTS (SELECT 1 FROM conversation_inputs i WHERE i.conversation_id=c.id AND i.status IN ('accepted','assigned'))
+      OR EXISTS (SELECT 1 FROM tasks t WHERE t.conversation_id=c.id AND t.state NOT IN ('completed','failed','cancelled')))`)) ids.add(String(row.id));
+    return ids;
+  }
+  /** Project names that unfinished tasks are pinned to, whatever became of the session that queued them. */
+  activeTaskProjects(): string[] {
+    return this.store.all("SELECT DISTINCT json_extract(snapshot_json,'$.project') AS project FROM tasks WHERE state NOT IN ('completed','failed','cancelled') AND json_extract(snapshot_json,'$.project') IS NOT NULL")
+      .map(row => String(row.project));
   }
   hasPendingWork(): boolean {
     return !!(this.active.size || this.pending.size || this.store.get("SELECT id FROM conversation_inputs WHERE status IN ('accepted','assigned') LIMIT 1") || this.store.get("SELECT id FROM tasks WHERE state NOT IN ('completed','failed','cancelled') LIMIT 1"));

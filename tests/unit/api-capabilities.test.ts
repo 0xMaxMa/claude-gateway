@@ -9,18 +9,27 @@
  */
 
 import express from 'express';
+import * as fs from 'fs';
+import * as path from 'path';
 import request from 'supertest';
 import {
   createCapabilitiesRouter,
   buildCapabilitiesResponse,
   CROSS_CHANNEL_MESSAGE_CHANNELS,
+  PROJECTS_CAPABILITIES,
 } from '../../src/api/capabilities';
 import { GATEWAY_VERSION } from '../../src/api/gateway-version';
 import { CHAT_CHANNELS } from '../../src/history/types';
 import type { ApiKey } from '../../src/types';
 
-const apiKeys: ApiKey[] = [{ key: 'sk-test-app', agents: ['alfred'] }];
+const apiKeys: ApiKey[] = [
+  { key: 'sk-test-app', agents: '*', admin: true },
+  { key: 'sk-pod-write', agents: '*', write: true },
+  { key: 'sk-pod-read', agents: '*' },
+  { key: 'sk-agent', agents: ['alfred'], write: true },
+];
 const AUTH = { Authorization: 'Bearer sk-test-app' };
+const as = (key: string) => ({ Authorization: `Bearer ${key}` });
 
 function buildApp(keys: ApiKey[]) {
   const app = express();
@@ -39,6 +48,7 @@ describe('GET /api/v1/capabilities', () => {
       version: expect.any(String),
       capabilities: {
         cross_channel_message: expect.any(Array),
+        projects: expect.any(Array),
       },
     });
     expect(res.body.version.length).toBeGreaterThan(0);
@@ -59,6 +69,46 @@ describe('GET /api/v1/capabilities', () => {
     expect(res.body.capabilities.cross_channel_message).toContain('telegram');
   });
 
+  it('advertises every project token to an admin key', async () => {
+    const res = await request(buildApp(apiKeys)).get('/api/v1/capabilities').set(AUTH);
+    expect(res.body.capabilities.projects).toEqual(['list', 'create', 'git', 'chat', 'run', 'start', 'delete', 'stop', 'disk', 'cleanup']);
+  });
+
+  it('drops chat without orchestration and everything when the Projects API is disabled', () => {
+    const gw = (g: Record<string, unknown>) => ({ gateway: g, agents: [] }) as never;
+    expect(buildCapabilitiesResponse('1', gw({ orchestration: false })).capabilities.projects).toEqual(['list', 'create', 'git', 'run', 'start', 'delete', 'stop', 'disk', 'cleanup']);
+    expect(buildCapabilitiesResponse('1', gw({ orchestration: true })).capabilities.projects).toEqual(['list', 'create', 'git', 'chat', 'run', 'start', 'delete', 'stop', 'disk', 'cleanup']);
+    expect(buildCapabilitiesResponse('1', gw({ orchestration: true, projects: { enabled: false } })).capabilities.projects).toEqual([]);
+  });
+
+  it.each(['sk-pod-write', 'sk-pod-read', 'sk-agent'])('%s gets every project token but create, start, delete, stop and cleanup (disk included)', async (key) => {
+    const res = await request(buildApp(apiKeys)).get('/api/v1/capabilities').set(as(key));
+    expect(res.status).toBe(200);
+    expect(res.body.capabilities.projects).toEqual(['list', 'git', 'chat', 'run', 'disk']);
+    expect(res.body).not.toHaveProperty('projectsUnavailable');
+    expect(res.body.capabilities.cross_channel_message).toContain('telegram');
+  });
+
+  it('drops chat for a non-admin key too when orchestration is off', () => {
+    const config = { gateway: { orchestration: false }, agents: [] } as never;
+    expect(buildCapabilitiesResponse('1', config, apiKeys[2]).capabilities.projects).toEqual(['list', 'git', 'run', 'disk']);
+  });
+
+  it('omits projectsUnavailable for an admin key when Projects is usable', async () => {
+    const res = await request(buildApp(apiKeys)).get('/api/v1/capabilities').set(AUTH);
+    expect(res.body).not.toHaveProperty('projectsUnavailable');
+  });
+
+  it('says disabled to every key, admin included, when Projects is off', async () => {
+    const config = { gateway: { projects: { enabled: false } }, agents: [] } as never;
+    const app = express();
+    app.use('/api', createCapabilitiesRouter(apiKeys, config));
+    for (const key of ['sk-test-app', 'sk-pod-write', 'sk-agent']) {
+      const res = await request(app).get('/api/v1/capabilities').set(as(key));
+      expect([res.body.capabilities.projects, res.body.projectsUnavailable]).toEqual([[], 'disabled']);
+    }
+  });
+
   it('only advertises channel identifiers the gateway itself uses', () => {
     // Every advertised channel must be a real ChatChannel string — the same value
     // a session reports as its channel — so a client's `includes(channel)` check
@@ -67,6 +117,14 @@ describe('GET /api/v1/capabilities', () => {
       expect(CHAT_CHANNELS).toContain(ch);
     }
     expect(new Set(CROSS_CHANNEL_MESSAGE_CHANNELS).size).toBe(CROSS_CHANNEL_MESSAGE_CHANNELS.length);
+  });
+
+  it('system.md shows the projects array the gateway serves, in the example and the reference table', () => {
+    const doc = fs.readFileSync(path.join(__dirname, '../../website/api/system.md'), 'utf8');
+    const example = doc.match(/"projects": (\[[^\]]*\])/);
+    const table = doc.match(/Currently `(\[[^\]]*\])`/);
+    expect(JSON.parse(example![1])).toEqual([...PROJECTS_CAPABILITIES]);
+    expect(JSON.parse(table![1])).toEqual([...PROJECTS_CAPABILITIES]);
   });
 
   it('the handler serves exactly what the builder produces (single source of truth)', async () => {

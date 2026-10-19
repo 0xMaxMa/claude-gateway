@@ -95,6 +95,8 @@ export interface TaskSnapshot {
   subagentType?: string;
   readonly?: boolean;
   resourceProfile?: { projectRoot: string; mode: 'isolated-worktree' | 'shared-lock' | 'host' | 'container' };
+  /** The project a project-bound chat pinned this task to; resourceProfile.projectRoot is inside it. */
+  project?: string;
   taskId: string;
   conversationId: string;
   agentId: string;

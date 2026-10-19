@@ -44,6 +44,7 @@ import { SessionProcess } from '../../src/session/process';
 import { sandboxContainerName } from '../../src/apps/conversation-sandbox';
 import { SessionStore } from '../../src/session/store';
 import { chatMemoryDir } from '../../src/agent/workspace-loader';
+import { ok, type ProjectName } from '../../src/projects/paths';
 import { AgentConfig, GatewayConfig } from '../../src/types';
 
 let tmpDir: string;
@@ -271,6 +272,26 @@ describe('API sessions', () => {
     fs.writeFileSync(path.join(dir, 'MEMORY.md'), 'WEB-CHAT-MEMORY');
     const sp = new SessionProcess('sess-2', 'api', agent(true), gateway, store, undefined, undefined, 'web-chat');
     expect(appendedPrompt((await start(sp)).args)).toContain('WEB-CHAT-MEMORY');
+  });
+
+  it('a project session keeps its persona and its memory in the one --append-system-prompt-file Claude Code reads', async () => {
+    const dir = chatMemoryDir(workspace, 'api', 'web-chat');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'MEMORY.md'), 'WEB-CHAT-MEMORY');
+    const folder = path.join(tmpDir, 'projects', 'site');
+    fs.mkdirSync(folder, { recursive: true });
+    const bound = (isolate: boolean): SessionProcess => {
+      const sp = new SessionProcess(`sess-${isolate}`, 'api', agent(isolate), gateway, store, undefined, undefined, 'web-chat');
+      sp.projectResolver = async () => ok({ name: 'site' as ProjectName, dir: folder, trusted: false, identity: '1:1' });
+      return sp;
+    };
+    const isolated = (await start(bound(true))).args;
+    expect(isolated.filter(arg => arg === '--append-system-prompt-file')).toHaveLength(1);
+    expect(appendedPrompt(isolated)).toContain('SHARED-CONTEXT');
+    expect(appendedPrompt(isolated)).toContain('WEB-CHAT-MEMORY');
+    const shared = (await start(bound(false))).args;
+    expect(shared.filter(arg => arg === '--append-system-prompt-file')).toHaveLength(1);
+    expect(shared[shared.indexOf('--append-system-prompt-file') + 1]).toBe(path.join(workspace, 'CLAUDE.md'));
   });
 });
 

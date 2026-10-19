@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { setProjectsLogger } from './projects/log';
 import { AgentLifecycle } from './config/agent-lifecycle';
 import { setConfigValue } from './config/reload-policy';
 import { gatewayCapacity } from './orchestration/capacity';
@@ -648,8 +649,10 @@ async function main(): Promise<void> {
   // logs/gateway.log at startup too, not only on reload (#427).
   const startupSkips: SkippedAgent[] = [];
   let publicUrlUnsetAtStartup = false;
+  const startupWarnings: string[] = [];
   const config: GatewayConfig = loadConfig(CONFIG_PATH, {
     onSkippedAgent: (s) => startupSkips.push(s),
+    onWarning: (m) => startupWarnings.push(m),
     onPublicUrlUnset: () => { publicUrlUnsetAtStartup = true; },
   });
   config.gateway.logDir = expandTilde(config.gateway.logDir);
@@ -665,6 +668,8 @@ async function main(): Promise<void> {
   // went missing.
   const globalLogger = createLogger('gateway', expandTilde(config.gateway.logDir));
   logSkippedAgents(globalLogger, startupSkips, 'Agent skipped at startup');
+  for (const message of startupWarnings) globalLogger.warn(message);
+  setProjectsLogger(globalLogger);
   // Same #427 rationale as skipped agents: the console.warn already happened
   // inside loadConfig (before logDir/globalLogger could exist), replay it here
   // so it also reaches logs/gateway.log under structured/JSON logging (#472).

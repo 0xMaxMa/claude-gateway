@@ -37,6 +37,8 @@ import {
   truncateDetail,
 } from '../utils/tool-labels';
 import { resolveEnabledConnectors } from '../connectors/resolve';
+import { projectContext, projectUnavailableError, type ProjectChatError, type ProjectCwd } from '../projects/chat';
+import type { Result } from '../projects/paths';
 import { isReservedConnectorId } from '../connectors/custom';
 
 export const MAX_HISTORY_MESSAGES = 50;
@@ -266,6 +268,12 @@ export class SessionProcess extends EventEmitter {
   /** Backend used to run the subprocess. Set during start(); 'headless' until then. */
   backend: 'pty-shell' | 'headless' = 'headless';
   modelOverride?: string; // per-session model override (set by runner from SessionMeta)
+  /** Set by the runner for a project-bound API session. Run again at every spawn,
+   *  crash restarts included, so a missing or escaped folder fails the turn
+   *  instead of running in the agent workspace. */
+  projectResolver?: () => Promise<Result<ProjectCwd, ProjectChatError>>;
+  private projectCwd?: ProjectCwd;
+  private projectContext?: string;
   // Per-spawn cap on how many history messages buildInitialPrompt re-injects.
   // Defaults to MAX_HISTORY_MESSAGES; the runner lowers it (set before start())
   // when recovering from a repeated request_too_large (32MB) so each retry
@@ -742,6 +750,13 @@ export class SessionProcess extends EventEmitter {
   /** `.sessions/<id>`, once a spawn without a runtime profile has written its mcp-config.json there. */
   private sessionDirPath?: string;
 
+  /** True when the bound project no longer resolves to the directory this process runs in, including one recreated at the same path, or when its trust changed (setting sources are fixed at spawn). */
+  async projectMoved(): Promise<boolean> {
+    if (!this.projectResolver || !this.projectCwd) return false;
+    const project = await this.projectResolver();
+    return !project.ok || project.value.dir !== this.projectCwd.dir || project.value.identity !== this.projectCwd.identity || project.value.trusted !== this.projectCwd.trusted;
+  }
+
   /** The appended system prompt never travels on the command line: Windows caps a
    * whole command line at 32767 characters and Linux caps ONE argument at 128 KiB
    * (MAX_ARG_STRLEN), so a large workspace context or skill catalog would fail
@@ -809,8 +824,16 @@ export class SessionProcess extends EventEmitter {
   private writeChatMemoryFile(): string | undefined {
     if (this.runtimeProfile || !this.agentConfig.isolateMemory) return undefined;
     const file = path.join(this.ensureSessionDir(), 'chat-memory.md');
-    fs.writeFileSync(file, this.chatMemory(), { mode: 0o600 });
+    const persona = this.projectPersonaPath();
+    fs.writeFileSync(file, (persona ? fs.readFileSync(persona, 'utf8') + '\n\n' : '') + this.chatMemory(), { mode: 0o600 });
     return file;
+  }
+
+  /** A project session runs in the project folder, so the workspace CLAUDE.md is appended instead of discovered. */
+  private projectPersonaPath(): string | undefined {
+    if (!this.projectCwd) return undefined;
+    const persona = path.join(this.agentConfig.workspace, 'CLAUDE.md');
+    return fs.existsSync(persona) ? persona : undefined;
   }
 
   /** `.sessions/<id>` (0700) for this session's generated spawn files. Recording
@@ -1121,6 +1144,16 @@ export class SessionProcess extends EventEmitter {
     // (The old claude.dangerouslySkipPermissions config is gone.)
     args.push('--dangerously-skip-permissions');
 
+    if (this.projectCwd) {
+      // Skipped permissions would otherwise run an untrusted repo's hooks and .mcp.json.
+      if (!this.projectCwd.trusted) args.push('--setting-sources', 'user');
+      // The persona CLAUDE.md is only discovered from cwd, which is now the project.
+      // Claude Code keeps only the last --append-system-prompt-file, so in isolate mode it rides in the chat memory file.
+      const persona = this.projectPersonaPath();
+      if (persona && !this.chatMemoryPath) args.push('--append-system-prompt-file', persona);
+      if (this.projectContext) args.push('--append-system-prompt', this.projectContext);
+    }
+
     // Isolated memory mode (#601): Claude Code loads the conversation-neutral
     // workspace CLAUDE.md itself; this conversation's own USER.md/MEMORY.md
     // ride alongside it (see writeChatMemoryFile).
@@ -1170,6 +1203,14 @@ export class SessionProcess extends EventEmitter {
     const { historyPrompt, loadedAtSpawn, archivedCount, messageCountAtSpawn } = await this.buildInitialPrompt();
     if (epoch !== this.spawnEpoch) return false;
     this.spawnContext = { loadedAtSpawn, archivedCount, messageCountAtSpawn };
+    if (this.projectResolver) {
+      const project = await this.projectResolver();
+      if (epoch !== this.spawnEpoch) return false;
+      if (!project.ok) throw projectUnavailableError(project.error);
+      this.projectCwd = project.value;
+      this.projectContext = await projectContext(this.gatewayConfig, project.value);
+      if (epoch !== this.spawnEpoch) return false;
+    }
 
     // Determine if this is a docker-exec app-agent before computing paths
     assertContainerBinding(this.agentConfig, this.runtimeProfile);
@@ -1358,6 +1399,7 @@ export class SessionProcess extends EventEmitter {
     // minimal PATH that predates the native-installer migration.
     const hardenedPath = pathWithNativeBin();
 
+    if (this.projectCwd && !fs.existsSync(this.projectCwd.dir)) throw projectUnavailableError({ code: 'project_not_found' });
     const capacityEnabled = Boolean(this.runtimeProfile || this.gatewayConfig.gateway.processLimits || this.gatewayConfig.agents?.some(agent => agent.orchestration?.enabled));
     const releaseCapacity = this.runtimeProfile?.capacityReserved ? () => {} : gatewayCapacity(this.gatewayConfig).acquire(this.runtimeProfile?.role ?? 'legacy', capacityEnabled);
     if (!releaseCapacity) throw Object.assign(new Error('Gateway process capacity exceeded'), { code: 'CAPACITY_EXCEEDED' });
@@ -1388,7 +1430,7 @@ export class SessionProcess extends EventEmitter {
         ...(ptyHeartbeatPath ? { PTY_SHELL_HEARTBEAT_PATH: ptyHeartbeatPath } : {}),
         ...(ptyStreamSocketPath ? { PTY_SHELL_STREAM_SOCKET: ptyStreamSocketPath } : {}),
       }, this.gatewayConfig.gateway.jev),
-      cwd: this.agentConfig.workspace,
+      cwd: this.projectCwd?.dir ?? this.agentConfig.workspace,
       ...(this.runtimeProfile?.role === 'worker' && processSupervisorSupported() && workerSpawnDetached() ? { detached: true } : {}),
       windowsHide: true,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -1811,9 +1853,16 @@ export class SessionProcess extends EventEmitter {
       // hint. This is the exact failure the binary-resolution work targets.
       this.lastStderrLine = err.message;
       this.logger.error('session subprocess error', { error: err.message });
-      if (this.runtimeProfile && !proc.pid) {
+      if (!this.runtimeProfile && !proc.pid && this.projectCwd && (err as NodeJS.ErrnoException).code === 'ENOENT' && !fs.existsSync(this.projectCwd.dir)) {
+        // The folder vanished after the pre-spawn check; no 'exit' follows a failed spawn, so the waiting turn would hang to its timeout.
+        if (this.process === proc) { this.process = null; this._exited = true; }
+        this.emit('startup-error', projectUnavailableError({ code: 'project_not_found' }));
+        return;
+      }
+      if (!proc.pid) {
         // Failed spawn emits 'error' and 'close', but never 'exit'. Clear the
         // nonexistent child before listeners call stop(), or cleanup waits forever.
+        // Legacy sessions need the event too: the waiting turn holds its project until it hears of the failure.
         if (this.process === proc) { this.process = null; this._exited = true; }
         const cause = (err as NodeJS.ErrnoException).code;
         const missingWorkspace = cause === 'ENOENT' && !fs.existsSync(this.agentConfig.workspace);

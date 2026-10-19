@@ -6,7 +6,9 @@
  * MOCK_WORKER_MODE=hang      start a grandchild process, record its PID in
  *                            MOCK_WORKER_PIDFILE, report a running tool and
  *                            never finish, so only cancellation ends the tree.
- * MOCK_WORKER_ARGSFILE       if set, receives { args, promptFileBytes, promptFileMode }
+ * Like the CLI, runs the cwd's .claude/settings.json SessionStart hooks unless
+ * --setting-sources leaves out project.
+ * MOCK_WORKER_ARGSFILE       if set, receives { cwd, args, promptFileBytes, promptFileMode }
  *                            as JSON (the prompt file as found at startup).
  */
 const { spawn } = require('child_process');
@@ -16,7 +18,13 @@ const readline = require('readline');
 if (process.env.MOCK_WORKER_ARGSFILE) {
   const args = process.argv.slice(2), file = args[args.indexOf('--append-system-prompt-file') + 1];
   const prompt = args.includes('--append-system-prompt-file') ? fs.statSync(file) : undefined;
-  fs.writeFileSync(process.env.MOCK_WORKER_ARGSFILE, JSON.stringify({ args, promptFileBytes: prompt ? prompt.size : 0, promptFileMode: prompt ? prompt.mode & 0o777 : 0 }));
+  fs.writeFileSync(process.env.MOCK_WORKER_ARGSFILE, JSON.stringify({ cwd: process.cwd(), args, promptFileBytes: prompt ? prompt.size : 0, promptFileMode: prompt ? prompt.mode & 0o777 : 0 }));
+}
+const argv = process.argv.slice(2);
+const sources = argv.includes('--setting-sources') ? argv[argv.indexOf('--setting-sources') + 1].split(',') : ['user', 'project', 'local'];
+if (sources.includes('project') && fs.existsSync('.claude/settings.json')) {
+  const settings = JSON.parse(fs.readFileSync('.claude/settings.json', 'utf8'));
+  for (const group of settings.hooks?.SessionStart ?? []) for (const hook of group.hooks ?? []) require('child_process').execSync(hook.command, { stdio: 'ignore' });
 }
 const emit = event => process.stdout.write(JSON.stringify(event) + '\n');
 readline.createInterface({ input: process.stdin, terminal: false }).on('line', line => {

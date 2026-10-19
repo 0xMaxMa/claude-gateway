@@ -111,6 +111,7 @@ test('worker share bridge pins agent identity, rejects general routes, and keeps
     await proxy(a.attemptId, a.generation, { method: 'POST', pathname: '/api/v1/image-artifacts', body: { agent_id: 'other', session_id: 'other', files: [f.path] } });
     const init = (request.mock.calls as unknown as [string, RequestInit][])[0][1];
     expect(JSON.parse(String(init.body))).toMatchObject({ agent_id: 'agent', session_id: agent });
+    expect(init.headers).toEqual({ 'Content-Type': 'application/json', Authorization: 'Bearer gateway-only' });
     await expect(proxy(a.attemptId, a.generation, { method: 'POST', pathname: '/api/v1/agents/other/messages', body: {} })).rejects.toThrow('SHARE_SCOPE_DENIED');
     expect(request).toHaveBeenCalledTimes(1);
   } finally { f.close(); }

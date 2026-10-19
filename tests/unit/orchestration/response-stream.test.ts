@@ -32,7 +32,7 @@ test.each([false,true])('real runtime publishes incremental response text before
   await started;
   const facade = Object.assign(Object.create(AgentRunner.prototype), {
     agentConfig: { ...a, orchestration: { enabled: true } },
-    sessionStore: sessions, agentsBaseDir: root, apiChatIds: new Map(),
+    sessionStore: sessions, agentsBaseDir: root, apiChatIds: new Map(), boundProjects: new Map(),
     pendingApiSessions: new Set([sid]), logger: { warn: jest.fn() },
     getOrchestration: async () => runtime,
   }) as AgentRunner;

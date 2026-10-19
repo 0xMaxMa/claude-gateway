@@ -81,6 +81,7 @@ export class ConfigWatcher extends EventEmitter {
       newConfig = loadConfig(this.configPath, {
         onSkippedAgent: (s) => skipped.push(s),
         onPublicUrlUnset: () => { publicUrlUnset = true; },
+        onWarning: (m) => this.logger.warn(m),
       });
       newConfig.gateway.logDir = expandHome(newConfig.gateway.logDir);
     } catch (err) {

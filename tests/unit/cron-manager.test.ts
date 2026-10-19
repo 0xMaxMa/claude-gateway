@@ -1648,7 +1648,8 @@ describe('legacy cron orchestration ownership',()=>{
   const runner=Object.create(AgentRunner.prototype) as any;
   runner.pendingApiSessions=new Set();runner.apiChatIds=new Map();runner.agentConfig={id:'test-agent'};
   runner.orchestrationForApi=()=>true;
-  runner.sessionStore={ensureApiSession:jest.fn(async()=>{}),loadIndex:jest.fn(async()=>undefined)};
+  runner.boundProjects=new Map();
+  runner.sessionStore={ensureApiSession:jest.fn(async()=>{}),loadIndex:jest.fn(async()=>undefined),loadProjectBinding:async()=>({kind:'unbound'})};
   const send=jest.fn(async(_input:any,_capabilities:any,_options:any)=> 'Scheduled check complete');
   runner.getOrchestration=async()=>({send,responseFiles:()=>[],authorizeSession:()=>{},waitForTaskReport:async(_s:string,_p:string,_r:string,text:string)=>text});
   runner.addApiAttachments=jest.fn();runner.popApiAttachments=()=>[];

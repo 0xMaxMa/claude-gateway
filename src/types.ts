@@ -507,6 +507,21 @@ export interface GatewayConfig {
       keys: ApiKey[];
     };
     /**
+     * Pod-wide root the Projects API lists (default `~/projects`). Distinct
+     * from an agent's `orchestration.tasks.projectRoot`, which is one repo per agent.
+     */
+    projects?: {
+      root?: string;
+      /** false leaves the Projects API unmounted; loadConfig sets it when the default root would expose HOME or the config dir. */
+      enabled?: boolean;
+      /**
+       * Project names whose own `.claude/` settings, hooks, `.mcp.json` and
+       * CLAUDE.md load in project-bound chats. Every other project runs with
+       * `--setting-sources user`.
+       */
+      trusted?: string[];
+    };
+    /**
      * true (default) = headless backend (claude --print + stream-json).
      * false = interactive backend: claude TUI under the claude-pty-shell PTY wrapper.
      */
@@ -820,6 +835,9 @@ export interface SessionMeta {
   videoConfig?: VideoParams;
   /** Real model from Claude stream, updated per turn (e.g. "claude-opus-4-8"). */
   model?: string;
+  /** Projects folder name this API session is bound to, fixed at creation. The
+   *  directory is re-resolved from the name at every spawn. */
+  project?: string;
 }
 
 export interface SessionIndex {
