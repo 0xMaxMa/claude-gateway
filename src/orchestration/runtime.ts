@@ -55,7 +55,7 @@ import { ConversationIntake, INTAKE_OVERLAY, IntakeChoice } from './conversation
 import { AgentCliSessions, resumeRejected, containerTranscriptCheckpoint } from './agent-cli-session';
 import { transcriptPath } from '../config/claude-settings';
 import { checkpointTranscript, rollbackUnansweredTranscript, TranscriptCheckpoint } from './transcript-checkpoint';
-import { unansweredInputContext } from './unanswered-inputs';
+import { interruptedFragmentContext, unansweredInputContext } from './unanswered-inputs';
 import { replyContext, storedReplyContext, resolveStoredReply } from './reply-context';
 import { pendingReports } from './notification-mailbox';
 import { toolActivity, ToolActivity } from './tool-activity';
@@ -69,7 +69,7 @@ import { resolveSkill, skillCatalog } from './skills';
 import { PSTACK_DECISION_NOTE, pstackCommandReply, pstackNotSetUpReply } from '../pstack/overlay';
 import type { SkillRegistry } from '../skills';
 import { voiceChoices, resolveVoiceId } from '../voice/providers/voice-catalog';
-import { SPEECH_OVERLAY, SPEECH_REMINDER, splitSpeechResponse, speechVoiceStyle } from './speech';
+import { SPEECH_OVERLAY, SPEECH_REMINDER, speechCoverageGap, splitSpeechResponse, speechVoiceStyle } from './speech';
 import { join } from 'path';
 import { pathWithin } from '../utils/paths';
 import { randomUUID } from 'crypto';
@@ -1611,7 +1611,7 @@ export class AgentOrchestrationRuntime {
         this.publishText(sessionId, decision.responseId!, streamedDisplay);
         options.onText?.(chunk);
       };
-      const turnPrompt = unansweredInputContext(this.store, receipt.conversationId, receipt.inputId) + prompt;
+      const turnPrompt = unansweredInputContext(this.store, receipt.conversationId, receipt.inputId) + interruptedFragmentContext(this.store, receipt.conversationId, receipt.inputId) + prompt;
       // The previous turn's measured context when this turn resumes it, plus this turn's text
       // (~4 bytes a token) and images. A fresh CLI context starts from none of that history.
       const contextTokens = (cliSession.resume ? latestAgentContextTokens(this.store, sessionId) : 0) + Math.ceil(Buffer.byteLength(turnPrompt) / 4) + visualInput.images.length * IMAGE_TOKEN_ESTIMATE;
@@ -1801,6 +1801,12 @@ export class AgentOrchestrationRuntime {
       if (!silent && speechEnabled && !response.interrupted && !taskSpeech) {
         if (!chatSpeech) this.store.run('INSERT INTO response_speech VALUES(?,?)', decision.responseId!, surfaces.spoken);
         if (surfaces.spoken) this.inputStreams.get(receipt.inputId)?.push({ responseId: decision.responseId!, text: surfaces.spoken });
+        // Speech that skips what the chat answers is heard as no answer at all (issue #624).
+        const missing = !review && !active.notification && parsed.outcome === 'structured' && surfaces.spoken ? speechCoverageGap(input.text, surfaces.display, surfaces.spoken) : [];
+        if (missing.length) {
+          this.store.transaction(() => this.store.appendEvent(receipt.conversationId, 'response.speech_coverage_gap', { responseId: decision.responseId, missing }));
+          console.warn(JSON.stringify({ ts: new Date().toISOString(), level: 'warn', event: 'Spoken reply omits a topic its chat reply answers', agentId: this.agent.id, sessionId, referenceId: decision.responseId, decisionId: decision.decisionId, missing: missing.length }));
+        }
       }
       // The published stream may lag the final display on any turn now (structured arguments
       // arrive after any commentary), so the tail correction is no longer speech/review-only.
@@ -1888,6 +1894,14 @@ export class AgentOrchestrationRuntime {
       }
       throw error;
     } finally {
+      // The next part of a paused utterance reads this reply's input as a cut-off fragment.
+      if (active.stopReason === 'barge-in' && active.decision) {
+        const { decisionId, responseId } = active.decision;
+        try {
+          const row = this.store.get("SELECT conversation_id FROM conversation_decisions WHERE id=? AND state='interrupted'", decisionId);
+          if (row) this.store.transaction(() => this.store.appendEvent(String(row.conversation_id), 'response.barge_in', { responseId, decisionId }));
+        } catch { /* context for a later turn cannot block this turn's cleanup */ }
+      }
       if (providerRenewal) clearInterval(providerRenewal);
       if (providerPermit) { try { this.providerAdmission.release(providerPermit); } catch { /* lease expires; process cleanup must still run */ } }
       removeContextObserver?.();
