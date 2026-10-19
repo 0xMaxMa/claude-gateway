@@ -91,8 +91,6 @@ export interface SessionSignals {
   toolCalls: number;
   /** Any turn fired recovery-triage. */
   recoveryFired: boolean;
-  /** A user-correction heuristic matched (e.g. user negation right after an agent action). */
-  userCorrection: boolean;
 }
 
 /** Remaining daily review budget for an agent. */
@@ -106,7 +104,7 @@ export interface DailyBudget {
 /** Trigger decision. */
 export interface TriggerDecision {
   review: boolean;
-  reason: 'tool-calls' | 'recovery' | 'user-correction' | null;
+  reason: 'tool-calls' | 'recovery' | null;
 }
 
 /** The reviewer's strict JSON output. Any parse failure ⇒ treated as `none`. */

@@ -1,5 +1,6 @@
 import { decodeVoiceFrame } from '../../../src/voice/protocol';
-import { VOICE_CALL_PLAYBACK, VOICE_CALL_VAD, createResampler, createVoiceCallPlayback, createVoiceCallUplink, createVoiceCallVad, encodeVoiceCallFrame, voiceCallLevel, voiceCallReplyText, voiceCallTicketFailure, voiceCallTheme } from '../../../src/ui/voice-call-client';
+import { VOICE_CALL_VAD } from '../../../src/voice/types';
+import { VOICE_CALL_PLAYBACK, createResampler, createVoiceCallPlayback, createVoiceCallUplink, createVoiceCallVad, encodeVoiceCallFrame, voiceCallLevel, voiceCallReplyText, voiceCallTicketFailure, voiceCallTheme } from '../../../src/ui/voice-call-client';
 import { generateVoiceCallPage } from '../../../src/ui/voice-call-ui';
 
 const sine = (frequency: number, rate: number, samples: number, amplitude = 0.5) =>

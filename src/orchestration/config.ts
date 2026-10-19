@@ -4,6 +4,7 @@ import { OrchestrationError } from './types';
 import { isAbsolute } from 'path';
 import { PROVIDER_ADMISSION_DEFAULTS, ProviderAdmissionPolicy } from './provider-admission';
 import { SKILL_CATALOG_BUDGET_BYTES } from './skill-catalog-budget';
+import { VOICE_CALL_VAD } from '../voice/types';
 
 export interface OrchestrationConfig {
   providerAdmission?: Partial<ProviderAdmissionPolicy>;
@@ -80,13 +81,15 @@ export interface OrchestrationConfig {
     /** @deprecated Ignored; voice uses authenticated, origin-bound tickets. */
     allowedOrigins?: string[];
     language?: string;
-    stt?: { provider?: string; model?: string };
+    /** filterBackgroundAudio: ElevenLabs realtime STT drops background speech and noise (off by default; it can also drop quiet user speech). */
+    stt?: { provider?: string; model?: string; filterBackgroundAudio?: boolean };
     tts?: { provider?: string; model?: string; voiceId?: string };
     /** mergeWindowMs: how long a committed utterance waits for a continuation before it becomes one turn; 0 admits it at once. */
     turns?: { silenceCommitMs?: number; finalizationTimeoutMs?: number; maxUtteranceMs?: number; mergeWindowMs?: number };
     playback?: { maxBufferedAudioMs?: number; bargeIn?: boolean };
     /** Live call latency: fastAck speaks a short fastAckModel acknowledgement when the reply has not started speaking fastAckAfterMs after admission. */
-    live?: { fastAck?: boolean; fastAckModel?: string; fastAckAfterMs?: number; fastAckTimeoutMs?: number };
+    /** vad overrides the call page's browser endpointing (VOICE_CALL_VAD); raise minLevel, ratio or startMs to ignore quieter background sound. */
+    live?: { fastAck?: boolean; fastAckModel?: string; fastAckAfterMs?: number; fastAckTimeoutMs?: number; vad?: Partial<typeof VOICE_CALL_VAD> };
     /** Long-form `narrate` worker tool: read supplied text aloud as a sequence of audio files. */
     narrate?: { enabled?: boolean; maxChars?: number; maxParts?: number; targetChars?: number; partTimeoutMs?: number };
   };
@@ -103,17 +106,17 @@ export const ORCHESTRATION_DEFAULTS = {
     maxQueuedPerAgent: 100, defaultTimeoutMs: 1800000, idleTimeoutMs: 300000, maxDurationMs: 0, backgroundGraceMs: 900000, questionReminderMs: 600000, progressStaleMs: 180000, progressNotifyCooldownMs: 300000, progressStaleLimitMs: 7200000, repeatedToolThreshold: 6, interruptAckTimeoutMs: 5000, workspaceMode: 'host' as const, projectRoot: '', resourceRetentionDays: 7 },
   events: { retentionDays: 7, maxSubscriberBufferBytes: 1048576 },
   voice: { enabled: false, notes: { enabled: true, provider: 'elevenlabs', model: 'scribe_v2', replyWithVoice: true }, transport: 'websocket' as const, maxActiveSessionsPerConversation: 1, allowedOrigins: [] as string[], language: '',
-    stt: { provider: 'elevenlabs', model: 'scribe_v2_realtime' },
+    stt: { provider: 'elevenlabs', model: 'scribe_v2_realtime', filterBackgroundAudio: false },
     tts: { provider: 'elevenlabs', model: 'eleven_v3_conversational', voiceId: '' },
-    turns: { silenceCommitMs: 650, finalizationTimeoutMs: 5000, maxUtteranceMs: 60000, mergeWindowMs: 1200 },
+    turns: { silenceCommitMs: 650, finalizationTimeoutMs: 5000, maxUtteranceMs: 60000, mergeWindowMs: 2000 },
     playback: { maxBufferedAudioMs: 1500, bargeIn: true },
-    live: { fastAck: true, fastAckModel: 'claude-haiku-5-5', fastAckAfterMs: 1500, fastAckTimeoutMs: 3000 },
+    live: { fastAck: true, fastAckModel: 'claude-haiku-5-5', fastAckAfterMs: 1500, fastAckTimeoutMs: 3000, vad: { ...VOICE_CALL_VAD } },
     narrate: { enabled: true, maxChars: 100000, maxParts: 60, targetChars: 800, partTimeoutMs: 60000 } },
 };
 // New agents start disabled and choose models explicitly from connected providers.
 export const AGENT_VOICE_DEFAULTS = {
   ...ORCHESTRATION_DEFAULTS.voice,
-  stt: { provider: '', model: '' },
+  stt: { provider: '', model: '', filterBackgroundAudio: false },
   tts: { provider: '', model: '', voiceId: '' },
   notes: { ...ORCHESTRATION_DEFAULTS.voice.notes, provider: '', model: '' },
 };
@@ -123,6 +126,10 @@ export type ResolvedOrchestrationConfig = ReturnType<typeof resolveOrchestration
 export const NARRATE_LIMITS = { targetChars: 4000, maxParts: 200, partTimeoutMs: 300000, maxChars: 2000000 } as const;
 // Validate the complete tree, including unknown keys: a misspelled capacity or
 // secret field must not be silently accepted as a working configuration.
+// The call page's VAD levels and ratios are fractions, unlike the integer ms and counts elsewhere.
+// Each range keeps the detector able to start and end speech: a ratio below 1 puts the threshold
+// under the noise floor, a zero minLevel lets it sit at a silent floor, and an RMS level near 1 is never exceeded.
+const VAD_FRACTION_LIMITS: Record<string, [number, number]> = { ratio: [1, 100], bargeInRatio: [1, 100], minLevel: [0.001, 0.5], initialNoise: [0, 0.5], noiseAdapt: [0, 1] };
 export function validateTree(value: unknown, template: unknown, prefix: string): void {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new OrchestrationError('INVALID_CONFIG', `${prefix} must be an object`);
   const shape = template as Record<string, unknown>;
@@ -134,6 +141,10 @@ export function validateTree(value: unknown, template: unknown, prefix: string):
       if (!Array.isArray(item) || (!item.length && key !== 'allowedOrigins') || item.some(v => typeof v !== 'string')) throw new OrchestrationError('INVALID_CONFIG', `${where} must be a string array`);
     } else if (expected && typeof expected === 'object') validateTree(item, expected, where);
     else if (typeof item !== typeof expected) throw new OrchestrationError('INVALID_CONFIG', `Invalid ${where}`);
+    else if (typeof item === 'number' && prefix.endsWith('.live.vad') && key in VAD_FRACTION_LIMITS) {
+      const [min, max] = VAD_FRACTION_LIMITS[key];
+      if (!Number.isFinite(item) || item < min || item > max) throw new OrchestrationError('INVALID_CONFIG', `${where} must be a number from ${min} to ${max}`);
+    }
     else if (typeof item === 'number' && (!Number.isSafeInteger(item) || item < (['maxDurationMs', 'progressStaleLimitMs', 'inputDebounceMs', 'mergeWindowMs', 'silenceCommitMs'].includes(key) ? 0 : 1) || item > 2147483647)) throw new OrchestrationError('INVALID_CONFIG', `${where} must be a positive bounded integer`);
   }
 }
@@ -153,7 +164,8 @@ export function resolveOrchestrationConfig(config?: OrchestrationConfig, agentVo
     events: { ...d.events, ...config?.events },
     voice: { ...d.voice, ...voice, notes: { ...d.voice.notes, ...voice?.notes },
       stt: { ...d.voice.stt, ...voice?.stt }, tts: { ...d.voice.tts, ...voice?.tts },
-      turns: { ...d.voice.turns, ...voice?.turns }, playback: { ...d.voice.playback, ...voice?.playback }, live: { ...d.voice.live, ...voice?.live },
+      turns: { ...d.voice.turns, ...voice?.turns }, playback: { ...d.voice.playback, ...voice?.playback },
+      live: { ...d.voice.live, ...voice?.live, vad: { ...d.voice.live.vad, ...voice?.live?.vad } },
       narrate: { ...d.voice.narrate, ...voice?.narrate } },
   };
   for (const role of ['tts', 'stt', 'notes'] as const) result.voice[role].provider = canonicalVoiceProvider(result.voice[role].provider);
