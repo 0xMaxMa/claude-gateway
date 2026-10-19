@@ -786,7 +786,8 @@ describe('the project delete guard follows the folder and the work, not the sess
 
   it('writes the start log under the configured log dir', async () => {
     h = await harness();
-    fs.writeFileSync(path.join(h.root, 'site', 'package.json'), JSON.stringify({ scripts: { dev: 'node -e "console.log(1);process.exit(1)"' } }));
+    fs.mkdirSync(path.join(h.root, 'site', '.pod'));
+    fs.writeFileSync(path.join(h.root, 'site', '.pod', 'start.sh'), 'echo 1\nexit 1\n');
     const res = await supertest(h.app).post('/api/v1/projects/site/running/start').set(admin()).send({});
     expect(res.body.code).toBe('start_failed');
     expect(fs.existsSync(path.join(h.base, 'logs', 'projects', 'site.log'))).toBe(true);
