@@ -10,6 +10,7 @@ import { join } from 'path';
 import WebSocket from 'ws';
 import { VoiceApi } from '../../../src/api/voice-router';
 import { createVoiceCallRouter } from '../../../src/api/voice-call-router';
+import { VOICE_CALL_VAD } from '../../../src/voice/types';
 import { voiceCallPairings } from '../../../src/voice/call-pairing';
 import { TelegramBotAvatars } from '../../../src/voice/telegram-avatar';
 import { FakeSttProvider, FakeTtsProvider } from '../../../src/voice/providers/fake';
@@ -416,4 +417,13 @@ test('the call page decides up front: a fresh link opens the call, a used, expir
       expect(calling(gone.text)).toEqual({ starting: false, script: false });
     }
   } finally { now.mockRestore(); await f.close(); }
+});
+
+test('the call page embeds the agent voice.live.vad overrides over the default VAD', async () => {
+  const f = fixture({ voice: { ...ORCHESTRATION_DEFAULTS.voice, enabled: true, tts: { ...ORCHESTRATION_DEFAULTS.voice.tts, voiceId: 'fixture' }, live: { vad: { minLevel: 0.04 } } } });
+  try {
+    const page = await request(f.app).get(`/voice-call/${voiceCallPairings.create('a', '42')}`);
+    const cfg = JSON.parse(/var CFG = (\{.*?\});/.exec(page.text)![1]);
+    expect(cfg.vad).toEqual({ ...VOICE_CALL_VAD, minLevel: 0.04 });
+  } finally { await f.close(); }
 });

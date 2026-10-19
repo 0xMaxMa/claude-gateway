@@ -194,6 +194,28 @@ These settings under `voice.live` change only live voice turns (`/call` and brow
 | `fastAckModel` | `claude-haiku-5-5` | Model for the acknowledgement, called with thinking disabled |
 | `fastAckAfterMs` | `1500` | How long after admission the reply may take to start speaking before the acknowledgement plays |
 | `fastAckTimeoutMs` | `3000` | Give up on an acknowledgement that takes longer |
+| `vad` | see below | Overrides for the `/call` page's browser speech detection, merged field by field over the defaults |
+
+## Background speech and noise
+
+The browser removes echo and steady noise, but not other people talking nearby. Realtime STT transcribes whatever the microphone hears, so nearby speech can arrive as if the caller said it. Three settings reduce this:
+
+- **ElevenLabs background-audio filter.** Set `voice.stt.filterBackgroundAudio` to `true` to send `filter_background_audio=true` to ElevenLabs realtime STT (`elevenlabs`, `upstream:elevenlabs` and `managed:elevenlabs`). It is off by default and other providers ignore it. Caveats: the filter can also drop the caller's quiet speech; its Thai quality is unverified; it is reported to conflict with `include_timestamps=true` (the gateway sends `false`); and for `upstream:` and `managed:` the gateway forwards the parameter in the relay URL, but whether the relay passes it on to ElevenLabs depends on the provider service.
+- **Less sensitive browser speech detection.** `voice.live.vad` overrides the `/call` page's energy detector. Raise `minLevel`, `ratio` or `startMs` so quieter or shorter sounds do not open a turn. Too high a value can miss the caller's own soft speech.
+- **Agent caveat.** Every live voice turn tells the agent that its input is a speech-to-text transcript that can include other voices, and to confirm an off-topic or implausible fragment before acting on it. Voice messages and typed turns do not get this note.
+
+| Setting under `voice.live.vad` | Default | Effect |
+| --- | --- | --- |
+| `startMs` | `120` | Milliseconds above the threshold before speech starts |
+| `endMs` | `350` | Milliseconds below the threshold before speech ends |
+| `minLevel` | `0.012` | Lowest speech threshold, as RMS level (0.001–0.5) |
+| `ratio` | `3` | The threshold is at least this many times the adaptive noise floor (1–100) |
+| `initialNoise` | `0.004` | Starting noise floor, as RMS level (0–0.5) |
+| `noiseAdapt` | `0.05` | How fast the noise floor follows quiet input (0–1) |
+| `bargeInRatio` | `2` | While the reply is audible, speech must be this many times the threshold (1–100) |
+| `bargeInMs` | `250` | While the reply is audible, milliseconds above that level before speech interrupts it |
+
+Millisecond values are positive integers. For example, `{ "voice": { "stt": { "provider": "elevenlabs", "model": "scribe_v2_realtime", "filterBackgroundAudio": true }, "live": { "vad": { "minLevel": 0.03, "startMs": 200 } } } }` turns on the filter and ignores quieter, shorter sounds.
 
 ## Diagnose missing or delayed audio
 

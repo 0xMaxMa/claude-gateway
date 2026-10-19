@@ -6,7 +6,8 @@
  * `gateway.publicUrl`, and the WebSocket path comes from the ticket response.
  */
 import { BASE_STYLE, TG_WEBAPP_JS, htmlEscape, page } from './cli-viewer-ui';
-import { VOICE_CALL_PLAYBACK, VOICE_CALL_VAD, createResampler, createVoiceCallPlayback, createVoiceCallUplink, createVoiceCallVad, encodeVoiceCallFrame, formatCallDuration, voiceCallErrorView, voiceCallLevel, voiceCallReplyText, voiceCallTheme, voiceCallTicketFailure } from './voice-call-client';
+import { VOICE_CALL_PLAYBACK, createResampler, createVoiceCallPlayback, createVoiceCallUplink, createVoiceCallVad, encodeVoiceCallFrame, formatCallDuration, voiceCallErrorView, voiceCallLevel, voiceCallReplyText, voiceCallTheme, voiceCallTicketFailure } from './voice-call-client';
+import { VOICE_CALL_VAD } from '../voice/types';
 
 export interface VoiceCallPageOpts {
   pairingId: string;
@@ -14,6 +15,8 @@ export interface VoiceCallPageOpts {
   basePath: string;
   /** `voice.turns.maxUtteranceMs`: the client ends a turn before the server would reject it. */
   maxUtteranceMs: number;
+  /** `voice.live.vad`: overrides for the browser endpointing over VOICE_CALL_VAD. */
+  vad?: Partial<typeof VOICE_CALL_VAD>;
   /** The bot's Telegram name; the agent id when Telegram has not answered. */
   botName?: string;
   /** The agent has a Telegram bot, so the page asks for its photo. The photo covers the
@@ -189,7 +192,7 @@ const ICONS = {
 };
 
 export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
-  const cfg = JSON.stringify({ pairingId: opts.pairingId, basePath: opts.basePath, maxUtteranceMs: opts.maxUtteranceMs, vad: VOICE_CALL_VAD, playback: VOICE_CALL_PLAYBACK, linkUsed: Boolean(opts.linkUsed) }).replace(/</g, '\\u003c');
+  const cfg = JSON.stringify({ pairingId: opts.pairingId, basePath: opts.basePath, maxUtteranceMs: opts.maxUtteranceMs, vad: { ...VOICE_CALL_VAD, ...opts.vad }, playback: VOICE_CALL_PLAYBACK, linkUsed: Boolean(opts.linkUsed) }).replace(/</g, '\\u003c');
   const client = [createResampler, encodeVoiceCallFrame, voiceCallLevel, createVoiceCallVad, createVoiceCallUplink, voiceCallTicketFailure, formatCallDuration, voiceCallErrorView, voiceCallReplyText].map(fn => fn.toString()).join(';\n');
   const name = opts.botName ?? opts.agentId;
   const initial = Array.from(name.trim())[0]?.toUpperCase() ?? '?';

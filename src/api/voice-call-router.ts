@@ -37,7 +37,7 @@ export function createVoiceCallRouter(deps: VoiceCallRouterDeps): Router {
     const voice = resolveOrchestrationConfig(config.orchestration, config.voice ?? { enabled: false }).voice;
     const token = config.telegram?.botToken;
     const bot = token ? await avatars.forPage(pairing.agentId, token) : { avatar: null };
-    res.send(generateVoiceCallPage({ pairingId: pairing.pairingId, agentId: pairing.agentId, basePath: deps.basePath(), maxUtteranceMs: voice.turns.maxUtteranceMs,
+    res.send(generateVoiceCallPage({ pairingId: pairing.pairingId, agentId: pairing.agentId, basePath: deps.basePath(), maxUtteranceMs: voice.turns.maxUtteranceMs, vad: voice.live.vad,
       botName: bot.name, photo: Boolean(token), avatarVersion: bot.photoId, linkUsed: Boolean(pairing.callToken) }));
   } catch (error) { next(error); } });
 
