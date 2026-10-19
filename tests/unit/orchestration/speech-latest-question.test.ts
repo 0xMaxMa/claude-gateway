@@ -18,6 +18,9 @@ test('both speech rule texts make spoken_text answer the latest question and cov
     expect(rules).toMatch(/spoken_text answers the (user's )?latest question[^.]* first/);
     expect(rules).toMatch(/covers every (other )?question display_text answers/);
     expect(rules).toMatch(/never (speak )?only an acknowledgement/);
+    // Within the same speech budget, and keeping the user's Latin-script terms (npm) as written.
+    expect(rules).toContain('within the same budget');
+    expect(rules).toMatch(/Latin[- ]script terms? spelled as written|Latin script spelled as written/);
   }
 });
 
@@ -72,7 +75,10 @@ test('a live voice turn after barged-in fragments lists them as context and mark
     const prompt = f.prompts.at(-1)!;
     expect(fragmentsLine(prompt)).toContain(JSON.stringify(['แก้ทั้งหมดเลย', 'แล้วผมอยากรู้ว่า']));
     expect(prompt).toContain('The current user message below is the latest part and the question to answer first');
-    expect(prompt.indexOf('Earlier fragments')).toBeLessThan(prompt.indexOf('[Current user message — the request to answer now]\nส่วนของ npm จะขึ้นยังไง'));
+    // Per-turn content goes last, next to the message it labels, so the reusable prefix stays intact.
+    expect(prompt.indexOf('Earlier fragments')).toBeGreaterThan(prompt.indexOf('Recent committed command receipts'));
+    expect(prompt.indexOf('Earlier fragments')).toBeGreaterThan(prompt.indexOf(SPEECH_REMINDER));
+    expect(prompt.endsWith(`${fragmentsLine(prompt)}\nThe current user message below is the latest part and the question to answer first, in spoken_text too; read it together with these fragments as one request.\n\n[Current user message — the request to answer now]\nส่วนของ npm จะขึ้นยังไง`)).toBe(true);
     expect(f.events('response.barge_in')).toHaveLength(2);
     // Once that turn is answered, its fragments are not carried into the next one.
     await f.send('ขอบคุณ');

@@ -87,3 +87,17 @@ test('an acknowledged input whose reply failed stays in the failed-input context
     expect(unansweredInputContext(store, next.conversationId, next.inputId)).toContain('deploy the fix');
   } finally { store.close(); }
 });
+
+test('a system notice on a later input still closes the failed-input context, as before', () => {
+  const store = new OrchestrationStore(':memory:', 'a'), decisions = new DecisionService(store);
+  try {
+    const scope = { agentId: 'a', agentSessionId: 'session', source: 'api' as const, accountId: 'owner', chatId: 'chat', threadKey: '', principalId: 'owner' };
+    const failed = store.acceptInput({ scope, text: 'deploy the fix', ingressKey: 'one' });
+    decisions.finish(decisions.begin(failed.conversationId, 'owner', [failed.inputId]), 'failed', 'failed');
+    const answered = store.acceptInput({ scope, text: 'yes', ingressKey: 'two' });
+    store.transaction(() => store.completeInputReceipt(answered));
+    decisions.notice(answered.conversationId, 'Answer recorded.', false, answered.inputId);
+    const next = store.acceptInput({ scope, text: 'and?', ingressKey: 'three' });
+    expect(unansweredInputContext(store, next.conversationId, next.inputId)).toBe('');
+  } finally { store.close(); }
+});
