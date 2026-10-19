@@ -56,6 +56,9 @@ export const PACKAGES: Record<string, PackageConfig> = {
 export interface PackageInfo {
   package: string;
   current: string | null;
+  /** The version an update installs, from the `channel` dist-tag. */
+  target: string | null;
+  /** Same value as `target`, kept for consumers written before channels. */
   latest: string | null;
   channel: ReleaseChannel | null;
   hasUpdate: boolean;
@@ -153,6 +156,7 @@ export async function fetchAllPackageVersions(): Promise<PackageInfo[]> {
       return {
         package: config.npm,
         current,
+        target: target?.version ?? null,
         latest: target?.version ?? null,
         channel: target?.channel ?? null,
         hasUpdate: updateAvailable(current, target?.version ?? null),

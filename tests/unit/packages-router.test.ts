@@ -856,7 +856,7 @@ describe('release channel — claude-gateway follows the stable dist-tag', () =>
     mockNpmList(GATEWAY, '1.8.0');
     mockFetch({ [GATEWAY]: { latest: '2.0.0', stable: '1.9.0' } });
 
-    expect(await gatewayInfo()).toMatchObject({ current: '1.8.0', latest: '1.9.0', channel: 'stable', hasUpdate: true });
+    expect(await gatewayInfo()).toMatchObject({ current: '1.8.0', target: '1.9.0', latest: '1.9.0', channel: 'stable', hasUpdate: true });
   });
 
   it('does not offer latest to a gateway already on stable', async () => {
@@ -870,14 +870,14 @@ describe('release channel — claude-gateway follows the stable dist-tag', () =>
     mockNpmList(GATEWAY, '1.8.0');
     mockFetch({ [GATEWAY]: { latest: '2.0.0' } });
 
-    expect(await gatewayInfo()).toMatchObject({ latest: '2.0.0', channel: 'latest', hasUpdate: true });
+    expect(await gatewayInfo()).toMatchObject({ target: '2.0.0', latest: '2.0.0', channel: 'latest', hasUpdate: true });
   });
 
   it('treats a non-semver dist-tag as no answer', async () => {
     mockNpmList(GATEWAY, '1.8.0');
     mockFetch({ [GATEWAY]: { latest: '2.0.0', stable: '1.9.0 && touch /tmp/pwned' } });
 
-    expect(await gatewayInfo()).toMatchObject({ latest: null, hasUpdate: false });
+    expect(await gatewayInfo()).toMatchObject({ target: null, latest: null, hasUpdate: false });
   });
 
   it('POST update installs exactly the stable version', async () => {

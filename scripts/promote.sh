@@ -5,6 +5,8 @@ set -euo pipefail
 
 PACKAGE='@0xmaxma/claude-gateway'
 WORKFLOW='promote.yml'
+# Explicit, so gh never resolves the repo from a remote such as `upstream`.
+REPO='0xMaxMa/claude-gateway'
 LIST_SIZE=10
 
 fail() {
@@ -60,8 +62,8 @@ if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
   exit 0
 fi
 
-gh workflow run "$WORKFLOW" --ref main -f version="$target"
+gh workflow run "$WORKFLOW" --repo "$REPO" --ref main -f version="$target"
 
 echo ""
-echo "Promote workflow started for $target. Follow it with: gh run list --workflow=$WORKFLOW"
+echo "Promote workflow started for $target. Follow it with: gh run list --repo $REPO --workflow=$WORKFLOW"
 echo "Check the result with: npm view $PACKAGE dist-tags"

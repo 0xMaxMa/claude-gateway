@@ -19,8 +19,20 @@ main() {
     || fail "version '$version' is not plain x.y.z (no leading v)"
   echo "ok: version format: $version"
 
-  local published
-  published="$(npm view "$PACKAGE@$version" version 2>/dev/null || true)"
+  # npm answers a missing version with E404; any other failure means the
+  # registry could not be asked, which must not read as "not published".
+  local published err
+  err="$(mktemp)"
+  if ! published="$(npm view "$PACKAGE@$version" version 2>"$err")"; then
+    if grep -q 'E404' "$err"; then
+      rm -f "$err"
+      fail "$PACKAGE@$version is not published on npm"
+    fi
+    cat "$err" >&2
+    rm -f "$err"
+    fail "could not reach the npm registry to check $PACKAGE@$version"
+  fi
+  rm -f "$err"
   [[ "$published" == "$version" ]] \
     || fail "$PACKAGE@$version is not published on npm (npm view returned '$published')"
   echo "ok: published on npm: $PACKAGE@$version"

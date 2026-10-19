@@ -10,6 +10,7 @@ import {
   runNativeUpdate,
   updateAvailable,
 } from '../../packages/registry';
+import { unknownFlagNames } from '../args';
 import { detectManager } from '../manager';
 import { confirmAction } from '../prompt';
 import { printJson } from '../output';
@@ -27,6 +28,19 @@ import { writeCommandHelp } from '../output';
 
 type PackageId = 'claude-gateway' | 'claude-code';
 
+/** Flags each command acts on. Anything else is refused: a mistyped `--lates`
+ *  would otherwise be dropped and the update would quietly follow `stable`. */
+const UPDATE_FLAG_NAMES: ReadonlySet<string> = new Set(['help', 'json', 'yes', 'latest']);
+const CLAUDE_FLAG_NAMES: ReadonlySet<string> = new Set(['help', 'json', 'yes']);
+
+/** Writes the refusal and returns true when `flags` holds a flag outside `known`. */
+function rejectUnknownFlags(flags: Record<string, string | boolean>, known: ReadonlySet<string>): boolean {
+  const unknown = unknownFlagNames(flags, known);
+  if (!unknown.length) return false;
+  process.stderr.write(`Unknown flag(s): ${unknown.map((f) => `--${f}`).join(' ')}\n`);
+  return true;
+}
+
 const RELEASE_NOTES: Record<PackageId, (version: string) => string> = {
   'claude-gateway': (v) => `https://github.com/0xMaxMa/claude-gateway/releases/tag/v${v}`,
   'claude-code': () => 'https://www.npmjs.com/package/@anthropic-ai/claude-code',
@@ -35,7 +49,7 @@ const RELEASE_NOTES: Record<PackageId, (version: string) => string> = {
 interface Resolved {
   config: PackageConfig;
   current: string | null;
-  latest: string;
+  target: string;
   channel: ReleaseChannel;
   hasUpdate: boolean;
 }
@@ -60,7 +74,7 @@ async function resolve(id: PackageId, flags: Record<string, string | boolean>): 
   return {
     config,
     current,
-    latest: target.version,
+    target: target.version,
     channel: target.channel,
     hasUpdate: updateAvailable(current, target.version),
   };
@@ -73,7 +87,9 @@ async function check(id: PackageId, flags: Record<string, string | boolean>): Pr
     {
       package: resolved.config.npm,
       current: resolved.current,
-      latest: resolved.latest,
+      target: resolved.target,
+      // Same value as `target`, kept for consumers written before channels.
+      latest: resolved.target,
       channel: resolved.channel,
       hasUpdate: resolved.hasUpdate,
     },
@@ -99,23 +115,23 @@ function printRestartGuidance(): void {
 async function update(id: PackageId, flags: Record<string, string | boolean>): Promise<number> {
   const resolved = await resolve(id, flags);
   if (!resolved) return 1;
-  const { config, current, latest, channel } = resolved;
+  const { config, current, target, channel } = resolved;
 
   if (!resolved.hasUpdate) {
     printJson({ package: config.npm, from: current, to: current, updated: false }, flags);
     process.stderr.write(
       current === null
         ? `${config.npm} is not installed here — install it before updating.\n`
-        : `Already on ${current} (published ${channel}: ${latest}).\n`,
+        : `Already on ${current} (published ${channel}: ${target}).\n`,
     );
     return 0;
   }
 
   process.stderr.write(
-    `\n${config.npm}\n  current: ${current ?? 'not installed'}\n  target:  ${latest} (${channel})\n` +
-      `  notes:   ${RELEASE_NOTES[id](latest)}\n\n`,
+    `\n${config.npm}\n  current: ${current ?? 'not installed'}\n  target:  ${target} (${channel})\n` +
+      `  notes:   ${RELEASE_NOTES[id](target)}\n\n`,
   );
-  if (!(await confirmAction(flags, 'update', `Update ${config.npm} to ${latest}?`))) {
+  if (!(await confirmAction(flags, 'update', `Update ${config.npm} to ${target}?`))) {
     process.stderr.write('Aborted — nothing was installed.\n');
     return 1;
   }
@@ -123,7 +139,7 @@ async function update(id: PackageId, flags: Record<string, string | boolean>): P
   // Native-installer packages (claude-code) must use their own updater: an
   // `npm install -g` would write a second copy that isn't the binary on PATH.
   const error =
-    config.update === 'native' && config.bin ? runNativeUpdate(config) : installNpmVersion(config.npm, latest);
+    config.update === 'native' && config.bin ? runNativeUpdate(config) : installNpmVersion(config.npm, target);
   if (error !== null) {
     process.stderr.write(`Update failed: ${error}\n`);
     return 1;
@@ -149,6 +165,7 @@ export async function runUpdate(
   flags: Record<string, string | boolean>,
 ): Promise<number> {
   const verb = positionals[0];
+  if (rejectUnknownFlags(flags, UPDATE_FLAG_NAMES)) return 1;
   if (flags.help === true) {
     writeCommandHelp(
       true,
@@ -175,6 +192,7 @@ export async function runClaude(
   flags: Record<string, string | boolean>,
 ): Promise<number> {
   const [verb, sub] = positionals;
+  if (rejectUnknownFlags(flags, CLAUDE_FLAG_NAMES)) return 1;
   if (!verb || flags.help === true) {
     writeCommandHelp(
       flags.help === true,

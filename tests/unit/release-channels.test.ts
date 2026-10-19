@@ -35,7 +35,8 @@ describe('release channels', () => {
   });
 });
 
-/** Fake `npm` and `gh` on PATH. npm answers from env; gh records its arguments to $GH_LOG. */
+/** Fake `npm` and `gh` on PATH. npm answers from env (FAKE_NPM_ERROR makes it fail
+ *  with that npm error code, as the real CLI does); gh records its arguments to $GH_LOG. */
 function makeFakeBin(): string {
   const binDir = mkdtempSync(join(tmpdir(), 'promote-'));
   const fakeNpm = join(binDir, 'npm');
@@ -43,6 +44,7 @@ function makeFakeBin(): string {
     fakeNpm,
     [
       '#!/usr/bin/env bash',
+      'if [[ -n "${FAKE_NPM_ERROR:-}" ]]; then echo "npm error code $FAKE_NPM_ERROR" >&2; exit 1; fi',
       'case "$*" in',
       '  *" version") echo "$FAKE_PUBLISHED" ;;',
       '  *"time --json") echo "$FAKE_TIMES" ;;',
@@ -64,10 +66,10 @@ describe('promote-check.sh', () => {
   beforeAll(() => (binDir = makeFakeBin()));
   afterAll(() => rmSync(binDir, { recursive: true, force: true }));
 
-  function runCheck(version: string, published: string) {
+  function runCheck(version: string, published: string, npmError = '') {
     const result = spawnSync('bash', [join(REPO_ROOT, 'scripts/release/promote-check.sh'), version], {
       encoding: 'utf8',
-      env: { ...process.env, PATH: `${binDir}:${process.env.PATH}`, FAKE_PUBLISHED: published },
+      env: { ...process.env, PATH: `${binDir}:${process.env.PATH}`, FAKE_PUBLISHED: published, FAKE_NPM_ERROR: npmError },
     });
     return { status: result.status, output: `${result.stdout}${result.stderr}` };
   }
@@ -77,9 +79,16 @@ describe('promote-check.sh', () => {
   });
 
   it('refuses a version that is not on npm', () => {
-    const result = runCheck('1.0.9', '');
+    const result = runCheck('1.0.9', '', 'E404');
     expect(result.status).toBe(1);
     expect(result.output).toMatch(/is not published on npm/);
+  });
+
+  it('reports an unreachable registry as such, not as an unpublished version', () => {
+    const result = runCheck('1.0.1', '', 'ECONNREFUSED');
+    expect(result.status).toBe(1);
+    expect(result.output).toMatch(/could not reach the npm registry/);
+    expect(result.output).not.toMatch(/is not published/);
   });
 
   it('refuses a version that is not plain x.y.z', () => {
@@ -134,13 +143,13 @@ describe('promote.sh', () => {
   it('dispatches the Promote workflow for the picked version', () => {
     const result = runPromote('1\ny\n');
     expect(result.status).toBe(0);
-    expect(result.gh.trim()).toBe('workflow run promote.yml --ref main -f version=1.1.0');
+    expect(result.gh.trim()).toBe('workflow run promote.yml --repo 0xMaxMa/claude-gateway --ref main -f version=1.1.0');
   });
 
   it('can roll stable back to an older version', () => {
     const result = runPromote('3\ny\n');
     expect(result.status).toBe(0);
-    expect(result.gh.trim()).toBe('workflow run promote.yml --ref main -f version=1.0.0');
+    expect(result.gh.trim()).toBe('workflow run promote.yml --repo 0xMaxMa/claude-gateway --ref main -f version=1.0.0');
   });
 
   it('dispatches nothing when the confirmation is declined', () => {

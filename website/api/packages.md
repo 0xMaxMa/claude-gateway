@@ -8,7 +8,7 @@ Endpoints for checking and installing newer versions of `@0xmaxma/claude-gateway
 
 Returns the current and latest version for both packages. Result is cached for 5 minutes to avoid hammering the npm registry.
 
-`latest` is the version an update would install, read from the npm registry's dist-tags. `channel` names the dist-tag it came from. `claude-gateway` follows `stable` and falls back to `latest` when no version has been promoted; `claude-code` follows `latest`. Both are `null` when the registry answer is unusable. `current` is resolved per package: `claude-gateway` (an npm global) via `npm list -g`, and `claude-code` (native installer) from the installed binary (`claude --version`). If Claude Code is not installed, its `current` is `null` and the UI renders `—`. `hasUpdate` is `true` only when `latest` is strictly newer than `current` by semver ordering, so a binary that is *ahead* of the registry `latest` does not report a spurious update.
+`target` is the version an update would install, read from the npm registry's dist-tags. `channel` names the dist-tag it came from. `claude-gateway` follows `stable` and falls back to `latest` when no version has been promoted; `claude-code` follows `latest`. Both are `null` when the registry answer is unusable. `latest` carries the same value as `target` and is kept for clients written before release channels; it is not necessarily the npm `latest` dist-tag. `current` is resolved per package: `claude-gateway` (an npm global) via `npm list -g`, and `claude-code` (native installer) from the installed binary (`claude --version`). If Claude Code is not installed, its `current` is `null` and the UI renders `—`. `hasUpdate` is `true` only when `target` is strictly newer than `current` by semver ordering, so a binary that is *ahead* of `target` does not report a spurious update.
 
 ```bash
 curl -H "X-Api-Key: admin-secret" \
@@ -21,6 +21,7 @@ curl -H "X-Api-Key: admin-secret" \
     {
       "package": "@0xmaxma/claude-gateway",
       "current": "1.2.0",
+      "target": "1.3.1",
       "latest": "1.3.1",
       "channel": "stable",
       "hasUpdate": true
@@ -28,6 +29,7 @@ curl -H "X-Api-Key: admin-secret" \
     {
       "package": "@anthropic-ai/claude-code",
       "current": "1.0.5",
+      "target": "1.1.0",
       "latest": "1.1.0",
       "channel": "latest",
       "hasUpdate": true
@@ -48,7 +50,7 @@ curl -H "X-Api-Key: admin-secret" \
 
 ## POST /api/v1/packages/:name/update {#post-apiv1packagesnameupdate}
 
-Installs the version `GET /api/v1/packages` reports as `latest` for the specified package (for `claude-gateway`, the `stable` dist-tag). `:name` accepts `claude-gateway` or `claude-code`.
+Installs the version `GET /api/v1/packages` reports as `target` for the specified package (for `claude-gateway`, the `stable` dist-tag). `:name` accepts `claude-gateway` or `claude-code`.
 
 - **claude-gateway**: runs `npm install -g @0xmaxma/claude-gateway@<version>` then sends itself `SIGTERM`, requesting a non-zero (`EX_TEMPFAIL`) exit code so a `Restart=on-failure` unit restarts it too — a graceful `exit(0)` reads as success to `on-failure` and never restarts (issue #450). `Restart=always` units and pm2's `autorestart` restart on any exit code regardless.
 - **claude-code**: runs the native updater (`claude update`) so the actual binary on PATH is updated. No restart needed. (npm install is not used — Claude Code ships via the native installer, so an npm-global copy would not be the running binary.)

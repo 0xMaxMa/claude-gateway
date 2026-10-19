@@ -80,6 +80,7 @@ describe('update check — read-only', () => {
     expect(JSON.parse(stdout.join(''))).toEqual({
       package: '@0xmaxma/claude-gateway',
       current: '1.7.9',
+      target: '1.8.0',
       latest: '1.8.0',
       channel: 'stable',
       hasUpdate: true,
@@ -119,6 +120,19 @@ describe('update check — read-only', () => {
 
   it('rejects an unknown subcommand', async () => {
     expect(await runUpdate('claude-gateway', ['now'], {})).toBe(1);
+    expect(mockInstall).not.toHaveBeenCalled();
+  });
+
+  it('rejects an unknown flag instead of silently following stable', async () => {
+    mockResolveCurrent.mockReturnValue('1.7.9');
+    mockGetTarget.mockResolvedValue({ version: '1.8.0', channel: 'stable' });
+
+    expect(await runUpdate('claude-gateway', ['check'], { lates: true })).toBe(1);
+    expect(await runUpdate('claude-gateway', [], { lates: true, yes: true })).toBe(1);
+
+    expect(stderr.join('')).toMatch(/Unknown flag\(s\): --lates/);
+    expect(stdout.join('')).toBe('');
+    expect(mockGetTarget).not.toHaveBeenCalled();
     expect(mockInstall).not.toHaveBeenCalled();
   });
 });
@@ -243,6 +257,12 @@ describe('claude — the Claude Code binary', () => {
   it('rejects unknown verbs without touching the installer', async () => {
     expect(await runClaude(['frobnicate'], {})).toBe(1);
     expect(await runClaude(['update', 'now'], {})).toBe(1);
+    expect(mockNative).not.toHaveBeenCalled();
+  });
+
+  it('rejects unknown flags without touching the installer', async () => {
+    expect(await runClaude(['update'], { yse: true })).toBe(1);
+    expect(stderr.join('')).toMatch(/Unknown flag\(s\): --yse/);
     expect(mockNative).not.toHaveBeenCalled();
   });
 });
