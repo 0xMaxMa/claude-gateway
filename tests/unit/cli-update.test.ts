@@ -1,12 +1,12 @@
 jest.mock('../../src/packages/registry', () => ({
   PACKAGES: {
-    'claude-gateway': { npm: '@0xmaxma/claude-gateway', detect: 'npm', update: 'npm' },
-    'claude-code': { npm: '@anthropic-ai/claude-code', detect: 'binary', bin: 'claude', update: 'native' },
+    'claude-gateway': { npm: '@0xmaxma/claude-gateway', channel: 'stable', detect: 'npm', update: 'npm' },
+    'claude-code': { npm: '@anthropic-ai/claude-code', channel: 'latest', detect: 'binary', bin: 'claude', update: 'native' },
   },
   resolveCurrent: jest.fn(),
-  getLatestVersion: jest.fn(),
+  getTargetVersion: jest.fn(),
   getNpmListVersion: jest.fn(),
-  installNpmLatest: jest.fn(),
+  installNpmVersion: jest.fn(),
   runNativeUpdate: jest.fn(),
   updateAvailable: jest.requireActual('../../src/packages/registry').updateAvailable,
 }));
@@ -14,9 +14,9 @@ jest.mock('../../src/cli/manager', () => ({ detectManager: jest.fn(() => 'system
 
 import {
   resolveCurrent,
-  getLatestVersion,
+  getTargetVersion,
   getNpmListVersion,
-  installNpmLatest,
+  installNpmVersion,
   runNativeUpdate,
 } from '../../src/packages/registry';
 import { runUpdate, runClaude } from '../../src/cli/commands/update';
@@ -30,9 +30,9 @@ import { runUpdate, runClaude } from '../../src/cli/commands/update';
  */
 
 const mockResolveCurrent = resolveCurrent as jest.MockedFunction<typeof resolveCurrent>;
-const mockGetLatest = getLatestVersion as jest.MockedFunction<typeof getLatestVersion>;
+const mockGetTarget = getTargetVersion as jest.MockedFunction<typeof getTargetVersion>;
 const mockNpmList = getNpmListVersion as jest.MockedFunction<typeof getNpmListVersion>;
-const mockInstall = installNpmLatest as jest.MockedFunction<typeof installNpmLatest>;
+const mockInstall = installNpmVersion as jest.MockedFunction<typeof installNpmVersion>;
 const mockNative = runNativeUpdate as jest.MockedFunction<typeof runNativeUpdate>;
 
 let stdout: string[];
@@ -72,7 +72,7 @@ afterEach(() => {
 describe('update check — read-only', () => {
   it('reports current/latest/hasUpdate and installs nothing', async () => {
     mockResolveCurrent.mockReturnValue('1.7.9');
-    mockGetLatest.mockResolvedValue('1.8.0');
+    mockGetTarget.mockResolvedValue({ version: '1.8.0', channel: 'stable' });
 
     const code = await runUpdate('claude-gateway', ['check'], {});
 
@@ -81,14 +81,26 @@ describe('update check — read-only', () => {
       package: '@0xmaxma/claude-gateway',
       current: '1.7.9',
       latest: '1.8.0',
+      channel: 'stable',
       hasUpdate: true,
     });
     expect(mockInstall).not.toHaveBeenCalled();
   });
 
+  it('follows the stable channel unless --latest is passed', async () => {
+    mockResolveCurrent.mockReturnValue('1.7.9');
+    mockGetTarget.mockResolvedValue({ version: '1.8.0', channel: 'stable' });
+
+    await runUpdate('claude-gateway', ['check'], {});
+    expect(mockGetTarget).toHaveBeenLastCalledWith(expect.objectContaining({ channel: 'stable' }), { latest: false });
+
+    await runUpdate('claude-gateway', ['check'], { latest: true });
+    expect(mockGetTarget).toHaveBeenLastCalledWith(expect.objectContaining({ channel: 'stable' }), { latest: true });
+  });
+
   it('does not claim "up to date" when the registry is unreachable', async () => {
     mockResolveCurrent.mockReturnValue('1.7.9');
-    mockGetLatest.mockRejectedValue(new Error('ENOTFOUND'));
+    mockGetTarget.mockRejectedValue(new Error('ENOTFOUND'));
 
     const code = await runUpdate('claude-gateway', ['check'], {});
 
@@ -99,7 +111,7 @@ describe('update check — read-only', () => {
 
   it('reports no update when the installed version is ahead of the registry latest', async () => {
     mockResolveCurrent.mockReturnValue('1.9.0');
-    mockGetLatest.mockResolvedValue('1.8.0');
+    mockGetTarget.mockResolvedValue({ version: '1.8.0', channel: 'stable' });
 
     expect(await runUpdate('claude-gateway', ['check'], {})).toBe(0);
     expect(JSON.parse(stdout.join('')).hasUpdate).toBe(false);
@@ -114,7 +126,7 @@ describe('update check — read-only', () => {
 describe('update — confirmation gate', () => {
   it('refuses to install non-interactively without --yes', async () => {
     mockResolveCurrent.mockReturnValue('1.7.9');
-    mockGetLatest.mockResolvedValue('1.8.0');
+    mockGetTarget.mockResolvedValue({ version: '1.8.0', channel: 'stable' });
 
     const code = await runUpdate('claude-gateway', [], {});
 
@@ -125,7 +137,7 @@ describe('update — confirmation gate', () => {
 
   it('shows current → target and the release notes before asking', async () => {
     mockResolveCurrent.mockReturnValue('1.7.9');
-    mockGetLatest.mockResolvedValue('1.8.0');
+    mockGetTarget.mockResolvedValue({ version: '1.8.0', channel: 'stable' });
 
     await runUpdate('claude-gateway', [], {});
 
@@ -137,7 +149,7 @@ describe('update — confirmation gate', () => {
 
   it('is a no-op (exit 0, no install) when already on the latest version', async () => {
     mockResolveCurrent.mockReturnValue('1.8.0');
-    mockGetLatest.mockResolvedValue('1.8.0');
+    mockGetTarget.mockResolvedValue({ version: '1.8.0', channel: 'stable' });
 
     const code = await runUpdate('claude-gateway', [], { yes: true });
 
@@ -150,13 +162,13 @@ describe('update — confirmation gate', () => {
 describe('update — install path', () => {
   it('installs the gateway through npm and points at the restart it still needs', async () => {
     mockResolveCurrent.mockReturnValue('1.7.9');
-    mockGetLatest.mockResolvedValue('1.8.0');
+    mockGetTarget.mockResolvedValue({ version: '1.8.0', channel: 'stable' });
     mockNpmList.mockReturnValue('1.8.0');
 
     const code = await runUpdate('claude-gateway', [], { yes: true });
 
     expect(code).toBe(0);
-    expect(mockInstall).toHaveBeenCalledWith('@0xmaxma/claude-gateway');
+    expect(mockInstall).toHaveBeenCalledWith('@0xmaxma/claude-gateway', '1.8.0');
     expect(mockNative).not.toHaveBeenCalled();
     expect(JSON.parse(stdout.join(''))).toEqual({
       package: '@0xmaxma/claude-gateway',
@@ -169,7 +181,7 @@ describe('update — install path', () => {
 
   it('surfaces an install failure instead of reporting success', async () => {
     mockResolveCurrent.mockReturnValue('1.7.9');
-    mockGetLatest.mockResolvedValue('1.8.0');
+    mockGetTarget.mockResolvedValue({ version: '1.8.0', channel: 'stable' });
     mockInstall.mockReturnValue('npm ERR! EACCES');
 
     const code = await runUpdate('claude-gateway', [], { yes: true });
@@ -194,7 +206,7 @@ describe('claude — the Claude Code binary', () => {
 
   it('`claude update` uses the native updater, never npm install -g', async () => {
     mockResolveCurrent.mockReturnValueOnce('2.1.207').mockReturnValueOnce('2.2.0');
-    mockGetLatest.mockResolvedValue('2.2.0');
+    mockGetTarget.mockResolvedValue({ version: '2.2.0', channel: 'stable' });
 
     const code = await runClaude(['update'], { yes: true });
 
@@ -206,7 +218,7 @@ describe('claude — the Claude Code binary', () => {
 
   it('reports honestly when the native updater is a no-op', async () => {
     mockResolveCurrent.mockReturnValue('2.1.207');
-    mockGetLatest.mockResolvedValue('2.2.0');
+    mockGetTarget.mockResolvedValue({ version: '2.2.0', channel: 'stable' });
 
     const code = await runClaude(['update'], { yes: true });
 
@@ -216,7 +228,7 @@ describe('claude — the Claude Code binary', () => {
 
   it('`claude update check` stays read-only', async () => {
     mockResolveCurrent.mockReturnValue('2.1.207');
-    mockGetLatest.mockResolvedValue('2.2.0');
+    mockGetTarget.mockResolvedValue({ version: '2.2.0', channel: 'stable' });
 
     expect(await runClaude(['update', 'check'], {})).toBe(0);
     expect(mockNative).not.toHaveBeenCalled();
@@ -238,7 +250,7 @@ describe('claude — the Claude Code binary', () => {
 describe('registry runNativeUpdate guard', () => {
   it('refuses a package with no native updater instead of shelling out', () => {
     const actual = jest.requireActual('../../src/packages/registry') as typeof import('../../src/packages/registry');
-    const err = actual.runNativeUpdate({ npm: '@scope/pkg', detect: 'npm', update: 'native' });
+    const err = actual.runNativeUpdate({ npm: '@scope/pkg', channel: 'latest', detect: 'npm', update: 'native' });
     expect(err).toMatch(/no native updater/);
   });
 });

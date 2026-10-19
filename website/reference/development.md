@@ -66,29 +66,23 @@ For async tests, wait for an observable state or event with a bounded deadline r
 
 ## Release and promote
 
-Push a `vX.Y.Z` tag to release. The release workflow runs the unit tests, builds, creates a GitHub pre-release and publishes the package to the `next` dist-tag. The `latest` dist-tag does not move, so installed gateways do not report an update yet.
+Run `make release` on an up-to-date `main` to release. It bumps the version, then pushes the commit and a `vX.Y.Z` tag. The release workflow runs the unit tests, builds, creates the GitHub Release and publishes the package to npm under the `latest` dist-tag.
 
-Promote a version by running the Promote workflow from the Actions tab with the version number. Its preflight script, `scripts/release/promote-check.sh`, runs five read-only checks. The version must be plain `x.y.z` with no leading `v`. The version must be published on npm. The current `latest` must be older than the version, which refuses demotion and repeated promotion. The version must have been published at least 24 hours ago, so it has soaked on `next`. No newer stable version may have been published within 24 hours after it, because a same-day follow-up usually means the version had a regression.
-
-When every check passes, the workflow points `latest` at the version and clears the pre-release flag on its GitHub Release. Neither CI nor a rebuild runs at promotion. The tarball is the one the release workflow already tested and published. Run the preflight locally before promoting by hand:
+Installed gateways follow the `stable` dist-tag, so they do not see a release until you promote it. Run `make promote` to promote a version:
 
 ```bash
-scripts/release/promote-check.sh 2.1.3
-npm dist-tag add @0xmaxma/claude-gateway@2.1.3 latest
-gh release edit v2.1.3 --prerelease=false --latest
+make promote
 ```
 
-### Roll back latest
+The script lists the ten most recent published versions, newest first, and marks the current `latest` and `stable`. Pick a version and confirm. The script then starts the Promote workflow (`.github/workflows/promote.yml`) with `gh workflow run`. You can also start the workflow from the Actions tab with a version number. The workflow runs `scripts/release/promote-check.sh`, which checks that the version is plain `x.y.z` and is published on npm. Then it points `stable` at that version. Nothing is rebuilt: `stable` is the same tarball the release workflow already tested and published.
 
-The preflight refuses to move `latest` to an older version, so the Promote workflow cannot roll back. If a promoted version turns out to be bad, point `latest` back at the previous good version by hand:
+To roll back, run `make promote` and pick an older version. Gateways that have not updated yet are offered the older version. Gateways that already updated stay on the newer version, because `claude-gateway update` never downgrades.
+
+Check the current tags with:
 
 ```bash
 npm view @0xmaxma/claude-gateway dist-tags
-npm dist-tag add @0xmaxma/claude-gateway@2.1.2 latest
-gh release edit v2.1.2 --latest
 ```
-
-Installed gateways stop offering the bad version on their next update check. Gateways that already updated stay on it until you ship and promote a fix, because `claude-gateway update` never downgrades.
 
 ## Update documentation with code
 

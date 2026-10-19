@@ -134,5 +134,5 @@ else
 fi
 
 echo ""
-echo "Released v$NEXT — GitHub Actions will publish it to the npm 'next' dist-tag."
-echo "It reaches 'latest' (and 'claude-gateway update') only after you run the Promote workflow."
+echo "Released v$NEXT — GitHub Actions will publish it to npm as 'latest'."
+echo "'claude-gateway update' follows 'stable'; run 'make promote' to move 'stable' to it."

@@ -1,16 +1,20 @@
-# Moves the latest dist-tag to a tarball the release workflow already tested. Nothing is rebuilt.
-name: Promote to latest
+# Moves the stable dist-tag (what `claude-gateway update` installs) to an already-published version.
+# Nothing is rebuilt. Run it with `make promote`, or from the Actions tab with a version number.
+name: Promote to stable
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version to promote to latest, e.g. 2.1.3'
+        description: 'Version to tag stable, e.g. 2.1.3 (an older version rolls stable back)'
         required: true
         type: string
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: promote
 
 jobs:
   promote:
@@ -31,17 +35,11 @@ jobs:
         env:
           VERSION: ${{ inputs.version }}
 
-      - name: Move latest dist-tag
-        run: npm dist-tag add "@0xmaxma/claude-gateway@$VERSION" latest
+      - name: Move stable dist-tag
+        run: npm dist-tag add "@0xmaxma/claude-gateway@$VERSION" stable
         env:
           VERSION: ${{ inputs.version }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - name: Mark GitHub Release as latest
-        run: gh release edit "v$VERSION" --prerelease=false --latest
-        env:
-          VERSION: ${{ inputs.version }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Show dist-tags
         run: npm view @0xmaxma/claude-gateway dist-tags

@@ -15,17 +15,22 @@ import { compareSemver } from '../config/migrator';
  */
 
 // Per-package resolver strategy.
-//   npm    — npm registry name (used to look up `latest` for every package,
-//            and to detect/update packages installed as an npm global)
+//   npm    — npm registry name (used to look up the target version for every
+//            package, and to detect/update packages installed as an npm global)
+//   channel — npm dist-tag updates follow by default (see getTargetVersion)
 //   detect — how the currently-installed version is resolved:
 //              'npm'    → `npm list -g` (npm global package)
 //              'binary' → shell out to the binary on PATH (native installer)
 //   bin    — binary name for detect: 'binary' / update: 'native'
-//   update — how the Update action installs the latest version:
-//              'npm'    → `npm install -g <pkg>@latest`
+//   update — how the Update action installs the target version:
+//              'npm'    → `npm install -g <pkg>@<version>`
 //              'native' → the package's own native updater (`<bin> update`)
+/** `stable` is moved by `make promote`; `latest` is every release. */
+export type ReleaseChannel = 'stable' | 'latest';
+
 export interface PackageConfig {
   npm: string;
+  channel: ReleaseChannel;
   detect: 'npm' | 'binary';
   bin?: string;
   update: 'npm' | 'native';
@@ -38,9 +43,10 @@ export interface PackageConfig {
  * detect from the `claude` binary and update via its native updater.
  */
 export const PACKAGES: Record<string, PackageConfig> = {
-  'claude-gateway': { npm: '@0xmaxma/claude-gateway', detect: 'npm', update: 'npm' },
+  'claude-gateway': { npm: '@0xmaxma/claude-gateway', channel: 'stable', detect: 'npm', update: 'npm' },
   'claude-code': {
     npm: '@anthropic-ai/claude-code',
+    channel: 'latest',
     detect: 'binary',
     bin: 'claude',
     update: 'native',
@@ -51,6 +57,7 @@ export interface PackageInfo {
   package: string;
   current: string | null;
   latest: string | null;
+  channel: ReleaseChannel | null;
   hasUpdate: boolean;
 }
 
@@ -106,12 +113,33 @@ export function updateAvailable(current: string | null, latest: string | null): 
   return !!(current && latest && compareSemver(latest, current) > 0);
 }
 
-export async function getLatestVersion(packageName: string): Promise<string | null> {
-  const encodedName = packageName.replace('/', '%2F');
-  const res = await fetch(`https://registry.npmjs.org/${encodedName}/latest`);
+// Registry data is untrusted and the version ends up in an `npm install` shell
+// command, so anything that is not a plain semver is treated as no answer.
+const SEMVER_RE = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
+
+export interface TargetVersion {
+  version: string;
+  channel: ReleaseChannel;
+}
+
+/**
+ * The version an update should install: the package's own channel, or
+ * `latest` when `opts.latest` is set. A package that has never been promoted
+ * has no `stable` dist-tag, so it falls back to `latest`. Returns null when
+ * the registry answer is unusable; throws when the registry is unreachable.
+ */
+export async function getTargetVersion(
+  config: PackageConfig,
+  opts: { latest?: boolean } = {},
+): Promise<TargetVersion | null> {
+  const encodedName = config.npm.replace('/', '%2F');
+  const res = await fetch(`https://registry.npmjs.org/-/package/${encodedName}/dist-tags`);
   if (!res.ok) return null;
-  const data = (await res.json()) as { version?: string };
-  return data.version ?? null;
+  const tags = (await res.json()) as Record<string, unknown>;
+  const wanted: ReleaseChannel = opts.latest ? 'latest' : config.channel;
+  const channel: ReleaseChannel = typeof tags[wanted] === 'string' ? wanted : 'latest';
+  const version = tags[channel];
+  return typeof version === 'string' && SEMVER_RE.test(version) ? { version, channel } : null;
 }
 
 export async function fetchAllPackageVersions(): Promise<PackageInfo[]> {
@@ -121,12 +149,13 @@ export async function fetchAllPackageVersions(): Promise<PackageInfo[]> {
   return Promise.all(
     configs.map(async (config, i) => {
       const current = currents[i];
-      const latest = await getLatestVersion(config.npm);
+      const target = await getTargetVersion(config);
       return {
         package: config.npm,
         current,
-        latest,
-        hasUpdate: updateAvailable(current, latest),
+        latest: target?.version ?? null,
+        channel: target?.channel ?? null,
+        hasUpdate: updateAvailable(current, target?.version ?? null),
       };
     }),
   );
@@ -201,14 +230,16 @@ export function runNativeUpdate(config: PackageConfig): string | null {
 }
 
 /**
- * Install the latest version of an npm-global package.
+ * Install `version` of an npm-global package.
  *
  * A previously interrupted install can leave `.<pkg>-<hash>` staging dirs in the
  * npm global root that make the next install fail with ENOTEMPTY/ENOTDIR, so
  * those are pre-cleaned and the install is retried once after removing the
  * half-written package directory. Returns null on success, or the error text.
  */
-export function installNpmLatest(packageName: string): string | null {
+export function installNpmVersion(packageName: string, version: string): string | null {
+  if (!SEMVER_RE.test(version)) return `refusing to install invalid version: ${version}`;
+  const spec = `${packageName}@${version}`;
   let npmRoot = '';
   try {
     npmRoot = getNpmGlobalRoot();
@@ -221,7 +252,7 @@ export function installNpmLatest(packageName: string): string | null {
   }
 
   try {
-    execSync(`npm install -g ${packageName}@latest`, { stdio: ['pipe', 'pipe', 'pipe'], timeout: 300_000 });
+    execSync(`npm install -g ${spec}`, { stdio: ['pipe', 'pipe', 'pipe'], timeout: 300_000 });
     return null;
   } catch (err) {
     const stderr = (err as { stderr?: Buffer }).stderr?.toString() ?? '';
@@ -232,7 +263,7 @@ export function installNpmLatest(packageName: string): string | null {
     cleanStaleNpmTempDirs(npmRoot, packageName);
     removePackageDir(npmRoot, packageName);
     try {
-      execSync(`npm install -g ${packageName}@latest`, { stdio: ['pipe', 'pipe', 'pipe'], timeout: 300_000 });
+      execSync(`npm install -g ${spec}`, { stdio: ['pipe', 'pipe', 'pipe'], timeout: 300_000 });
       return null;
     } catch (retryErr) {
       return errorText(retryErr, 'install failed');

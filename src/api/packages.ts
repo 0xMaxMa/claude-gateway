@@ -6,9 +6,9 @@ import {
   PACKAGES,
   PackageInfo,
   fetchAllPackageVersions,
-  getLatestVersion,
   getNpmListVersion,
-  installNpmLatest,
+  getTargetVersion,
+  installNpmVersion,
   resolveCurrent,
   runNativeUpdate,
   updateAvailable,
@@ -80,7 +80,7 @@ export function createPackagesRouter(apiKeys?: ApiKey[]): Router {
     res.json({ packages });
   });
 
-  // POST /api/v1/packages/:name/update — install latest and restart if needed
+  // POST /api/v1/packages/:name/update — install the channel's version and restart if needed
   router.post('/v1/packages/:name/update', async (req: Request, res: Response) => {
     if (apiKeys?.length) {
       const apiKey = (req as AuthedRequest).apiKey;
@@ -100,21 +100,21 @@ export function createPackagesRouter(apiKeys?: ApiKey[]): Router {
 
     const from = resolveCurrent(config);
 
-    let latest: string | null;
+    let target: string | null;
     try {
-      latest = await getLatestVersion(packageName);
+      target = (await getTargetVersion(config))?.version ?? null;
     } catch {
       res.status(503).json({ error: 'registry unavailable' });
       return;
     }
 
-    if (!latest) {
+    if (!target) {
       res.status(503).json({ error: 'registry unavailable' });
       return;
     }
 
-    // Already on latest (or ahead of it) — no install needed
-    if (from && !updateAvailable(from, latest)) {
+    // Already on the target (or ahead of it) — no install needed
+    if (from && !updateAvailable(from, target)) {
       res.json({ package: packageName, from, to: from, updated: false, warning: null });
       return;
     }
@@ -147,7 +147,7 @@ export function createPackagesRouter(apiKeys?: ApiKey[]): Router {
       }
 
       // npm-global packages (e.g. claude-gateway) update via npm install -g.
-      const installErr = installNpmLatest(packageName);
+      const installErr = installNpmVersion(packageName, target);
       if (installErr !== null) {
         res.status(500).json({ error: installErr });
         return;

@@ -1,9 +1,11 @@
 import {
   PACKAGES,
   PackageConfig,
-  getLatestVersion,
+  ReleaseChannel,
+  TargetVersion,
   getNpmListVersion,
-  installNpmLatest,
+  getTargetVersion,
+  installNpmVersion,
   resolveCurrent,
   runNativeUpdate,
   updateAvailable,
@@ -33,37 +35,46 @@ const RELEASE_NOTES: Record<PackageId, (version: string) => string> = {
 interface Resolved {
   config: PackageConfig;
   current: string | null;
-  latest: string | null;
+  latest: string;
+  channel: ReleaseChannel;
   hasUpdate: boolean;
 }
 
 /** Read the installed and published versions. Returns null (after reporting)
  *  when the registry can't be reached, so `check` never claims "up to date"
- *  merely because the lookup failed. */
-async function resolve(id: PackageId): Promise<Resolved | null> {
+ *  merely because the lookup failed. `--latest` skips the package's `stable`
+ *  channel and targets the newest release. */
+async function resolve(id: PackageId, flags: Record<string, string | boolean>): Promise<Resolved | null> {
   const config = PACKAGES[id];
   const current = resolveCurrent(config);
-  let latest: string | null;
+  let target: TargetVersion | null;
   try {
-    latest = await getLatestVersion(config.npm);
+    target = await getTargetVersion(config, { latest: flags.latest === true });
   } catch {
-    latest = null;
+    target = null;
   }
-  if (latest === null) {
+  if (target === null) {
     process.stderr.write(`Could not reach the npm registry to look up ${config.npm}.\n`);
     return null;
   }
-  return { config, current, latest, hasUpdate: updateAvailable(current, latest) };
+  return {
+    config,
+    current,
+    latest: target.version,
+    channel: target.channel,
+    hasUpdate: updateAvailable(current, target.version),
+  };
 }
 
 async function check(id: PackageId, flags: Record<string, string | boolean>): Promise<number> {
-  const resolved = await resolve(id);
+  const resolved = await resolve(id, flags);
   if (!resolved) return 1;
   printJson(
     {
       package: resolved.config.npm,
       current: resolved.current,
       latest: resolved.latest,
+      channel: resolved.channel,
       hasUpdate: resolved.hasUpdate,
     },
     flags,
@@ -86,23 +97,23 @@ function printRestartGuidance(): void {
 }
 
 async function update(id: PackageId, flags: Record<string, string | boolean>): Promise<number> {
-  const resolved = await resolve(id);
+  const resolved = await resolve(id, flags);
   if (!resolved) return 1;
-  const { config, current, latest } = resolved;
+  const { config, current, latest, channel } = resolved;
 
   if (!resolved.hasUpdate) {
     printJson({ package: config.npm, from: current, to: current, updated: false }, flags);
     process.stderr.write(
       current === null
         ? `${config.npm} is not installed here — install it before updating.\n`
-        : `Already on ${current} (published latest: ${latest}).\n`,
+        : `Already on ${current} (published ${channel}: ${latest}).\n`,
     );
     return 0;
   }
 
   process.stderr.write(
-    `\n${config.npm}\n  current: ${current ?? 'not installed'}\n  target:  ${latest}\n` +
-      `  notes:   ${RELEASE_NOTES[id](latest as string)}\n\n`,
+    `\n${config.npm}\n  current: ${current ?? 'not installed'}\n  target:  ${latest} (${channel})\n` +
+      `  notes:   ${RELEASE_NOTES[id](latest)}\n\n`,
   );
   if (!(await confirmAction(flags, 'update', `Update ${config.npm} to ${latest}?`))) {
     process.stderr.write('Aborted — nothing was installed.\n');
@@ -112,7 +123,7 @@ async function update(id: PackageId, flags: Record<string, string | boolean>): P
   // Native-installer packages (claude-code) must use their own updater: an
   // `npm install -g` would write a second copy that isn't the binary on PATH.
   const error =
-    config.update === 'native' && config.bin ? runNativeUpdate(config) : installNpmLatest(config.npm);
+    config.update === 'native' && config.bin ? runNativeUpdate(config) : installNpmVersion(config.npm, latest);
   if (error !== null) {
     process.stderr.write(`Update failed: ${error}\n`);
     return 1;
@@ -143,8 +154,12 @@ export async function runUpdate(
       true,
       'update',
       "check for or install a newer claude-gateway",
-      'claude-gateway update [check] [--yes]',
-      ['  check is read-only; the bare form installs after confirming.'],
+      'claude-gateway update [check] [--latest] [--yes]',
+      [
+        '  check is read-only; the bare form installs after confirming.',
+        '  Follows the npm `stable` dist-tag (or `latest` if nothing is promoted yet);',
+        '  --latest targets the newest release instead.',
+      ],
     );
     return 0;
   }

@@ -25,8 +25,9 @@ import { runTasks } from './commands/tasks';
  *  with no verb at all — see issue #450. `wait` is here so `app install
  *  <source> --wait` (flag after every positional, but before nothing) never
  *  risks swallowing a token that happens to come after it in some other
- *  invocation order. */
-const GLOBAL_BOOLEAN_FLAGS = new Set(['help', 'json', 'yes', 'print', 'follow', 'force', 'wait', 'all', 'takeover', 'no-bootstrap']);
+ *  invocation order. `latest` keeps `update --latest check` from swallowing
+ *  `check`. */
+const GLOBAL_BOOLEAN_FLAGS = new Set(['help', 'json', 'yes', 'print', 'follow', 'force', 'wait', 'all', 'takeover', 'no-bootstrap', 'latest']);
 /** Flags every command accepts, on top of whatever the generated manifest
  *  declares for that command. Anything outside this set and the command's own
  *  flags is a typo, and is reported rather than dropped: a resource command

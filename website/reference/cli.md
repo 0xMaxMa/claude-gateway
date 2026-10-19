@@ -191,11 +191,14 @@ installed files, but never its backups.
 | Command | Description |
 |---------|-------------|
 | `claude-gateway version` | Print the installed gateway version |
-| `claude-gateway update check` | Read-only: installed vs. published gateway version |
-| `claude-gateway update [--yes]` | Show current → target, confirm, then `npm install -g` the latest |
+| `claude-gateway update check [--latest]` | Read-only: installed vs. published gateway version |
+| `claude-gateway update [--latest] [--yes]` | Show current → target, confirm, then `npm install -g` the target |
 | `claude-gateway claude version` | Print the installed Claude Code version |
 | `claude-gateway claude update check` | Read-only version check for Claude Code |
 | `claude-gateway claude update [--yes]` | Update Claude Code through its own native updater |
+
+The gateway follows the npm `stable` dist-tag, which `make promote` moves; if nothing has been
+promoted yet it falls back to `latest`. `--latest` skips `stable` and targets the newest release.
 
 Both use the same detection and install strategy as the dashboard's Update button
 (`src/packages/registry.ts`). Claude Code is updated by its native updater, never by

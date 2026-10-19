@@ -37,15 +37,22 @@ Review release changes and back up configuration, agent workspaces/session data,
 
 ### Release channels
 
-The package publishes to two npm [dist-tags](https://docs.npmjs.com/cli/v10/commands/npm-dist-tag). `latest` is the stable channel. `npm install -g @0xmaxma/claude-gateway`, `claude-gateway update check` and `claude-gateway update` all follow it.
+The package uses two npm [dist-tags](https://docs.npmjs.com/cli/v10/commands/npm-dist-tag). `latest` is every release, as soon as its tests pass. `stable` is a release the maintainer promoted after testing it. `claude-gateway update check`, `claude-gateway update` and the dashboard's Update button follow `stable`. If no version has been promoted yet, they fall back to `latest`.
 
-`next` receives every tagged release as soon as its tests pass. Install it if you want fixes first:
+Pass `--latest` to skip `stable` and take the newest release:
 
 ```bash
-npm install -g @0xmaxma/claude-gateway@next
+claude-gateway update check --latest
+claude-gateway update --latest
 ```
 
-A version moves from `next` to `latest` after it has been on `next` for at least 24 hours and no follow-up fix came after it. Promotion re-tags the same published package, so the stable build is byte-for-byte the one that ran on `next`.
+An update never downgrades. If `stable` is rolled back to an older version, gateways already on a newer one stay where they are.
+
+A fresh `npm install -g @0xmaxma/claude-gateway` without a tag installs `latest`. Install `@stable` to start on the stable channel:
+
+```bash
+npm install -g @0xmaxma/claude-gateway@stable
+```
 
 ```bash
 claude-gateway update
