@@ -1,7 +1,7 @@
 import { VoiceSession } from '../../../src/voice/session';
 import { FakeSttProvider } from '../../../src/voice/providers/fake';
 import { PCM16, TtsProvider } from '../../../src/voice/types';
-import { fastAcknowledgement, fastAckText, fillerOnly } from '../../../src/voice/fast-ack';
+import { fastAcknowledgement, fastAckText, tooShort } from '../../../src/voice/fast-ack';
 import { BoundedQueue } from '../../../src/orchestration/bounded-queue';
 
 /** A live call of several turns. Every reply is slow (it never speaks), so each eligible turn reaches the
@@ -77,12 +77,24 @@ test('acknowledgements are sparse: back-to-back slow turns are not all acknowled
   } finally { await session.close(); }
 });
 
-test.each(['เอ่อ เอาใหม่', 'um', 'อืม', 'Uh, wait…', 'เดี๋ยวนะ'])('a filler or restart fragment (%s) gets no acknowledgement and no model call (#625)', async fragment => {
+test.each(['um', 'oh', 'Uh.', 'อ่', 'ก'])('a fragment too short to be a request (%s) gets no acknowledgement and no model call (#625)', async fragment => {
   const { session, spoken, say, acknowledge } = await call(() => 'รับทราบค่ะ');
   try {
     const decision = await say(fragment);
-    expect(decision).toMatchObject({ phase: 'fast_ack_skipped', code: 'filler' });
+    expect(decision).toMatchObject({ phase: 'fast_ack_skipped', code: 'too_short' });
     expect(acknowledge).not.toHaveBeenCalled();
+    expect(spoken).toEqual([]);
+  } finally { await session.close(); }
+});
+
+// Whether longer words are only hesitation or a restart is the model's call: it replies "-",
+// which fastAckText drops, so nothing is spoken (no word list decides it, see AGENTS.md).
+test.each(['เอ่อ เอาใหม่', 'Uh, wait…', 'เดี๋ยวนะ'])('a hesitation fragment (%s) the model declines is not spoken (#625)', async fragment => {
+  const { session, spoken, say, acknowledge } = await call(() => fastAckText('-'));
+  try {
+    const decision = await say(fragment);
+    expect(decision).toMatchObject({ phase: 'fast_ack_skipped', code: 'no_fit' });
+    expect(acknowledge).toHaveBeenCalledTimes(1);
     expect(spoken).toEqual([]);
   } finally { await session.close(); }
 });
@@ -193,13 +205,6 @@ test('acknowledgements on one template that name different requests are not dupl
   } finally { await session.close(); }
 });
 
-test('filler detection stays linear on long hesitation runs', () => {
-  const started = Date.now();
-  for (const text of ['m'.repeat(5000) + 'okay', 'u'.repeat(5000) + 'x', 'เอ่อ'.repeat(2000) + 'ก', ('um' + 'hm').repeat(3000) + '?z']) expect(fillerOnly(text)).toBe(false);
-  expect(fillerOnly('m'.repeat(5000))).toBe(true);
-  expect(Date.now() - started).toBeLessThan(500);
-});
-
 test('a background report that is not the turn\'s own spoken acknowledgement does not cancel it', async () => {
   // An earlier task's report arrives while this turn's acknowledgement is being prepared.
   let report = () => {};
@@ -242,7 +247,7 @@ test('a reply stream that ends without speech does not drop an acknowledgement a
 });
 
 
-test('filler detection keeps real short requests', () => {
-  for (const text of ['เอ่อ เอาใหม่', 'เอ่อเอาใหม่', 'um', 'uh huh', 'อ่า', 'เดี๋ยวนะ', 'แป๊บนึงนะ', 'hmm...', '', 'Wait.', 'hold on']) expect(fillerOnly(text)).toBe(true);
-  for (const text of ['เปิด PR', 'ราคาทองเท่าไหร่', 'อาหารกลางวันกินอะไรดี', 'เอ่อ ช่วยเปิด PR หน่อย', 'what time is it', 'wait for the build to finish', 'um, what is the weather']) expect(fillerOnly(text)).toBe(false);
+test('only a transcript with fewer than three letters or digits is too short to acknowledge', () => {
+  for (const text of ['', 'um', 'Uh.', 'อ่', '...', 'ok!']) expect(tooShort(text)).toBe(true);
+  for (const text of ['PR 5', 'อืม', 'เปิด PR', 'เอ่อ เอาใหม่', 'wait', 'what time is it']) expect(tooShort(text)).toBe(false);
 });
