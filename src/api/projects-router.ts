@@ -7,6 +7,7 @@ import { createProject, resolveProjectDir, listProjects } from '../projects/fs';
 import { getStatus, getSummaries, GitError, GitErrorCode } from '../projects/git';
 import { listRunning, ProjectDir, RunningErrorCode, scanProjects, StopLimiter, stopRunning, Sys, systemSys } from '../projects/running';
 import { hasStartScript, START_SCRIPT, startProject, StartError, StartErrorCode, StartGuard, Launcher, systemLauncher } from '../projects/start';
+import { DiskUsage, systemDiskSys } from '../projects/disk';
 import { DeleteErrorCode, removeProject } from '../projects/delete';
 import { isProjectDeleting, markProjectDeleting } from '../projects/chat';
 import { parseProjectName, ProjectName, ProjectsErrorCode, Result } from '../projects/paths';
@@ -79,6 +80,8 @@ export interface RunningDeps {
   startWaitMs?: number;
   /** A chat bound to the project has a turn running, whose agent process works inside the folder. */
   chatTurnActive?: (name: ProjectName) => boolean | Promise<boolean>;
+  /** Disk measurement for this root; tests inject one with a fake clock or a fake `du`. */
+  disk?: DiskUsage;
 }
 
 export function createProjectsRouter(
@@ -88,6 +91,7 @@ export function createProjectsRouter(
 ): Router {
   const launcher = running.launcher ?? systemLauncher;
   const starts = running.starts ?? new StartGuard();
+  const disk = running.disk ?? new DiskUsage(root, { sys: systemDiskSys(running.sys.platform) });
   const router = Router();
   const auth = createApiAuthMiddleware(apiKeys);
 
@@ -143,6 +147,13 @@ export function createProjectsRouter(
     { method: 'GET', path: '/v1/projects/git-summary', auth: 'key', summary: 'Git sync summary for every project that is a repository', cli: null },
     auth,
     handle(async (_req, res) => respond(res, await getSummaries(root))),
+  );
+
+  defineRoute(
+    router,
+    { method: 'GET', path: '/v1/projects/disk', auth: 'key', summary: 'Disk space each project occupies and how full the disk is', cli: null },
+    auth,
+    handle(async (req, res) => respond(res, await disk.get(req.query.refresh === '1'))),
   );
 
   defineRoute(
