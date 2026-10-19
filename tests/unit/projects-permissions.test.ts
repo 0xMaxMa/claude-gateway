@@ -20,6 +20,7 @@ const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR
 
 const ADMIN_ONLY_ROUTES = [
   'POST /v1/projects', 'DELETE /v1/projects/:name', 'POST /v1/projects/:name/running/stop', 'POST /v1/projects/:name/running/start',
+  'GET /v1/projects/cleanup', 'POST /v1/projects/cleanup',
 ];
 const READ_ROUTES = [
   'GET /v1/projects', 'GET /v1/projects/git-summary', 'GET /v1/projects/disk',
@@ -54,7 +55,7 @@ describe('the /v1/projects routes', () => {
     return (key ? req.set('Authorization', `Bearer ${key.key}`) : req).send({ name: 'made-by-test', confirm: 'app' });
   };
 
-  it('registers the ten routes, and marks exactly create, delete, stop and start as admin', () => {
+  it('registers the twelve routes, and marks exactly create, delete, stop, start and both cleanup routes as admin', () => {
     const all = routes().map((r) => `${r.method} ${r.path}`);
     expect(all.sort()).toEqual([...ADMIN_ONLY_ROUTES, ...READ_ROUTES].sort());
     expect(routes().filter((r) => r.auth === 'admin').map((r) => `${r.method} ${r.path}`).sort()).toEqual([...ADMIN_ONLY_ROUTES].sort());
@@ -68,7 +69,7 @@ describe('the /v1/projects routes', () => {
     }
   });
 
-  it.each(NON_ADMIN)('refuses $key on create, delete, stop and start with 403 forbidden_key, and changes nothing', async (key) => {
+  it.each(NON_ADMIN)('refuses $key on create, delete, stop, start and cleanup with 403 forbidden_key, and changes nothing', async (key) => {
     for (const route of ADMIN_ONLY_ROUTES) {
       const res = await call(route, key);
       expect([route, res.status, res.body.code, res.body.error]).toEqual([route, 403, 'forbidden_key', 'An admin API key is required for Projects']);

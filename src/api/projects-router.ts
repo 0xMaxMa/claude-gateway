@@ -10,13 +10,16 @@ import { hasStartScript, START_SCRIPT, startProject, StartError, StartErrorCode,
 import { DiskUsage, systemDiskSys } from '../projects/disk';
 import { DeleteErrorCode, removeProject } from '../projects/delete';
 import { isProjectDeleting, markProjectDeleting } from '../projects/chat';
+import { CleanupDeps, parseCleanupRequest, previewCleanup, runCleanup } from '../projects/cleanup';
 import { parseProjectName, ProjectName, ProjectsErrorCode, Result } from '../projects/paths';
 
 type AuthedRequest = Request & { apiKey: ApiKey };
 
 const MAX_RUNNING_PROJECTS = 200;
 
-const ERRORS: Record<ProjectsErrorCode | GitErrorCode | RunningErrorCode | StartErrorCode | DeleteErrorCode, { status: number; message: string }> = {
+type CleanupErrorCode = 'cleanup_in_progress';
+
+const ERRORS: Record<ProjectsErrorCode | GitErrorCode | RunningErrorCode | StartErrorCode | DeleteErrorCode | CleanupErrorCode, { status: number; message: string }> = {
   invalid_name: { status: 400, message: 'Invalid project name' },
   not_a_directory: { status: 400, message: 'Not a directory' },
   path_escape: { status: 403, message: 'Path resolves outside the project' },
@@ -42,9 +45,10 @@ const ERRORS: Record<ProjectsErrorCode | GitErrorCode | RunningErrorCode | Start
   confirm_mismatch: { status: 400, message: 'confirm must be the exact project name' },
   project_running: { status: 409, message: 'Stop what is running in this project first' },
   project_deleting: { status: 409, message: 'The project is being deleted' },
+  cleanup_in_progress: { status: 409, message: 'Another Free up space run is still removing folders' },
 };
 
-function fail(res: Response, error: ProjectsErrorCode | RunningErrorCode | DeleteErrorCode | GitError | StartError): void {
+function fail(res: Response, error: ProjectsErrorCode | RunningErrorCode | DeleteErrorCode | CleanupErrorCode | GitError | StartError): void {
   const body = typeof error === 'string' ? { code: error } : error;
   const { status, message } = ERRORS[body.code];
   res.status(status).json({ error: message, ...body });
@@ -94,6 +98,15 @@ export function createProjectsRouter(
   const disk = running.disk ?? new DiskUsage(root, { sys: systemDiskSys(running.sys.platform) });
   const router = Router();
   const auth = createApiAuthMiddleware(apiKeys);
+  const cleanup: CleanupDeps = {
+    root,
+    disk: disk.sys,
+    running: async (dirs) => {
+      const scan = await scanProjects(running.sys, dirs);
+      return new Set(dirs.filter((d) => starts.has(d.dir) || (scan.supported && Object.hasOwn(scan.projects, d.name))).map((d) => d.dir));
+    },
+    chatTurnActive: async (name) => Boolean(await running.chatTurnActive?.(name)),
+  };
 
   defineRoute(
     router,
@@ -154,6 +167,31 @@ export function createProjectsRouter(
     { method: 'GET', path: '/v1/projects/disk', auth: 'key', summary: 'Disk space each project occupies and how full the disk is', cli: null },
     auth,
     handle(async (req, res) => respond(res, await disk.get(req.query.refresh === '1'))),
+  );
+
+  defineRoute(
+    router,
+    { method: 'GET', path: '/v1/projects/cleanup', auth: 'admin', summary: 'Folders Free up space would remove from each project, with their sizes', cli: null },
+    auth,
+    requireAdmin,
+    handle(async (_req, res) => respond(res, await previewCleanup(cleanup))),
+  );
+
+  defineRoute(
+    router,
+    { method: 'POST', path: '/v1/projects/cleanup', auth: 'admin', summary: 'Remove the chosen regenerable folders from projects', cli: null },
+    auth,
+    requireAdmin,
+    handle(async (req, res) => {
+      const items = parseCleanupRequest(req.body);
+      if (!items.ok) {
+        res.status(400).json({ error: items.error });
+        return;
+      }
+      const report = await runCleanup(cleanup, items.value).finally(() => disk.invalidate());
+      if (!report) return fail(res, 'cleanup_in_progress');
+      res.json(report);
+    }),
   );
 
   defineRoute(

@@ -11,3 +11,8 @@ export function projectsWarn(message: string, data?: Record<string, unknown>): v
   if (sink) sink.warn(message, data);
   else console.warn(message);
 }
+
+export function projectsInfo(message: string, data?: Record<string, unknown>): void {
+  if (sink) sink.info(message, data);
+  else console.info(message);
+}
