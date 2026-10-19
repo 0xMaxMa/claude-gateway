@@ -64,6 +64,26 @@ npm test
 
 For async tests, wait for an observable state or event with a bounded deadline rather than an arbitrary sleep. Test real cancellation and failure paths when changing process supervision; CPU movement alone is not proof that a test passed.
 
+## Release and promote
+
+Run `make release` on an up-to-date `main` to release. It bumps the version, then pushes the commit and a `vX.Y.Z` tag. The release workflow runs the unit tests, builds, creates the GitHub Release and publishes the package to npm under the `latest` dist-tag.
+
+Installed gateways follow the `stable` dist-tag, so they do not see a release until you promote it. Run `make promote` to promote a version:
+
+```bash
+make promote
+```
+
+The script lists the ten most recent published versions, newest first, and marks the current `latest` and `stable`. Pick a version and confirm. The script then starts the Promote workflow (`.github/workflows/promote.yml`) with `gh workflow run`. You can also start the workflow from the Actions tab with a version number. The workflow runs `scripts/release/promote-check.sh`, which checks that the version is plain `x.y.z` and is published on npm. Then it points `stable` at that version. Nothing is rebuilt: `stable` is the same tarball the release workflow already tested and published.
+
+To roll back, run `make promote` and pick an older version. Gateways that have not updated yet are offered the older version. Gateways that already updated stay on the newer version, because `claude-gateway update` never downgrades.
+
+Check the current tags with:
+
+```bash
+npm view @0xmaxma/claude-gateway dist-tags
+```
+
 ## Update documentation with code
 
 HTTP API changes belong in [API reference](../api/). Update the relevant channel or feature guide when behavior changes. Regenerate `website/reference/cli.md` with the repository's CLI generator when changing CLI command definitions. Keep examples consistent with configuration validation, authorization and route mounts.

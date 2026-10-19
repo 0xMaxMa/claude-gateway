@@ -3,7 +3,7 @@ export
 
 .DEFAULT_GOAL := help
 
-.PHONY: help start start-dev cli stop mcp-install release pm2-start pm2-stop pm2-restart pm2-startup pm2-remove pm2-logs system-start system-stop system-restart system-logs
+.PHONY: help start start-dev cli stop mcp-install release promote pm2-start pm2-stop pm2-restart pm2-startup pm2-remove pm2-logs system-start system-stop system-restart system-logs
 
 help: ## Show this help message
 	@echo "----------------------------------------"
@@ -32,6 +32,9 @@ mcp-install: ## Install MCP gateway dependencies
 
 release: ## Interactive release — choose patch/minor/major with version preview and confirm
 	@bash scripts/release.sh
+
+promote: ## Interactive promote — pick a published version (newer or older) and tag it stable on npm
+	@bash scripts/promote.sh
 
 pm2-start: ## Build and start gateway via pm2 (auto-restart on crash, saves process list)
 	npm run build
