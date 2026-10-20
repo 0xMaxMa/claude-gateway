@@ -91,6 +91,8 @@ curl -s -H "X-Api-Key: admin-key-456" \
 |-------|-------------|
 | `credentialOwner` | `none` \| `static` \| `gateway` \| `external` — see the table above. Also tells a UI which way to offer connecting: a paste-token box (`static`), a "Sign in" link pointing at `/oauth/start` (`gateway`), or neither |
 | `connected` | Every required secret is present (always `true` for `credentialOwner: "none"`) |
+| `defaultEnabled` | Present when the entry stores one. `false` means an agent gets the connector only with its own `{"enabled": true}` |
+| `paused` | Present and `true` only while the connector is paused (see [`PATCH /:id`](#patch-apiv1connectorsid)). A paused connector still reports `connected: true` |
 | `refresh` | **Absent when healthy.** Present only while a `gateway`-owned connector's background token refresh is failing — either transiently (a network error, DNS, a 5xx) or because the authorization server itself refused the grant. See below. Never present for any other owner: this gateway holds a `refresh_token` for none of them. |
 
 `connected` is computed purely from secret presence, and a transient refresh
@@ -160,6 +162,9 @@ same `refresh` block documented under `GET /api/v1/connectors` above:
   "refresh": { "consecutiveFailures": 3, "permanentFailures": 0, "nextAttemptAt": 1893456000000 }
 }
 ```
+
+It also carries `defaultEnabled` when the entry stores one, and `paused: true` while
+the connector is paused.
 
 `404` when the id is not a configured connector.
 
@@ -299,6 +304,88 @@ connector that slugs to the same id does not inherit them.
 { "id": "firecrawl", "connected": false }
 ```
 
+DELETE is the only destructive route. To switch a connector off for a while and keep
+its credential, pause it instead.
+
+---
+
+## PATCH /api/v1/connectors/:id {#patch-apiv1connectorsid}
+
+Pause or resume a connector, or change its `defaultEnabled`. **Admin.** Check for
+`capabilities.connectorPause: true` in `GET /api/v1/connectors` first.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `paused` | boolean | `true` removes the connector from every agent, whatever its per-agent flag says. `false` resumes it |
+| `defaultEnabled` | boolean | Whether an agent with no flag of its own gets the connector. `true` does not override `gateway.connectorsDefaultEnabled: false` |
+
+Send at least one field. This route never touches `mcp-token.env`: a paused connector
+keeps its secret and stays `connected: true`, and resuming needs no re-entry. Sessions
+that use the connector are restarted in the same way as for DELETE, so they lose (or get
+back) its tools.
+
+```bash
+curl -X PATCH -H "X-Api-Key: admin-key-456" -H "Content-Type: application/json" \
+  -d '{"paused": true}' http://localhost:10850/api/v1/connectors/ops-api | jq
+```
+
+```json
+{ "id": "ops-api", "paused": true, "defaultEnabled": false }
+```
+
+`400` for a non-boolean field or an empty body, `404` for an unknown id.
+
+---
+
+## GET /api/v1/connectors/:id/agents {#get-apiv1connectorsidagents}
+
+Which agents the connector reaches. **Admin**, because the answer lists every agent
+on the gateway. Check for `capabilities.connectorScope: true` first.
+
+The answer is computed from the per-agent `connectors` maps with the same rule the
+session spawner uses, so it always matches what is injected. Nothing about scope is
+stored on the connector.
+
+```json
+{
+  "id": "ops-api",
+  "mode": "selected",
+  "defaultEnabled": false,
+  "paused": false,
+  "agents": [
+    { "id": "alfred", "enabled": true },
+    { "id": "jarvis", "enabled": false }
+  ]
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `mode` | `all` when every agent gets the connector and the connector does not opt out by itself (`defaultEnabled: false`). Otherwise `selected` |
+| `defaultEnabled` | Whether an agent without its own flag (a new agent, for example) gets it. On a gateway with `connectorsDefaultEnabled: false` this is `false` even in `all` mode |
+| `paused` | Pausing does not change `agents`. It only stops the connector from resolving |
+| `agents[].enabled` | Whether this agent gets the connector when it is not paused |
+
+A toggle sent through `PATCH /api/v1/agents/:id` shows up here with no other call.
+
+---
+
+## PUT /api/v1/connectors/:id/agents {#put-apiv1connectorsidagents}
+
+Set which agents get the connector, in one `config.json` write. **Admin.**
+
+| Body | Effect |
+|------|--------|
+| `{"mode": "all"}` | Sets the connector's `defaultEnabled: true` and removes every agent's flag for it. On a gateway with `connectorsDefaultEnabled: false`, each current agent gets `{"enabled": true}` instead, because the default alone reaches no agent there |
+| `{"mode": "selected", "agents": ["alfred"]}` | Sets `defaultEnabled: false`, gives the listed agents `{"enabled": true}` and removes the flag from every other agent |
+
+Flags for other connectors are left alone. Only the agents whose answer changed have
+their sessions restarted. Answers with the same body as the GET.
+
+`400` for an unknown `mode`, a missing or non-string `agents` list in `selected` mode,
+`agents` in `all` mode, or an agent id that is not configured (nothing is written).
+`404` for an unknown connector.
+
 ---
 
 ## POST /api/v1/connectors/custom {#post-apiv1connectorscustom}
@@ -307,9 +394,14 @@ Add a user-pasted connector. **Admin.**
 
 Before relying on per-connector opt-in, clients should check that
 `GET /api/v1/connectors` returns `capabilities.perConnectorDefaults: true`.
-Older gateways may ignore unknown fields. Store a personal browser connector
-with `defaultEnabled: false`, then enable only selected agents through the
-existing agent PATCH endpoint.
+Older gateways may ignore unknown fields.
+
+A new connector is **opt-in**: when the request omits `defaultEnabled`, the entry is
+stored with `defaultEnabled: false` and reaches no agent until it is scoped through
+[`PUT /:id/agents`](#put-apiv1connectorsidagents) or flipped through
+[`PATCH /:id`](#patch-apiv1connectorsid). Send `defaultEnabled: true` to give it to
+every agent at once. Entries stored before this default existed carry no
+`defaultEnabled` and keep reaching every agent, as they did.
 
 **Request body:**
 
@@ -320,6 +412,7 @@ existing agent PATCH endpoint.
 | `secrets` | object | Optional `{ "<placeholderName>": "<value>" }`. All values must be strings; blank ones are skipped, leaving the connector "not connected" until filled in later via `/connect` |
 | `description` | string | Optional |
 | `sourceUrl` | string | Optional — where the admin says the config came from. Unverified |
+| `defaultEnabled` | boolean | Optional, default `false` (see above). Returned in the response |
 | `oauth` | boolean | Optional. Asks the gateway to run the sign-in itself — stores `credentialOwner: "gateway"`. Requires `config.url` and an `{access_token}` placeholder, and refuses an `access_token` in `secrets` (the gateway mints that one at `/oauth/start`). Without it the entry is `static` (it declares `{placeholder}`s) or `none` (it declares none) |
 
 ```bash

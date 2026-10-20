@@ -1,7 +1,7 @@
 import { Router, Request, Response, NextFunction } from 'express';
-import { ApiKey, CustomConnectorEntry } from '../types';
+import { AgentConfig, ApiKey, CustomConnectorEntry } from '../types';
 import { createApiAuthMiddleware, isAdmin } from './auth';
-import { listConnectorStatus, refreshStatusOf } from '../connectors/resolve';
+import { isConnectorEnabledFor, listConnectorStatus, refreshStatusOf } from '../connectors/resolve';
 import {
   setSecret,
   setSecrets,
@@ -19,7 +19,7 @@ import {
   isReservedPlaceholder,
   isReservedConnectorId,
 } from '../connectors/custom';
-import { createCustomConnectorsStore, type CustomConnectorsStore } from '../connectors/custom-connectors-store';
+import { createCustomConnectorsStore, type ConnectorScope, type CustomConnectorsStore } from '../connectors/custom-connectors-store';
 import { internalSecretKeysOf } from '../connectors/oauth-refresh-sweep';
 import type { AgentRunner } from '../agent/runner';
 
@@ -47,6 +47,10 @@ type AuthedRequest = Request & { apiKey: ApiKey };
  *                                              entry (config/label intact, just
  *                                              disconnected), a 'none' or 'external'
  *                                              one is removed outright — see the handler below
+ *   PATCH  /v1/connectors/:id                — pause/resume and set defaultEnabled
+ *                                              (admin); never touches secrets
+ *   GET    /v1/connectors/:id/agents         — which agents resolve it (admin)
+ *   PUT    /v1/connectors/:id/agents         — scope it to all or selected agents (admin)
  *   POST   /v1/connectors/custom             — add a user-pasted connector (admin)
  *
  * (Removal of a custom connector is NOT a separate route — it's the same
@@ -149,7 +153,7 @@ export function createConnectorsRouter(
   // blast radius to the client that asked.
   router.get('/v1/connectors', async (_req: Request, res: Response) => {
     try {
-      res.json({ connectors: listConnectorStatus(await store.read()), capabilities: { perConnectorDefaults: true, connectorResources: true, computerUseTasks: true } });
+      res.json({ connectors: listConnectorStatus(await store.read()), capabilities: { perConnectorDefaults: true, connectorResources: true, computerUseTasks: true, connectorPause: true, connectorScope: true } });
     } catch (err) {
       console.error(`connectors-router: listing connectors failed: ${(err as Error).message}`);
       res.status(500).json({ error: 'Connector configuration could not be read' });
@@ -186,7 +190,7 @@ export function createConnectorsRouter(
       // them and every counter would read a constant 0.
       const refresh =
         custom.credentialOwner === 'gateway' ? refreshStatusOf(req.params.id, tokenEnv) : undefined;
-      res.json({ id: req.params.id, connected, ...(custom.defaultEnabled !== undefined ? { defaultEnabled: custom.defaultEnabled } : {}), ...(refresh ? { refresh } : {}) });
+      res.json({ id: req.params.id, connected, ...(custom.defaultEnabled !== undefined ? { defaultEnabled: custom.defaultEnabled } : {}), ...(custom.paused === true ? { paused: true } : {}), ...(refresh ? { refresh } : {}) });
     } catch (err) {
       console.error(
         `connectors-router: status for connector=${req.params.id} failed: ${(err as Error).message}`,
@@ -211,6 +215,157 @@ export function createConnectorsRouter(
       if (!found) { res.status(404).json({ error: 'HTTP connector not found' }); return; }
       res.json({ ok: true });
     } catch { res.status(500).json({ error: 'Could not update connector management' }); }
+  });
+
+  // Pause/resume and the per-connector default. Non-destructive by design: only the
+  // entry changes, mcp-token.env is never touched, so a resumed connector comes back
+  // with the credential it had. DELETE stays the one destructive path.
+  router.patch('/v1/connectors/:id', async (req: Request, res: Response) => {
+    if (!requireAdmin(req, res)) return;
+    const { paused, defaultEnabled } = (req.body ?? {}) as { paused?: unknown; defaultEnabled?: unknown };
+    if (paused === undefined && defaultEnabled === undefined) {
+      res.status(400).json({ error: 'paused or defaultEnabled is required' }); return;
+    }
+    if (paused !== undefined && typeof paused !== 'boolean') {
+      res.status(400).json({ error: 'paused must be a boolean' }); return;
+    }
+    if (defaultEnabled !== undefined && typeof defaultEnabled !== 'boolean') {
+      res.status(400).json({ error: 'defaultEnabled must be a boolean' }); return;
+    }
+    const id = req.params.id;
+    try {
+      let updated: CustomConnectorEntry | undefined;
+      await store.mutate((entries) => {
+        const entry = entries[id];
+        if (!entry) return;
+        if (paused === true) entry.paused = true;
+        else if (paused === false) delete entry.paused;
+        if (typeof defaultEnabled === 'boolean') entry.defaultEnabled = defaultEnabled;
+        updated = { ...entry };
+      });
+      if (!updated) { res.status(404).json({ error: `Unknown connector '${id}'` }); return; }
+      await restartSessionsUsing(id, { overlay: { [id]: updated } });
+      res.json({
+        id,
+        paused: updated.paused === true,
+        ...(updated.defaultEnabled !== undefined ? { defaultEnabled: updated.defaultEnabled } : {}),
+      });
+    } catch (err) {
+      console.error(`connectors-router: update for connector=${id} failed: ${(err as Error).message}`);
+      res.status(500).json({ error: `Could not update connector '${id}'` });
+    }
+  });
+
+  // Agent scope: a connector-side view over AgentConfig.connectors, which stays the
+  // only stored answer. `mode` is derived, never stored, so it cannot drift from
+  // the per-agent toggles PATCH /v1/agents/:id writes.
+  //
+  // Admin-only on read too: the answer lists every agent id on the gateway.
+  type ScopeView = {
+    id: string;
+    mode: 'all' | 'selected';
+    defaultEnabled: boolean;
+    paused: boolean;
+    agents: Array<{ id: string; enabled: boolean }>;
+  };
+  function scopeView(id: string, scope: ConnectorScope): ScopeView {
+    const entry = scope.connectors[id];
+    const agents = scope.agents.map((a) => ({
+      id: a.id,
+      enabled: isConnectorEnabledFor(a.connectors, id, entry, scope.defaultEnabled),
+    }));
+    // What an agent with no flag of its own (a new one) gets. On an opt-in gateway
+    // that is false even in `all` mode, which only covers the agents that exist.
+    const defaultEnabled = isConnectorEnabledFor(undefined, id, entry, scope.defaultEnabled);
+    return {
+      id,
+      mode: entry?.defaultEnabled !== false && agents.every((a) => a.enabled) ? 'all' : 'selected',
+      defaultEnabled,
+      paused: entry?.paused === true,
+      agents,
+    };
+  }
+
+  router.get('/v1/connectors/:id/agents', async (req: Request, res: Response) => {
+    if (!requireAdmin(req, res)) return;
+    const id = req.params.id;
+    try {
+      const view = await store.withScope((scope) => ({
+        result: scope.connectors[id] ? scopeView(id, scope) : null,
+        write: false,
+      }));
+      if (!view) { res.status(404).json({ error: `Unknown connector '${id}'` }); return; }
+      res.json(view);
+    } catch (err) {
+      console.error(`connectors-router: scope read for connector=${id} failed: ${(err as Error).message}`);
+      res.status(500).json({ error: 'Connector configuration could not be read' });
+    }
+  });
+
+  router.put('/v1/connectors/:id/agents', async (req: Request, res: Response) => {
+    if (!requireAdmin(req, res)) return;
+    const id = req.params.id;
+    const { mode, agents: selected } = (req.body ?? {}) as { mode?: unknown; agents?: unknown };
+    if (mode !== 'all' && mode !== 'selected') {
+      res.status(400).json({ error: "mode must be 'all' or 'selected'" }); return;
+    }
+    if (mode === 'selected' && (!Array.isArray(selected) || !selected.every((a) => typeof a === 'string'))) {
+      res.status(400).json({ error: "agents must be an array of agent ids when mode is 'selected'" }); return;
+    }
+    if (mode === 'all' && selected !== undefined) {
+      res.status(400).json({ error: "agents is only accepted when mode is 'selected'" }); return;
+    }
+    try {
+      type ScopeOutcome =
+        | { status: 400 | 404; error: string }
+        | { status: 200; view: ScopeView; entry: CustomConnectorEntry; changed: Array<{ id: string; connectors: AgentConfig['connectors'] }> };
+      const outcome = await store.withScope<ScopeOutcome>((scope) => {
+        const entry = scope.connectors[id];
+        if (!entry) return { result: { status: 404, error: `Unknown connector '${id}'` }, write: false };
+        const wanted = new Set(mode === 'selected' ? (selected as string[]) : []);
+        const known = new Set(scope.agents.map((a) => a.id));
+        const unknown = [...wanted].filter((a) => !known.has(a));
+        if (unknown.length) {
+          return { result: { status: 400, error: `Unknown agent id(s): ${unknown.join(', ')}` }, write: false };
+        }
+        const before = new Map(scope.agents.map((a) => [a.id, isConnectorEnabledFor(a.connectors, id, entry, scope.defaultEnabled)]));
+        // `all`: the connector's own default goes on, and every per-agent flag for it
+        // is dropped so nothing keeps an agent out. On an opt-in gateway
+        // (connectorsDefaultEnabled: false) the default alone reaches no agent, so
+        // each current agent gets an explicit flag instead.
+        // `selected`: the default goes off, and only the listed agents carry a flag.
+        entry.defaultEnabled = mode === 'all';
+        for (const agent of scope.agents) {
+          const own = { ...(agent.connectors ?? {}) };
+          delete own[id];
+          if (mode === 'all' ? !scope.defaultEnabled : wanted.has(agent.id)) own[id] = { enabled: true };
+          agent.connectors = own;
+        }
+        const changed = scope.agents
+          .filter((a) => before.get(a.id) !== isConnectorEnabledFor(a.connectors, id, entry, scope.defaultEnabled))
+          .map((a) => ({ id: a.id, connectors: a.connectors }));
+        return {
+          result: { status: 200, view: scopeView(id, scope), entry: { ...entry }, changed },
+          write: true,
+        };
+      });
+      if (outcome.status !== 200) { res.status(outcome.status).json({ error: outcome.error }); return; }
+      // Only the agents whose answer moved; each runner then restarts only the
+      // sessions whose resolved server for this id differs from what they spawned with.
+      await Promise.all(outcome.changed.map(({ id: agentId, connectors }) => {
+        const runner = agents?.get(agentId);
+        if (!runner) return undefined;
+        return runner
+          .restartSessionsUsingConnector(id, { overlay: { [id]: outcome.entry }, agentConnectors: connectors })
+          .catch((err: Error) => {
+            console.error(`connectors-router: restart for connector=${id} agent=${agentId} failed: ${err.message}`);
+          });
+      }));
+      res.json(outcome.view);
+    } catch (err) {
+      console.error(`connectors-router: scope update for connector=${id} failed: ${(err as Error).message}`);
+      res.status(500).json({ error: `Could not update the agent scope of connector '${id}'` });
+    }
   });
 
   // Admin-only management of resources at a connector's configured origin.
@@ -741,7 +896,11 @@ export function createConnectorsRouter(
       const entry: CustomConnectorEntry = {
         label: body.label.trim(),
         ...(typeof body.resourcesPath === 'string' ? { resourcesPath: body.resourcesPath } : {}),
-        ...(typeof body.defaultEnabled === 'boolean' ? { defaultEnabled: body.defaultEnabled } : {}),
+        // Opt-in when the caller does not say: a new connector reaches no agent until
+        // it is scoped (PUT /:id/agents) or this is flipped (PATCH /:id). Entries
+        // stored before this default existed carry no field and keep resolving as
+        // they always did.
+        defaultEnabled: typeof body.defaultEnabled === 'boolean' ? body.defaultEnabled : false,
         description: typeof body.description === 'string' ? body.description : undefined,
         config: body.config as Record<string, unknown>,
         secretNames,
@@ -783,7 +942,7 @@ export function createConnectorsRouter(
 
       const connected = secretNames.every((name: string) => hasSecret(customSecretKey(id, name)));
       if (connected) await restartSessionsUsing(id, { overlay: { [id]: entry } });
-      res.json({ id, label: entry.label, connected, ...(entry.defaultEnabled !== undefined ? { defaultEnabled: entry.defaultEnabled } : {}) });
+      res.json({ id, label: entry.label, connected, defaultEnabled: entry.defaultEnabled });
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
     }
