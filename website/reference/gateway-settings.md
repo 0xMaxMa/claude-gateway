@@ -98,9 +98,10 @@ secrets. `credentialOwner` records who holds the credential and keeps it valid �
 token itself) or `external` (a control plane pushes tokens in). It is written by the
 route that creates the entry; see [Connectors API](../api/connectors.md). **Only the placeholder names are stored here** — the values live in
 `~/.claude-gateway/mcp-token.env` (mode `0600`), namespaced
-`CUSTOM__<connectorId>__<placeholderName>`. An HTTP connector's values are substituted
-inside the gateway on each request through its loopback proxy; other connectors get them
-when a session spawns (see [Credential isolation](../api/connectors.md#credential-isolation)).
+`CUSTOM__<connectorId>__<placeholderName>`. They are substituted inside the gateway,
+which carries each connector's traffic through its loopback proxy or a connector
+launcher, so they are not written to the agent's MCP config files (see
+[Credential isolation](../api/connectors.md#credential-isolation)).
 Override that file's path with `GATEWAY_MCP_TOKEN_ENV_PATH`.
 
 Custom connectors are **admin-trusted but not code-reviewed** — the config is whatever

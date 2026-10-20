@@ -2,7 +2,8 @@ import { sanitizeJevChildEnv, jevCredentialEnvNames } from '../jev/child-env';
 import { workerEnvironment } from './worker-environment';
 import { ProcessDiagnostics, TurnOutcome } from './process-diagnostics';
 import { prepareManagedConnectors } from './managed-connectors';
-import { agentFacingConnectors, revokeConnectorGrant } from '../connectors/proxy';
+import { agentFacingConnectors, revokeConnectorGrant, type ContainerLaunch } from '../connectors/proxy';
+import { prepareContainerLaunch } from './container-connectors';
 import { RequestToolCapture, RequestToolSchemas } from './request-tool-capture';
 import type { InputImage } from './input-image';
 import { prepareContainerProfile, stopContainerProfile, CONTAINER_SUPERVISOR, containerNode, assertContainerBinding } from '../orchestration/container';
@@ -742,6 +743,8 @@ export class SessionProcess extends EventEmitter {
   private managedConnectorPaths = new Set<string>();
   /** Loopback proxy grant (connectors/proxy.ts) the current spawn's MCP config holds. */
   private connectorGrant?: string;
+  /** Set for a legacy app-agent spawn whose container can run the connector launcher. */
+  private containerLaunch?: ContainerLaunch;
   /** `.sessions/<id>`, once a spawn without a runtime profile has written its mcp-config.json there. */
   private sessionDirPath?: string;
 
@@ -889,10 +892,11 @@ export class SessionProcess extends EventEmitter {
       this.gatewayConfig.gateway.connectorsDefaultEnabled ?? true,
     );
     // An app-agent's CLI runs inside its container, where the gateway's loopback
-    // address is not reachable, so it keeps talking to the upstream directly.
-    const { servers: agentFacing, grant } = this.isContainerAgent()
+    // address is not reachable: its connectors launch through a workspace socket,
+    // or, in a container that cannot run the launcher, keep their resolved entries.
+    const { servers: agentFacing, grant } = this.isContainerAgent() && !this.containerLaunch
       ? { servers: connectorServers, grant: undefined }
-      : agentFacingConnectors(this.agentConfig, this.gatewayConfig, connectorServers);
+      : agentFacingConnectors(this.agentConfig, this.gatewayConfig, connectorServers, { container: this.containerLaunch });
     this.connectorGrant = grant;
     const spawnedConnectors = new Map<string, string>();
     for (const [name, server] of Object.entries(connectorServers)) {
@@ -1215,6 +1219,10 @@ export class SessionProcess extends EventEmitter {
       if (epoch !== this.spawnEpoch) { await stopContainerProfile(container, attempt.directory); return false; }
       this.containerAttempt = attempt;
     }
+    this.containerLaunch = isAppAgent && !this.runtimeProfile && !this.sandboxed() && !this.agentConfig.isolateMemory
+      ? await prepareContainerLaunch(execContainer!, this.agentConfig.workspace, this.gatewayConfig.gateway.customConnectors)
+      : undefined;
+    if (epoch !== this.spawnEpoch) return false;
     const mcpConfigPath = this.writeMcpConfig();
     this.chatMemoryPath = this.sandboxed() && !this.runtimeProfile ? await this.writeSandboxChatMemory(execContainer!) : this.writeChatMemoryFile();
     if (epoch !== this.spawnEpoch) return false;
@@ -2298,7 +2306,7 @@ export class SessionProcess extends EventEmitter {
       }
     }
     // mcp-config.json under here holds fully-substituted secrets (channel bot
-    // tokens, GATEWAY_API_KEY, stdio connector secrets) — it must not outlive
+    // tokens, GATEWAY_API_KEY, connector grants) — it must not outlive
     // the session that needed it (issue #460). Recreated automatically on the
     // next spawn, so removing it here is safe across restarts. Deferred until
     // the process has actually exited below (not removed up front here) — the

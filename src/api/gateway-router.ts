@@ -53,7 +53,7 @@ import { createSkillsRouter } from './skills-router';
 import { createPackagesRouter } from './packages';
 import { createWebhooksRouter } from './webhooks-router';
 import { createConnectorsRouter } from './connectors-router';
-import { createConnectorProxyRouter, setConnectorProxyOrigin } from '../connectors/proxy';
+import { createConnectorProxyRouter, handleConnectorUpgrade, setConnectorProxyOrigin } from '../connectors/proxy';
 import { createOauthConnectorsRouter, createOauthCallbackRouter } from './oauth-connectors-router';
 import { createCustomConnectorsStore, type CustomConnectorsStore } from '../connectors/custom-connectors-store';
 import { pendingOAuthStore } from '../connectors/pending-oauth-store';
@@ -1656,6 +1656,7 @@ export class GatewayRouter {
 
       this.server.on('upgrade', (req: http.IncomingMessage, socket, head) => {
         if (this.voiceApi?.upgrade(req, socket, head)) return;
+        if (handleConnectorUpgrade(req, socket, head)) return;
         const url = req.url ?? '';
         const match = url.match(/\/api\/v1\/agents\/([^/?]+)\/pty-stream(?:\?.*)?$/);
         if (!match) {

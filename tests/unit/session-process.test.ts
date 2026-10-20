@@ -83,6 +83,12 @@ jest.mock('child_process', () => ({
   }),
 }));
 
+// A legacy app-agent's container is probed with `docker exec`; tests decide the answer.
+jest.mock('../../src/session/container-connectors', () => ({
+  ...jest.requireActual('../../src/session/container-connectors'),
+  prepareContainerLaunch: jest.fn(async () => undefined),
+}));
+
 // ── Imports (after mocks) ─────────────────────────────────────────────────────
 
 import { SessionProcess, resolveMaxHistoryMessages, MAX_HISTORY_MESSAGES } from '../../src/session/process';
@@ -655,8 +661,70 @@ describe('SessionProcess', () => {
       expect((await request(app).post('/internal/mcp/connectors/other').set('authorization', `Bearer ${grant}`)).status).toBe(401);
     });
 
-    // An app-agent's CLI runs inside its container, where the gateway's loopback
-    // proxy is unreachable: it keeps the direct entry, exactly as before #635.
+    // #635: stdio and SSE connectors, whose secrets sit in env/args/headers, launch
+    // through the gateway too, so no workspace file holds those secrets either.
+    it('stdio and SSE connector secrets never land in an agent-readable file; the entry is a revocable launcher', async () => {
+      fs.writeFileSync(TOKEN_ENV, 'CUSTOM__local__key=stdio_secret_635\nCUSTOM__legacy__key=sse_secret_635\n', { mode: 0o600 });
+      gatewayConfig.gateway.customConnectors = {
+        local: { label: 'Local', config: { command: 'npx', args: ['-y', 'local-mcp', '--key', '{key}'], env: { LOCAL_KEY: '{key}' } }, secretNames: ['key'], credentialOwner: 'static' },
+        legacy: { label: 'Legacy', config: { type: 'sse', url: 'https://legacy.example/sse', headers: { Authorization: 'Bearer {key}' } }, secretNames: ['key'], credentialOwner: 'static' },
+      } as any;
+      const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+      await sp.start();
+
+      const walk = (dir: string): string[] => fs.readdirSync(dir, { withFileTypes: true })
+        .flatMap(e => e.isDirectory() ? walk(path.join(dir, e.name)) : [path.join(dir, e.name)]);
+      for (const file of walk(agentConfig.workspace)) {
+        expect(fs.readFileSync(file, 'utf8')).not.toContain('stdio_secret_635');
+        expect(fs.readFileSync(file, 'utf8')).not.toContain('sse_secret_635');
+      }
+      const servers = readMcpConfig() as Record<string, { command: string; args: string[]; env: Record<string, string> }>;
+      for (const id of ['local', 'legacy']) {
+        expect(servers[id].command).toBe(process.execPath);
+        expect(servers[id].args).toEqual([expect.stringMatching(/mcp\/connector-launcher\.mjs$/)]);
+        expect(servers[id].env.GATEWAY_CONNECTOR_URL).toMatch(new RegExp(`/internal/mcp/connectors/${id}/stdio$`));
+      }
+      // Restart detection still sees the resolved entry.
+      expect(sp.connectorConfigChanged('local', { command: 'npx', args: ['-y', 'local-mcp', '--key', 'stdio_secret_635'], env: { LOCAL_KEY: 'stdio_secret_635' } })).toBe(false);
+
+      const { handleConnectorUpgrade } = require('../../src/connectors/proxy');
+      const launch = (grant: string): string => {
+        let reply = '';
+        const socket = { on: () => socket, write: (s: string) => { reply += s; }, end: (s: string) => { reply += s; }, destroy: () => {} };
+        handleConnectorUpgrade({ url: '/internal/mcp/connectors/other/stdio', headers: { upgrade: 'gateway-connector-stdio', authorization: `Bearer ${grant}` }, socket: { remoteAddress: '127.0.0.1' } }, socket, Buffer.alloc(0));
+        return reply.split('\r\n')[0];
+      };
+      const grant = servers.local.env.GATEWAY_CONNECTOR_GRANT;
+      expect(launch(grant)).toBe('HTTP/1.1 403 Forbidden');
+      await sp.stop();
+      expect(launch(grant)).toBe('HTTP/1.1 401 Unauthorized');
+    });
+
+    // A legacy app-agent's CLI runs inside its container, where the gateway's loopback
+    // proxy is unreachable: connectors launch through a socket in the mounted workspace.
+    it('app-agent sessions launch connectors through the workspace socket', async () => {
+      fs.writeFileSync(TOKEN_ENV, 'CUSTOM__github__access_token=ghp_container\n', { mode: 0o600 });
+      gatewayConfig.gateway.customConnectors = { github: githubCustomConnector };
+      const hostDir = path.join(agentConfig.workspace, '.gateway-connectors');
+      fs.mkdirSync(hostDir, { recursive: true });
+      const { prepareContainerLaunch } = require('../../src/session/container-connectors');
+      prepareContainerLaunch.mockResolvedValueOnce({ container: 'fixture-container', hostDir, containerDir: '/workspace/.gateway-connectors', bridgeCode: '' });
+      const appAgent = makeAgentConfig({ workspace: agentConfig.workspace, type: 'app-agent', container: 'fixture-container' });
+      const sp = makeSp('chat:111', 'telegram', appAgent, gatewayConfig, sessionStore);
+      await sp.start();
+      const entry = readMcpConfig().github as { command: string; args: string[]; env: Record<string, string> };
+      expect(entry.command).toBe('node');
+      expect(entry.args).toEqual(['/workspace/.gateway-connectors/connector-launcher.mjs']);
+      expect(entry.env.GATEWAY_CONNECTOR_PATH).toBe('/internal/mcp/connectors/github/stdio');
+      const socketFile = path.join(hostDir, path.basename(entry.env.GATEWAY_CONNECTOR_SOCKET));
+      expect(fs.existsSync(socketFile)).toBe(true);
+      expect(JSON.stringify(readMcpConfig())).not.toContain('ghp_container');
+      await sp.stop();
+      expect(fs.existsSync(socketFile)).toBe(false);
+    });
+
+    // A container that cannot run the launcher (no Node) keeps the direct entry,
+    // exactly as before #635, rather than losing its connectors.
     it('app-agent sessions keep the direct connector entry', async () => {
       fs.writeFileSync(TOKEN_ENV, 'CUSTOM__github__access_token=ghp_container\n', { mode: 0o600 });
       gatewayConfig.gateway.customConnectors = { github: githubCustomConnector };

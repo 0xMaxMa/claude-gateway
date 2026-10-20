@@ -409,9 +409,9 @@ export class CapabilityCatalog {
     const directory = await mkdtemp(join(tmpdir(), 'gateway-capabilities-'));
     let facing: ReturnType<typeof agentFacingConnectors> | undefined;
     try {
-      // Discovery reaches HTTP connectors through the loopback proxy too, so the
-      // probe config below never holds their secrets (#635).
-      facing = agentFacingConnectors(this.agent, this.gateway, connectors);
+      // Discovery reaches connectors through the gateway too, so the probe config
+      // below never holds their secrets (#635).
+      facing = agentFacingConnectors(this.agent, this.gateway, connectors, { sanitizeEnv: true });
       connectors = sanitizeServers(facing.servers);
       let servers = connectors;
       let cliFailed = false;
