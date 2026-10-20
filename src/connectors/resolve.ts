@@ -19,6 +19,23 @@ import {
 } from './oauth-refresh-sweep';
 
 /**
+ * Whether connector `id` is enabled for an agent whose per-agent map is
+ * `agentConnectors`. An explicit per-agent flag wins; otherwise the gateway default
+ * applies unless the connector itself opts out. This is the one rule both
+ * resolution and GET /v1/connectors/:id/agents use, so they cannot disagree.
+ * Pausing is a separate gate (see resolveEnabledConnectors) and is not part of it.
+ */
+export function isConnectorEnabledFor(
+  agentConnectors: AgentConfig['connectors'],
+  id: string,
+  entry: Pick<CustomConnectorEntry, 'defaultEnabled'> | undefined,
+  defaultEnabled = true,
+): boolean {
+  const own = agentConnectors && Object.prototype.hasOwnProperty.call(agentConnectors, id) ? agentConnectors[id] : undefined;
+  return own?.enabled ?? (defaultEnabled && entry?.defaultEnabled !== false);
+}
+
+/**
  * Build the mcpServers entries for every connector that is (a) in customConnectors,
  * (b) enabled for this agent, and (c) connected (every `{placeholder}` secret it
  * declares is present). Returns a map keyed by connector id, ready to merge into
@@ -36,24 +53,12 @@ import {
  * including agents whose chat users are not the person who connected it. Opting in
  * per agent is the safer posture for that deployment, so it is available — as a
  * deliberate choice, not a silent change of meaning for existing installs.
+ *
+ * Per connector, an entry's own `defaultEnabled: false` opts it in regardless.
+ * POST /v1/connectors/custom stores that for every new connector unless the caller
+ * says otherwise; entries stored before that carry no field and stay opt-out.
+ * A `paused` entry resolves for no agent at all.
  */
-/**
- * Whether connector `id` is enabled for an agent whose per-agent map is
- * `agentConnectors`. An explicit per-agent flag wins; otherwise the gateway default
- * applies unless the connector itself opts out. This is the one rule both
- * resolution and GET /v1/connectors/:id/agents use, so they cannot disagree.
- * Pausing is a separate gate (see resolveEnabledConnectors) and is not part of it.
- */
-export function isConnectorEnabledFor(
-  agentConnectors: AgentConfig['connectors'],
-  id: string,
-  entry: Pick<CustomConnectorEntry, 'defaultEnabled'> | undefined,
-  defaultEnabled = true,
-): boolean {
-  const own = agentConnectors && Object.prototype.hasOwnProperty.call(agentConnectors, id) ? agentConnectors[id] : undefined;
-  return own?.enabled ?? (defaultEnabled && entry?.defaultEnabled !== false);
-}
-
 export function resolveEnabledConnectors(
   agentConfig: Pick<AgentConfig, 'connectors'>,
   customConnectors: Record<string, CustomConnectorEntry> = {},

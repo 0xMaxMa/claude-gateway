@@ -352,17 +352,22 @@ export function createConnectorsRouter(
         };
       });
       if (outcome.status !== 200) { res.status(outcome.status).json({ error: outcome.error }); return; }
-      // Only the agents whose answer moved; each runner then restarts only the
-      // sessions whose resolved server for this id differs from what they spawned with.
-      await Promise.all(outcome.changed.map(({ id: agentId, connectors }) => {
-        const runner = agents?.get(agentId);
-        if (!runner) return undefined;
-        return runner
-          .restartSessionsUsingConnector(id, { overlay: { [id]: outcome.entry }, agentConnectors: connectors })
+      // Every runner gets the overlay, so the shared config sees the new
+      // defaultEnabled before the watcher does even when no running agent's answer
+      // moved. Only the agents whose answer moved get their new map; each runner
+      // then restarts only the sessions whose resolved server for this id differs
+      // from what they spawned with.
+      const changed = new Map(outcome.changed.map((a) => [a.id, a.connectors]));
+      await Promise.all([...(agents ?? new Map<string, AgentRunner>())].map(([agentId, runner]) =>
+        runner
+          .restartSessionsUsingConnector(id, {
+            overlay: { [id]: outcome.entry },
+            ...(changed.has(agentId) ? { agentConnectors: changed.get(agentId) } : {}),
+          })
           .catch((err: Error) => {
             console.error(`connectors-router: restart for connector=${id} agent=${agentId} failed: ${err.message}`);
-          });
-      }));
+          }),
+      ));
       res.json(outcome.view);
     } catch (err) {
       console.error(`connectors-router: scope update for connector=${id} failed: ${(err as Error).message}`);
@@ -621,9 +626,11 @@ export function createConnectorsRouter(
           .map((name: string) => customSecretKey(id, name));
         // A push replaces the connector's shape and token, not the admin's choices
         // about it. A control plane re-pushes on every token refresh, so dropping
-        // these would silently resume a paused connector and undo its agent scope.
+        // these would silently resume a paused connector, undo its agent scope and
+        // unset its resources path (which computer-connector.ts keys on).
         if (previous?.paused === true) entry.paused = true;
         if (previous?.defaultEnabled !== undefined) entry.defaultEnabled = previous.defaultEnabled;
+        if (previous?.resourcesPath !== undefined) entry.resourcesPath = previous.resourcesPath;
         c[id] = entry;
       });
       updateSecrets({ [customSecretKey(id, 'access_token')]: accessToken.trim() }, [
