@@ -19,7 +19,7 @@ export function prepareManagedConnectors(agent: AgentConfig, gateway: GatewayCon
     : {};
   const eligible = Object.entries({ ...(profile.hostExecution && agent.type !== 'app-agent' && agent.allow_tools !== false && profile.connectorsAllowed !== false ? extensions : {}), ...connectors }).filter(([id]) => !isReservedConnectorId(id));
   const isConnector = (id: string): boolean => Object.prototype.hasOwnProperty.call(connectors, id);
-  const { servers: facing, grant } = agentFacingConnectors(agent, gateway, Object.fromEntries(eligible.filter(([id]) => isConnector(id))));
+  const { servers: facing, grant } = agentFacingConnectors(agent, gateway, Object.fromEntries(eligible.filter(([id]) => isConnector(id))), { sanitizeEnv: true });
   let servers: Record<string, { command: string; args: string[] }>;
   try {
     servers = Object.fromEntries(eligible.map(([id, original], index) => {

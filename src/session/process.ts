@@ -897,6 +897,7 @@ export class SessionProcess extends EventEmitter {
     const { servers: agentFacing, grant } = agentFacingConnectors(this.agentConfig, this.gatewayConfig, connectorServers, {
       container: this.containerLaunch,
       containerUnavailable: this.isContainerAgent() && !this.containerLaunch,
+      sanitizeEnv: true,
     });
     this.connectorGrant = grant;
     const spawnedConnectors = new Map<string, string>();

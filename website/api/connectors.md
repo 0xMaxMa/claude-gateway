@@ -84,9 +84,8 @@ a moved path) is followed with the configured headers, as Claude Code's own tran
 did: a `GET`/`DELETE` follows any such redirect, and a `POST` follows a `307`/`308`
 with its body (up to 5 hops). A redirect to any other origin is refused with `502`,
 so the credential is never sent somewhere the connector config does not name. So a rotated
-or refreshed token applies on the next call, and a disconnected connector fails
-with `403` even mid-session. A per-agent enablement change still takes effect when
-the session restarts, as before. Nothing changes for the operator: no new
+or refreshed token applies on the next call, and a disconnected, paused, or newly
+out-of-scope connector fails with `403` even mid-session. Nothing changes for the operator: no new
 configuration, no re-connect.
 
 A stdio or SSE connector, whose secret sits in `env`, `args` or `headers`, gets a
@@ -107,9 +106,12 @@ Claude Code starts the launcher as the connector's stdio server. The launcher
 upgrades a connection to the gateway with the grant and sends the working directory
 and environment Claude Code gave it. The gateway resolves the connector again and
 spawns `mcp/connector-bridge.ts`, writing the resolved entry to its stdin. For a stdio
-entry, the bridge starts the server with the launcher's environment plus the entry's
-`env`, in the launcher's working directory, the same way Claude Code starts it, and
-passes the MCP stream through byte for byte. For an SSE entry, it forwards each
+entry, the bridge starts the server with a small allowlist of non-secret runtime
+variables from the launcher's environment plus the entry's explicit `env`, in the
+launcher's working directory. Other inherited environment variables are not passed
+to connectors. Before forwarding each MCP operation, the bridge rechecks the live
+pause and agent-scope settings; an operation already accepted can finish, while the
+next one is rejected after a pause or scope change. For an SSE entry, it forwards each
 JSON-RPC message to the configured `url` with the configured headers, under the same
 redirect policy as the HTTP proxy: same-origin redirects are followed, a redirect to
 another origin fails the request. The same grant rules apply. A revoked grant stops running bridges, and a disconnected or disabled
@@ -201,7 +203,7 @@ curl -s -H "X-Api-Key: admin-key-456" \
 | `defaultEnabled` | Present when the entry stores one. `false` means an agent gets the connector only with its own `{"enabled": true}` |
 | `paused` | Present and `true` only while the connector is paused (see [`PATCH /:id`](#patch-apiv1connectorsid)). A paused connector still reports `connected: true` |
 | `secretExposure` | `"agent-readable"` when the connector's secret is still written into a session's MCP config file: for every agent when the entry has a `headersHelper` or `oauth` field or a `ws` transport, or for the agents in `exposedAgents` (see [Credential isolation](#credential-isolation)). Absent when the secret stays in the gateway. Also returned by `GET /api/v1/connectors/:id/status` |
-| `exposedAgents` | With `secretExposure`, when only some agents' sessions write the secret: agents whose latest spawn could not use the gateway route (an app-agent container without Node, or a socket path too long to bind). Sorted agent ids; in memory, so empty again after a gateway restart until those agents spawn |
+| `exposedAgents` | With `secretExposure`, when only some agents' live sessions write the secret: agents with at least one active session that could not use the gateway route (an app-agent container without Node, or a socket path too long to bind). Sorted agent ids; in memory, so empty again after a gateway restart until those sessions spawn |
 | `refresh` | **Absent when healthy.** Present only while a `gateway`-owned connector's background token refresh is failing — either transiently (a network error, DNS, a 5xx) or because the authorization server itself refused the grant. See below. Never present for any other owner: this gateway holds a `refresh_token` for none of them. |
 
 `connected` is computed purely from secret presence, and a transient refresh

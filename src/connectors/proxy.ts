@@ -18,8 +18,8 @@
  * workspace, and the bridge runs inside the same container with `docker exec`, so
  * stdio servers and upstream URLs see the container's filesystem and network as before.
  *
- * A revoked grant, or a disconnected/disabled connector, fails closed on the next
- * request or launch.
+ * A revoked grant, or a disconnected/disabled/paused/out-of-scope connector, fails
+ * closed on the next request or MCP operation.
  */
 
 import { randomBytes } from 'crypto';
@@ -31,13 +31,13 @@ import { userInfo } from 'os';
 import * as path from 'path';
 import { pipeline, type Duplex } from 'node:stream';
 import type { AddressInfo } from 'node:net';
-import { Router, type Request, type Response } from 'express';
+import express, { Router, type Request, type Response } from 'express';
 import type { AgentConfig, GatewayConfig } from '../types';
 import type { CustomConnectorEntry } from './types';
 import { resolveEnabledConnectors } from './resolve';
 import { agentFacingFields, connectorSecretRoute, isStreamableHttpType } from './custom';
 import { sanitizeJevChildEnv } from '../jev/child-env';
-import { recordRuntimeExposure } from './exposure';
+import { clearRuntimeExposure, recordRuntimeExposure } from './exposure';
 import { MAX_REDIRECTS, sameOriginRedirect } from './redirect';
 
 export const CONNECTOR_PROXY_PATH = '/internal/mcp/connectors';
@@ -78,6 +78,14 @@ const MAX_SOCKET_PATH = 107;
 const MAX_REPLAY_BYTES = 4 * 1024 * 1024;
 
 const grants = new Map<string, Grant>();
+
+/** Only non-secret runtime basics from the launching agent reach a connector.
+ * Connector-specific credentials belong in that connector's explicit `env`. */
+const CONNECTOR_INHERITED_ENV = new Set([
+  'PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'TMPDIR', 'TMP', 'TEMP',
+  'LANG', 'LC_ALL', 'LC_CTYPE', 'TERM', 'SSL_CERT_FILE', 'SSL_CERT_DIR',
+  'NODE_EXTRA_CA_CERTS', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'PATHEXT',
+]);
 
 /** Client headers the MCP streamable-HTTP transport needs; everything else, including
  * the grant's own Authorization, is dropped so a caller cannot add or override one. */
@@ -132,11 +140,20 @@ export function agentFacingConnectors(
     if (route === 'proxy') routes.set(id, options.container ? 'launch' : 'proxy');
     else if (route === 'launch') routes.set(id, 'launch');
   }
-  const fallBack = (): { servers: Record<string, unknown> } => {
-    recordRuntimeExposure(agent.id, routes.keys());
-    return { servers };
+  const fallBack = (): { servers: Record<string, unknown>; grant: string } => {
+    // A direct-entry fallback is still owned by this live session. Keep its
+    // exposure until that session ends; a later discovery or spawn is independent.
+    const exposureGrant = randomBytes(32).toString('base64url');
+    grants.set(exposureGrant, {
+      agentId: agent.id,
+      routes: new Map(),
+      resolve: () => undefined,
+      cleanEnv: env => env,
+      bridges: new Set(),
+    });
+    recordRuntimeExposure(exposureGrant, agent.id, routes.keys());
+    return { servers, grant: exposureGrant };
   };
-  recordRuntimeExposure(agent.id, []);
   if (!routes.size) return { servers };
   if (options.containerUnavailable && !options.container) {
     console.warn(`connector-proxy: agent=${agent.id} container cannot launch connectors; ${[...routes.keys()].join(', ')} keep their resolved entries`);
@@ -148,9 +165,8 @@ export function agentFacingConnectors(
     agentId: agent.id,
     routes,
     // Re-resolved per request, so a disconnected connector (its secret deleted) or a
-    // removed entry fails on the next call. Per-agent enablement is read from the
-    // config object the session was spawned with; a change to it restarts the
-    // session, which revokes this grant.
+    // removed entry fails on the next call. The agent config object is shared with
+    // its runner, so current per-agent scope changes are checked in-flight too.
     resolve: id => {
       if (agent.isolateMemory) return undefined;
       const current = gateway.gateway?.customConnectors ?? {};
@@ -158,7 +174,9 @@ export function agentFacingConnectors(
       return resolveEnabledConnectors(agent, { [id]: current[id] }, gateway.gateway?.connectorsDefaultEnabled ?? true)[id];
     },
     container: options.container,
-    cleanEnv: env => options.sanitizeEnv ? sanitizeJevChildEnv(env, gateway.gateway?.jev) : env,
+    cleanEnv: env => options.sanitizeEnv
+      ? sanitizeJevChildEnv(Object.fromEntries(Object.entries(env).filter(([name]) => CONNECTOR_INHERITED_ENV.has(name.toUpperCase()))), gateway.gateway?.jev)
+      : env,
     bridges: new Set(),
   };
   let socketName: string | undefined;
@@ -189,10 +207,12 @@ export function agentFacingConnectors(
   return { servers, grant };
 }
 
-/** A container's channel to the gateway: only launcher upgrades are served on it. */
+/** A container's private channel for launcher upgrades and live authorization checks. */
 function listenOnSocket(file: string): http.Server {
   try { fs.rmSync(file, { force: true }); } catch { /* bind reports it */ }
-  const server = http.createServer((_req, res) => { res.writeHead(404).end(); });
+  const app = express();
+  app.use(createConnectorProxyRouter());
+  const server = http.createServer(app);
   server.on('upgrade', (req, socket, head) => { if (!handleConnectorUpgrade(req, socket, head)) socket.destroy(); });
   server.on('error', err => console.error(`connector-proxy: socket ${file} failed: ${err.message}`));
   server.listen(file, () => { try { fs.chmodSync(file, 0o600); } catch { /* removed already */ } });
@@ -216,6 +236,7 @@ export function revokeConnectorGrant(grant: string | undefined): void {
   if (!grant) return;
   const record = grants.get(grant);
   grants.delete(grant);
+  clearRuntimeExposure(grant);
   if (!record) return;
   record.revoked = true;
   // Ending stdin lets a server exit on its own (a container bridge only sees EOF);
@@ -263,6 +284,19 @@ function upstreamOf(server: unknown): { url: URL; headers: Record<string, string
  * to the upstream unread, so no size limit applies that a direct connection lacked. */
 export function createConnectorProxyRouter(): Router {
   const router = Router();
+  router.post(`${CONNECTOR_PROXY_PATH}/:id/authorize`, (req: Request, res: Response) => {
+    if (!isSameHost(req)) { res.status(403).end(); return; }
+    const match = /^Bearer (\S+)$/.exec(req.headers.authorization ?? '');
+    const grant = match ? grants.get(match[1]) : undefined;
+    if (!grant) { res.status(401).end(); return; }
+    const id = req.params['id'] ?? '';
+    if (grant.routes.get(id) !== 'launch') { res.status(403).end(); return; }
+    let resolved: unknown;
+    try { resolved = grant.resolve(id); }
+    catch (err) { console.error(`connector-proxy: connector=${id} authorization check failed: ${(err as Error).message}`); }
+    if (!bridgeable(resolved)) { res.status(403).end(); return; }
+    res.status(204).end();
+  });
   router.all(`${CONNECTOR_PROXY_PATH}/:id`, (req: Request, res: Response) => {
     if (!isSameHost(req)) { res.status(403).json({ error: 'Forbidden' }); return; }
     const match = /^Bearer (\S+)$/.exec(req.headers.authorization ?? '');
@@ -399,7 +433,7 @@ export function handleConnectorUpgrade(req: http.IncomingMessage, socket: Duplex
   if (!isSameHost(req)) return refuse('403 Forbidden');
   const auth = /^Bearer (\S+)$/.exec(req.headers.authorization ?? '');
   const grant = auth ? grants.get(auth[1]) : undefined;
-  if (!grant) return refuse('401 Unauthorized');
+  if (!auth || !grant) return refuse('401 Unauthorized');
   let id: string;
   try { id = decodeURIComponent(match[1]); } catch { return refuse('400 Bad Request'); }
   if (!grant.routes.has(id)) return refuse('403 Forbidden');
@@ -426,7 +460,7 @@ export function handleConnectorUpgrade(req: http.IncomingMessage, socket: Duplex
     socket.pause();
     let preamble: { cwd?: unknown; env?: unknown } = {};
     try { preamble = JSON.parse(pending.subarray(0, end).toString('utf8')); } catch { socket.destroy(); return; }
-    startBridge(grant, id, server, preamble, pending.subarray(end + 1), socket);
+    startBridge(grant, auth[1], id, server, preamble, pending.subarray(end + 1), socket);
   };
   socket.on('data', onData);
   if (head.length) onData(Buffer.alloc(0));
@@ -461,14 +495,20 @@ function logBridgeStderr(bridge: ChildProcess, prefix: string): void {
   bridge.stderr!.on('end', () => { emit(partial); partial = ''; });
 }
 
-function startBridge(grant: Grant, id: string, server: Record<string, unknown>, preamble: { cwd?: unknown; env?: unknown }, rest: Buffer, socket: Duplex): void {
+function startBridge(grant: Grant, grantToken: string, id: string, server: Record<string, unknown>, preamble: { cwd?: unknown; env?: unknown }, rest: Buffer, socket: Duplex): void {
   if (grant.revoked) { socket.destroy(); return; }
   const clean = grant.cleanEnv;
-  const config = server.env === undefined ? server : { ...server, env: clean(stringEnv(server.env)) };
+  // Connector env is explicit connector configuration and remains available. Only
+  // the launcher's inherited environment is unrelated agent/process state.
+  const config = server;
+  const authPath = `${CONNECTOR_PROXY_PATH}/${encodeURIComponent(id)}/authorize`;
   const spec = {
     config,
     cwd: typeof preamble.cwd === 'string' && preamble.cwd.startsWith('/') ? preamble.cwd : undefined,
     env: clean(stringEnv(preamble.env)),
+    authorization: grant.container
+      ? { socketPath: path.join(grant.container.containerDir, path.basename(grant.socket?.file ?? '')), path: authPath, grant: grantToken }
+      : { url: `${proxyBaseUrl()}${authPath}`, grant: grantToken },
   };
   const bridge = grant.container
     ? spawn('docker', ['exec', '-i', '--user', String(userInfo().uid), grant.container.container, 'node', '-e', CONTAINER_BRIDGE_LOADER], { stdio: ['pipe', 'pipe', 'pipe'] })

@@ -14,6 +14,7 @@
  * Bundled for Node when it has to run inside an app-agent container.
  */
 import { spawn } from 'child_process';
+import * as http from 'node:http';
 import { createInterface } from 'readline';
 import { PassThrough } from 'stream';
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
@@ -32,7 +33,7 @@ function onData(chunk: Buffer): void {
   }
   process.stdin.off('data', onData);
   process.stdin.pause();
-  let spec: { config: Record<string, any>; cwd?: string; env?: Record<string, string> };
+  let spec: { config: Record<string, any>; cwd?: string; env?: Record<string, string>; authorization?: { url?: string; socketPath?: string; path?: string; grant: string } };
   try { spec = JSON.parse(pending.subarray(0, end).toString('utf8')); } catch { return fail('invalid connector spec'); }
   // The rest of the stream, starting with whatever arrived alongside the spec.
   const rest = new PassThrough();
@@ -40,7 +41,7 @@ function onData(chunk: Buffer): void {
   process.stdin.pipe(rest);
   pending = Buffer.alloc(0);
   if (typeof spec.config?.command === 'string') runStdio(spec as any, rest);
-  else runRemote(spec.config, rest).catch(err => fail(err instanceof Error ? err.message : String(err)));
+  else runRemote(spec, rest).catch(err => fail(err instanceof Error ? err.message : String(err)));
 }
 
 function fail(message: string): never {
@@ -48,7 +49,26 @@ function fail(message: string): never {
   process.exit(1);
 }
 
-function runStdio(spec: { config: { command: string; args?: unknown; env?: Record<string, string>; cwd?: string }; cwd?: string; env?: Record<string, string> }, input: PassThrough): void {
+function authorize(authorization: { url?: string; socketPath?: string; path?: string; grant: string } | undefined): Promise<boolean> {
+  if (!authorization?.grant || (!authorization.url && (!authorization.socketPath || !authorization.path))) return Promise.resolve(false);
+  return new Promise(resolve => {
+    const request = authorization.url
+      ? http.request(authorization.url, { method: 'POST', headers: { authorization: `Bearer ${authorization.grant}` } })
+      : http.request({ socketPath: authorization.socketPath, path: authorization.path, method: 'POST', headers: { authorization: `Bearer ${authorization.grant}` } });
+    request.setTimeout(5000, () => request.destroy(new Error('authorization check timed out')));
+    request.on('response', response => { response.resume(); resolve(response.statusCode === 204); });
+    request.on('error', () => resolve(false));
+    request.end();
+  });
+}
+
+function denied(message: any): void {
+  if (message.id !== undefined && message.method) {
+    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: message.id, error: { code: -32003, message: 'Connector is not available' } }) + '\n');
+  }
+}
+
+function runStdio(spec: { config: { command: string; args?: unknown; env?: Record<string, string>; cwd?: string }; cwd?: string; env?: Record<string, string>; authorization?: { url?: string; socketPath?: string; path?: string; grant: string } }, input: PassThrough): void {
   const { config } = spec;
   const child = spawn(config.command, Array.isArray(config.args) ? config.args.map(String) : [], {
     cwd: typeof config.cwd === 'string' ? config.cwd : spec.cwd,
@@ -56,7 +76,18 @@ function runStdio(spec: { config: { command: string; args?: unknown; env?: Recor
     stdio: ['pipe', 'inherit', 'inherit'],
   });
   child.stdin.on('error', () => {});
-  input.pipe(child.stdin);
+  const lines = createInterface({ input, crlfDelay: Infinity });
+  let pending = Promise.resolve();
+  lines.on('line', line => {
+    if (!line.trim()) return;
+    let message: any;
+    try { message = JSON.parse(line); } catch { return; }
+    pending = pending.then(async () => {
+      if (message.method && !(await authorize(spec.authorization))) { denied(message); return; }
+      child.stdin.write(line + '\n');
+    }).catch(err => fail(err instanceof Error ? err.message : String(err)));
+  });
+  lines.on('close', () => child.stdin.end());
   for (const signal of ['SIGTERM', 'SIGINT'] as const) process.on(signal, () => child.kill(signal));
   child.on('error', err => fail(`cannot start ${config.command}: ${err.message}`));
   child.on('exit', (code, signal) => process.exit(code ?? (signal ? 1 : 0)));
@@ -85,13 +116,15 @@ async function sameOriginFetch(input: string | URL | Request, init: RequestInit 
   }
 }
 
-async function runRemote(config: Record<string, any>, input: PassThrough): Promise<void> {
+async function runRemote(spec: { config: Record<string, any>; authorization?: { url?: string; socketPath?: string; path?: string; grant: string } }, input: PassThrough): Promise<void> {
+  const config = spec.config;
   const url = new URL(config.url);
   const requestInit = { headers: config.headers ?? {} };
   const transport = config.type === 'sse'
     ? new SSEClientTransport(url, { requestInit, fetch: sameOriginFetch })
     : new StreamableHTTPClientTransport(url, { requestInit, fetch: sameOriginFetch });
   const initializing = new Set<unknown>();
+  let pending = Promise.resolve();
   transport.onmessage = (message: any) => {
     // Claude Code's own transport sends the negotiated version on later requests.
     if (initializing.delete(message.id) && message.result?.protocolVersion && 'setProtocolVersion' in transport) {
@@ -108,7 +141,12 @@ async function runRemote(config: Record<string, any>, input: PassThrough): Promi
     let message: any;
     try { message = JSON.parse(line); } catch { return; }
     if (message.method === 'initialize') initializing.add(message.id);
-    transport.send(message).catch((err: Error) => {
+    pending = pending.then(async () => {
+      // Responses to an upstream-initiated request finish work the connector
+      // already started; gate new operations while preserving those responses.
+      if (message.method && !(await authorize(spec.authorization))) { denied(message); return; }
+      await transport.send(message);
+    }).catch((err: Error) => {
       // A request that never reached the upstream still needs an answer, or the call hangs.
       if (message.id !== undefined && message.method) {
         process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: message.id, error: { code: -32000, message: err.message } }) + '\n');

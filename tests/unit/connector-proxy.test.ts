@@ -53,7 +53,7 @@ process.stderr.write('stdio-fixture: started\\n');
 const server = new Server({ name: 'stdio-fixture', version: '1' }, { capabilities: { tools: {} } });
 server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [{ name: 'whoami', description: 'whoami', inputSchema: { type: 'object' } }] }));
 server.setRequestHandler(CallToolRequestSchema, async req => ({ content: [{ type: 'text', text: JSON.stringify({
-  key: process.env.KEY ?? null, argv: process.argv.slice(2), cwd: process.cwd(), inherited: process.env.FROM_AGENT ?? null, echo: req.params.arguments ?? {},
+  key: process.env.KEY ?? null, argv: process.argv.slice(2), cwd: process.cwd(), inherited: process.env.FROM_AGENT ?? null, jev: process.env.TYPESAFE_API_KEY ?? null, configured: process.env.CONNECTOR_ONLY ?? null, echo: req.params.arguments ?? {},
 }) }] }));
 await server.connect(new StdioServerTransport());
 `;
@@ -616,20 +616,58 @@ describe('launched connectors (stdio, SSE, placeholders outside url/headers)', (
     revokeConnectorGrant(grant);
   });
 
-  it('starts a stdio server with its secret env and args, the agent env and cwd, as Claude Code would', async () => {
+  it('starts a stdio server with its configured env and cwd while filtering arbitrary inherited env', async () => {
     const { files, grant } = managedFiles(launchedGateway());
     const client = await connectEntry(JSON.parse(fs.readFileSync(files.local, 'utf8')), { FROM_AGENT: 'yes' });
     try {
       expect((await client.listTools()).tools.map(t => t.name)).toEqual(['whoami']);
-      expect(await whoami(client)).toEqual({ key: STDIO_SECRET, argv: ['--token', STDIO_SECRET], cwd: process.cwd(), inherited: 'yes', echo: { q: 'ไทย' } });
+      expect(await whoami(client)).toEqual({ key: STDIO_SECRET, argv: ['--token', STDIO_SECRET], cwd: process.cwd(), inherited: null, jev: null, configured: null, echo: { q: 'ไทย' } });
     } finally {
       await client.close();
       revokeConnectorGrant(grant);
     }
   });
 
+  it('revalidates a live stdio bridge after pause or agent scope revocation', async () => {
+    const g = launchedGateway();
+    const a = agent();
+    const { files, grant } = managedFiles(g, a);
+    const client = await connectEntry(JSON.parse(fs.readFileSync(files.local, 'utf8')));
+    try {
+      await client.listTools();
+      g.gateway.customConnectors!.local.paused = true;
+      await expect(client.callTool({ name: 'whoami', arguments: {} })).rejects.toThrow();
+      delete g.gateway.customConnectors!.local.paused;
+      a.connectors = { local: { enabled: false } };
+      await expect(client.callTool({ name: 'whoami', arguments: {} })).rejects.toThrow();
+    } finally {
+      await client.close();
+      revokeConnectorGrant(grant);
+    }
+  });
+
+  it('filters inherited Jev credentials while preserving connector-configured env values', async () => {
+    const previous = process.env.TYPESAFE_API_KEY;
+    process.env.TYPESAFE_API_KEY = 'jev-secret-must-not-leak';
+    const g = launchedGateway();
+    (g.gateway.customConnectors!.local.config as any).env.CONNECTOR_ONLY = 'connector-value';
+    const { files, grant } = managedFiles(g);
+    const client = await connectEntry(JSON.parse(fs.readFileSync(files.local, 'utf8')));
+    try {
+      await client.listTools();
+      expect(await whoami(client)).toMatchObject({ jev: null, configured: 'connector-value' });
+    } finally {
+      await client.close();
+      revokeConnectorGrant(grant);
+      if (previous === undefined) delete process.env.TYPESAFE_API_KEY;
+      else process.env.TYPESAFE_API_KEY = previous;
+    }
+  });
+
   it('carries an SSE connector, its credential header included, through the bridge', async () => {
-    const { files, grant } = managedFiles(launchedGateway());
+    const g = launchedGateway();
+    const a = agent();
+    const { files, grant } = managedFiles(g, a);
     const client = await connectEntry(JSON.parse(fs.readFileSync(files.legacy, 'utf8')));
     try {
       const names: string[] = [];
@@ -646,6 +684,11 @@ describe('launched connectors (stdio, SSE, placeholders outside url/headers)', (
       expect((big.content as any)[0].text).toBe(`3:${BIG}`);
       const failed = await client.callTool({ name: 'fail', arguments: {} });
       expect(failed.isError).toBe(true);
+      g.gateway.customConnectors!.legacy.paused = true;
+      await expect(client.callTool({ name: 'echo', arguments: { q: 'paused' } })).rejects.toThrow();
+      delete g.gateway.customConnectors!.legacy.paused;
+      a.connectors = { legacy: { enabled: false } };
+      await expect(client.callTool({ name: 'echo', arguments: { q: 'out-of-scope' } })).rejects.toThrow();
     } finally {
       await client.close();
       revokeConnectorGrant(grant);
@@ -732,11 +775,29 @@ describe('legacy app-agent containers', () => {
     bin = fs.mkdtempSync(path.join(os.tmpdir(), 'docker-bin-'));
     fs.writeFileSync(path.join(bin, 'docker'), `#!/usr/bin/env node
 const { spawnSync } = require('child_process');
+const { spawn } = require('child_process');
 const map = v => v.startsWith('/workspace') ? ${JSON.stringify(workspace)} + v.slice('/workspace'.length) : v;
 const a = process.argv.slice(2); let i = 1; let cwd = process.cwd();
 while (a[i].startsWith('-')) { if (a[i] === '--workdir') cwd = map(a[i + 1]); i += ['-i'].includes(a[i]) ? 1 : 2; }
-const r = spawnSync(map(a[i + 1]) === 'node' ? process.execPath : a[i + 1], a.slice(i + 2).map(map), { stdio: 'inherit', cwd });
-process.exit(r.status ?? 1);
+if (a.slice(i + 1).some(v => typeof v === 'string' && v.includes('gateway-connector-bridge.cjs'))) {
+  const child = spawn(map(a[i + 1]) === 'node' ? process.execPath : a[i + 1], a.slice(i + 2).map(map), { stdio: ['pipe', 'inherit', 'inherit'], cwd });
+  let pending = Buffer.alloc(0), lines = 0;
+  process.stdin.on('data', chunk => {
+    pending = Buffer.concat([pending, chunk]);
+    while (lines < 2) {
+      const end = pending.indexOf(10); if (end < 0) return;
+      let line = pending.subarray(0, end).toString('utf8'); pending = pending.subarray(end + 1);
+      if (lines === 1) { const spec = JSON.parse(line); if (spec.authorization?.socketPath) spec.authorization.socketPath = map(spec.authorization.socketPath); line = JSON.stringify(spec); }
+      child.stdin.write(line + '\\n'); lines++;
+    }
+    if (pending.length) { child.stdin.write(pending); pending = Buffer.alloc(0); }
+  });
+  process.stdin.on('end', () => { if (pending.length) child.stdin.write(pending); child.stdin.end(); });
+  child.on('exit', (code, signal) => process.exit(code ?? (signal ? 1 : 0)));
+} else {
+  const r = spawnSync(map(a[i + 1]) === 'node' ? process.execPath : a[i + 1], a.slice(i + 2).map(map), { stdio: 'inherit', cwd });
+  process.exit(r.status ?? 1);
+}
 `, { mode: 0o755 });
     mockDocker = path.join(bin, 'docker');
   });
@@ -815,11 +876,17 @@ process.exit(r.status ?? 1);
     try {
       const { servers, grant } = agentFacingConnectors(agent({ id: 'boxed', workspace }), g, resolved, { containerUnavailable: true });
       expect(servers).toEqual(resolved);
-      expect(grant).toBeUndefined();
+      expect(grant).toBeDefined();
+      const secondSession = agentFacingConnectors(agent({ id: 'boxed', workspace }), g, resolved, { containerUnavailable: true }).grant;
       const exposure = (): Record<string, unknown> => Object.fromEntries(listConnectorStatus(g.gateway.customConnectors!).map(s => [s.id, [s.secretExposure, s.exposedAgents]]));
       expect(exposure()).toMatchObject({ local: ['agent-readable', ['boxed']], ops: ['agent-readable', ['boxed']], legacy: [undefined, undefined] });
-      // The agent's next spawn that does reach the gateway clears it.
-      revokeConnectorGrant(agentFacingConnectors(agent({ id: 'boxed', workspace }), g, resolved).grant);
+      // A discovery/safe spawn for the same agent must not erase this live session.
+      const safe = agentFacingConnectors(agent({ id: 'boxed', workspace }), g, resolved);
+      revokeConnectorGrant(safe.grant);
+      expect(exposure()).toMatchObject({ local: ['agent-readable', ['boxed']], ops: ['agent-readable', ['boxed']] });
+      revokeConnectorGrant(grant);
+      expect(exposure()).toMatchObject({ local: ['agent-readable', ['boxed']], ops: ['agent-readable', ['boxed']] });
+      revokeConnectorGrant(secondSession);
       expect(exposure()).toMatchObject({ local: [undefined, undefined], ops: [undefined, undefined] });
     } finally {
       warn.mockRestore();
@@ -836,9 +903,10 @@ process.exit(r.status ?? 1);
       const resolved = { local: { command: 'x', env: { KEY: STDIO_SECRET } } };
       const { servers, grant } = agentFacingConnectors(agent({ id: 'deep', workspace }), launchedGateway(), resolved, { container: launch });
       expect(servers).toEqual(resolved);
-      expect(grant).toBeUndefined();
+      expect(grant).toBeDefined();
       const local = listConnectorStatus(launchedGateway().gateway.customConnectors!).find(s => s.id === 'local');
       expect(local).toMatchObject({ secretExposure: 'agent-readable', exposedAgents: ['deep'] });
+      revokeConnectorGrant(grant);
     } finally {
       warn.mockRestore();
       clearRuntimeExposure();
