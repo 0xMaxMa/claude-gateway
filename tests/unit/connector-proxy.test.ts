@@ -20,7 +20,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
-import { createConnectorProxyRouter, agentFacingConnectors, revokeConnectorGrant } from '../../src/connectors/proxy';
+import { createConnectorProxyRouter, agentFacingConnectors, revokeConnectorGrant, setConnectorProxyOrigin } from '../../src/connectors/proxy';
 import { prepareManagedConnectors } from '../../src/session/managed-connectors';
 import { listConnectorStatus } from '../../src/connectors/resolve';
 import type { AgentConfig, GatewayConfig } from '../../src/types';
@@ -35,7 +35,7 @@ let upstreamUrl: string;
 let gateway: http.Server;
 let gatewayUrl: string;
 let seen: Array<{ method?: string; url?: string; headers: http.IncomingHttpHeaders }>;
-let upstreamMode: 'mcp' | 'redirect' | 'error' | 'reset';
+let upstreamMode: 'mcp' | 'redirect' | 'error' | 'reset' | 'not-modified' | 'slow';
 
 function mcpServer(): Server {
   const server = new Server({ name: 'fixture-upstream', version: '1' }, { capabilities: { tools: {} } });
@@ -67,6 +67,8 @@ beforeAll(async () => {
   upstream = http.createServer(async (req, res) => {
     seen.push({ method: req.method, url: req.url, headers: req.headers });
     if (upstreamMode === 'redirect') { res.writeHead(302, { location: 'https://attacker.invalid/collect' }).end(); return; }
+    if (upstreamMode === 'not-modified') { res.writeHead(304).end(); return; }
+    if (upstreamMode === 'slow') { setTimeout(() => res.writeHead(200).end('late'), 300); return; }
     if (upstreamMode === 'reset') {
       res.writeHead(200, { 'content-type': 'text/event-stream' });
       res.write('event: message\ndata: {"partial":true}\n\n');
@@ -326,6 +328,37 @@ describe('proxy boundary', () => {
     revokeConnectorGrant(grant);
   });
 
+  it('refuses a request a same-host reverse proxy forwarded', async () => {
+    const { config, grant } = managedOps();
+    expect((await rpc(config.url, grant!, { 'x-forwarded-for': '203.0.113.7' })).status).toBe(403);
+    expect((await rpc(config.url, grant!, { forwarded: 'for=203.0.113.7' })).status).toBe(403);
+    expect(seen).toHaveLength(0);
+    revokeConnectorGrant(grant);
+  });
+
+  it('passes a 3xx without Location through instead of treating it as a redirect', async () => {
+    const { config, grant } = managedOps();
+    upstreamMode = 'not-modified';
+    expect((await rpc(config.url, grant!)).status).toBe(304);
+    revokeConnectorGrant(grant);
+  });
+
+  it('does not report an agent-cancelled call as an upstream failure', async () => {
+    const { config, grant } = managedOps();
+    upstreamMode = 'slow';
+    const errors = jest.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const abort = new AbortController();
+      setTimeout(() => abort.abort(), 50);
+      await expect(fetch(config.url, { method: 'POST', headers: { authorization: `Bearer ${grant}` }, body: '{}', signal: abort.signal })).rejects.toThrow();
+      await new Promise(r => setTimeout(r, 400));
+      expect(errors.mock.calls.filter(c => String(c[0]).includes('connector-proxy'))).toEqual([]);
+    } finally {
+      errors.mockRestore();
+      revokeConnectorGrant(grant);
+    }
+  });
+
   it('fails closed once the grant is revoked', async () => {
     const { config, grant } = managedOps();
     expect((await rpc(config.url, grant!)).status).toBe(200);
@@ -333,6 +366,23 @@ describe('proxy boundary', () => {
     seen = [];
     expect((await rpc(config.url, grant!)).status).toBe(401);
     expect(seen).toHaveLength(0);
+  });
+});
+
+describe('proxy origin', () => {
+  afterEach(() => setConnectorProxyOrigin(undefined));
+  it('points entries at the address the gateway actually listens on', () => {
+    for (const [address, family, expected] of [
+      ['0.0.0.0', 'IPv4', 'http://127.0.0.1:4100'],
+      ['::', 'IPv6', 'http://127.0.0.1:4100'],
+      ['10.0.0.5', 'IPv4', 'http://10.0.0.5:4100'],
+      ['::1', 'IPv6', 'http://[::1]:4100'],
+    ] as const) {
+      setConnectorProxyOrigin({ address, family, port: 4100 });
+      const { config, grant } = managedOps();
+      expect(config.url).toBe(`${expected}/internal/mcp/connectors/ops`);
+      revokeConnectorGrant(grant);
+    }
   });
 });
 
@@ -347,7 +397,7 @@ describe('live connector state', () => {
     revokeConnectorGrant(grant);
   });
 
-  it('fails closed mid-session when the connector is disconnected or disabled', async () => {
+  it('fails closed mid-session when the connector is disconnected, disabled on the live config, or removed', async () => {
     const m = managedOps();
     setSecret(undefined);
     expect((await rpc(m.config.url, m.grant!)).status).toBe(403);

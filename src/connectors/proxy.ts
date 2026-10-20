@@ -18,6 +18,7 @@ import { randomBytes } from 'crypto';
 import * as http from 'node:http';
 import * as https from 'node:https';
 import { pipeline } from 'node:stream';
+import type { AddressInfo } from 'node:net';
 import { Router, type Request, type Response } from 'express';
 import type { AgentConfig, GatewayConfig } from '../types';
 import type { CustomConnectorEntry } from './types';
@@ -38,8 +39,20 @@ const grants = new Map<string, Grant>();
 const FORWARDED_REQUEST_HEADERS = ['accept', 'content-type', 'content-length', 'mcp-session-id', 'mcp-protocol-version', 'last-event-id'];
 const FORWARDED_RESPONSE_HEADERS = ['content-type', 'content-encoding', 'mcp-session-id', 'cache-control'];
 
+let listenOrigin: string | undefined;
+
+/** Records the address the gateway's HTTP server actually listens on, so a proxy
+ * entry never points at an address nothing serves (a specific GATEWAY_BIND, `::1`)
+ * or at a GATEWAY_API_URL meant for another network. */
+export function setConnectorProxyOrigin(address: AddressInfo | string | null | undefined): void {
+  if (!address || typeof address === 'string') { listenOrigin = undefined; return; }
+  const host = address.address === '0.0.0.0' || address.address === '::' ? '127.0.0.1'
+    : address.family === 'IPv6' ? `[${address.address}]` : address.address;
+  listenOrigin = `http://${host}:${address.port}`;
+}
+
 function proxyBaseUrl(): string {
-  return (process.env.GATEWAY_API_URL ?? `http://127.0.0.1:${process.env.PORT ?? '10850'}`).replace(/\/+$/, '');
+  return listenOrigin ?? (process.env.GATEWAY_API_URL ?? `http://127.0.0.1:${process.env.PORT ?? '10850'}`).replace(/\/+$/, '');
 }
 
 /**
@@ -91,8 +104,11 @@ export function revokeConnectorGrant(grant: string | undefined): void {
   if (grant) grants.delete(grant);
 }
 
-/** Loopback, or a same-host client that reached a non-loopback bind address. */
+/** Loopback, or a same-host client that reached a non-loopback bind address. A
+ * same-host reverse proxy also connects from loopback, so a request it forwarded
+ * (it adds a forwarding header; an agent's MCP client never does) is refused too. */
 function isSameHost(req: Request): boolean {
+  if (req.headers['x-forwarded-for'] !== undefined || req.headers['forwarded'] !== undefined) return false;
   const remote = req.socket.remoteAddress ?? '';
   return remote === req.socket.localAddress || /^(127\.|::1$|::ffff:127\.)/.test(remote);
 }
@@ -143,6 +159,7 @@ export function createConnectorProxyRouter(): Router {
     Object.assign(headers, upstream.headers);
 
     let outbound: http.ClientRequest;
+    let clientGone = false;
     try {
       // node:http rather than fetch: undici's default 300s headers/body timeouts
       // would cut long tool calls and idle SSE streams the agent's client allows.
@@ -150,7 +167,7 @@ export function createConnectorProxyRouter(): Router {
         const status = incoming.statusCode ?? 502;
         // Same stance as manageResource's `redirect: 'error'`: the upstream is the
         // configured URL, and the credential is never replayed somewhere else.
-        if (status >= 300 && status < 400) {
+        if (status >= 300 && status < 400 && incoming.headers.location !== undefined) {
           incoming.resume();
           res.status(502).json({ error: 'Upstream redirect refused' });
           return;
@@ -175,12 +192,17 @@ export function createConnectorProxyRouter(): Router {
       return;
     }
     outbound.on('error', err => {
+      // Destroyed below because the agent cancelled first: nothing failed upstream.
+      if (clientGone) return;
       console.error(`connector-proxy: connector=${id} upstream failed: ${err.message}`);
       if (!res.headersSent) res.status(502).json({ error: 'Upstream request failed' });
       else res.destroy();
     });
     // The agent's client went away (cancelled call, closed SSE stream): stop upstream too.
-    res.on('close', () => outbound.destroy());
+    res.on('close', () => {
+      clientGone = !res.writableFinished;
+      outbound.destroy();
+    });
     pipeline(req, outbound, () => { /* outbound errors are reported by its 'error' listener */ });
   });
   return router;

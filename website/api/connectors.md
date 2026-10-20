@@ -71,19 +71,27 @@ gateway writes for it. So for an HTTP connector (`type: "http"` or `"streamable-
 }
 ```
 
-The grant is random, held only in gateway memory, bound to the agent's enabled
-connectors, and revoked when the session or worker stops. The proxy accepts only
-same-host connections. On every request it resolves the connector again from
-`config.json` and `mcp-token.env`, then forwards the MCP request to the configured
-`url` with the configured headers. The caller cannot change the upstream URL or add
-headers, and the proxy refuses upstream redirects. So a rotated or refreshed token
-applies on the next call, and a disconnected or disabled connector fails with `403`
-even mid-session. Nothing changes for the operator: no new configuration, no
-re-connect.
+The URL is the address the gateway listens on. The grant is random, held only in
+gateway memory, bound to the agent's enabled connectors, and revoked when the
+session or worker stops; every spawn, respawn or resume gets a new one. The grant
+is the credential: the proxy also refuses non-local connections and requests a
+reverse proxy forwarded (`X-Forwarded-For` / `Forwarded`), but treat a grant like
+the session's own API key. On every request it resolves the connector again from
+`gateway.customConnectors` and `mcp-token.env`, then forwards the MCP request to
+the configured `url` with the configured headers. The caller cannot change the
+upstream URL or add headers, and the proxy refuses upstream redirects. So a rotated
+or refreshed token applies on the next call, and a disconnected connector fails
+with `403` even mid-session. A per-agent enablement change still takes effect when
+the session restarts, as before. Nothing changes for the operator: no new
+configuration, no re-connect.
 
 A stdio or SSE connector whose secret sits in `env`, `args` or SSE `headers` cannot
 go through this proxy. It still receives the substituted values in its config file,
 works exactly as before, and is reported with `secretExposure: "agent-readable"`.
+An app-agent's own Claude Code session runs inside its container, where the
+gateway's loopback address is unreachable, so it also keeps the substituted entry
+for every connector. `secretExposure` describes host sessions and does not flag
+that case.
 
 ---
 
@@ -120,7 +128,7 @@ curl -s -H "X-Api-Key: admin-key-456" \
 |-------|-------------|
 | `credentialOwner` | `none` \| `static` \| `gateway` \| `external` — see the table above. Also tells a UI which way to offer connecting: a paste-token box (`static`), a "Sign in" link pointing at `/oauth/start` (`gateway`), or neither |
 | `connected` | Every required secret is present (always `true` for `credentialOwner: "none"`) |
-| `secretExposure` | `"agent-readable"` when the connector's secret is still written into the agent's MCP config file (see [Credential isolation](#credential-isolation)). Absent when the secret stays in the gateway. Also returned by `GET /api/v1/connectors/:id/status` |
+| `secretExposure` | `"agent-readable"` when the connector's secret is still written into a host session's MCP config file (see [Credential isolation](#credential-isolation), including the app-agent exception). Absent when the secret stays in the gateway. Also returned by `GET /api/v1/connectors/:id/status` |
 | `refresh` | **Absent when healthy.** Present only while a `gateway`-owned connector's background token refresh is failing — either transiently (a network error, DNS, a 5xx) or because the authorization server itself refused the grant. See below. Never present for any other owner: this gateway holds a `refresh_token` for none of them. |
 
 `connected` is computed purely from secret presence, and a transient refresh

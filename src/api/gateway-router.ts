@@ -53,7 +53,7 @@ import { createSkillsRouter } from './skills-router';
 import { createPackagesRouter } from './packages';
 import { createWebhooksRouter } from './webhooks-router';
 import { createConnectorsRouter } from './connectors-router';
-import { createConnectorProxyRouter } from '../connectors/proxy';
+import { createConnectorProxyRouter, setConnectorProxyOrigin } from '../connectors/proxy';
 import { createOauthConnectorsRouter, createOauthCallbackRouter } from './oauth-connectors-router';
 import { createCustomConnectorsStore, type CustomConnectorsStore } from '../connectors/custom-connectors-store';
 import { pendingOAuthStore } from '../connectors/pending-oauth-store';
@@ -1614,6 +1614,7 @@ export class GatewayRouter {
     }
     return new Promise((resolve, reject) => {
       this.server = this.app.listen(port, host, () => {
+        setConnectorProxyOrigin(this.server?.address());
         resolve();
       });
       this.server.on('error', (err: NodeJS.ErrnoException) => {

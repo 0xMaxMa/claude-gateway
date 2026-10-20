@@ -63,9 +63,10 @@ export interface ConnectorStatus {
   /** CustomConnectorEntry.sourceUrl — where the user says the config came from. */
   repoUrl?: string;
   /**
-   * 'agent-readable' when this connector's secret is still written into the agent's
-   * MCP config file: a stdio or SSE server whose secret sits in env/args the gateway's
-   * loopback proxy cannot carry. Omitted when the secret stays in the gateway.
+   * 'agent-readable' when this connector's secret is still written into a host
+   * session's MCP config file: a stdio or SSE server whose secret sits in env/args the
+   * gateway's loopback proxy cannot carry. Omitted when the secret stays in the
+   * gateway. App-agent container sessions always get the substituted entry.
    */
   secretExposure?: 'agent-readable';
   /**
