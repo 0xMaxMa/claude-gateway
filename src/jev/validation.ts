@@ -1,10 +1,9 @@
 import { validateBrowserIntegration } from './browser-connector';
 import { isReservedJevCredentialEnv, jevCredentialEnvNames } from './child-env';
+import { ROUNDING_EPSILON, choiceAtTop, roundedHundredths } from './distribution';
 import { JevConfig, JevError, JevImageAsset, JevRequest, JevResult } from './types';
 const object = (v: unknown): v is Record<string, any> => Boolean(v) && typeof v === 'object' && !Array.isArray(v);
 const text = (v: unknown): v is string => typeof v === 'string' && v.length > 0 && v.length <= 1024;
-// Floating-point arithmetic must not reject a rounded value exactly at a tolerance boundary.
-const ROUNDING_EPSILON = 1e-12;
 const probability = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 1;
 const content = (v: unknown): boolean => typeof v === 'string' || Array.isArray(v) || object(v);
 const bad = (message: string): never => { throw new JevError('INVALID_REQUEST', message); };
@@ -78,7 +77,7 @@ export function validateJevConfig(config: JevConfig | undefined): void {
   if (config.allowedAgentIds !== undefined && (!Array.isArray(config.allowedAgentIds) || !config.allowedAgentIds.every(text))) throw new JevError('INVALID_CONFIG', 'Jev allowedAgentIds must contain agent IDs.');
   if (config.features !== undefined && (!object(config.features) || Object.entries(config.features).some(([key, value]) => !['computerTasks', 'computerSteps', 'browserTasks', 'browserSteps'].includes(key) || !object(value) || Object.keys(value).some(k => k !== 'enabled') || (value.enabled !== undefined && typeof value.enabled !== 'boolean')))) throw new JevError('INVALID_CONFIG', 'Invalid Jev feature configuration.');
   if (config.apiKeyFile && config.apiKeyEnv) throw new JevError('INVALID_CONFIG', 'Choose one Jev credential reference.');
-  if (config.images !== undefined && (!object(config.images) || Object.keys(config.images).some(k => !['enabled', 'maxImageBytes'].includes(k)) || (config.images.enabled !== undefined && typeof config.images.enabled !== 'boolean') || (config.images.maxImageBytes !== undefined && (!Number.isSafeInteger(config.images.maxImageBytes) || config.images.maxImageBytes < 1 || config.images.maxImageBytes > IMAGE_MAX_BYTES)))) throw new JevError('INVALID_CONFIG', 'Invalid Jev image configuration.');
+  if (config.images !== undefined && (!object(config.images) || Object.keys(config.images).some(k => !['enabled', 'maxImageBytes', 'model'].includes(k)) || (config.images.model !== undefined && !text(config.images.model)) || (config.images.enabled !== undefined && typeof config.images.enabled !== 'boolean') || (config.images.maxImageBytes !== undefined && (!Number.isSafeInteger(config.images.maxImageBytes) || config.images.maxImageBytes < 1 || config.images.maxImageBytes > IMAGE_MAX_BYTES)))) throw new JevError('INVALID_CONFIG', 'Invalid Jev image configuration.');
   for (const [key, min, max] of [['timeoutMs', 1, 120000], ['maxConcurrentRequests', 1, 64], ['maxQueueSize', 0, 256], ['maxInputBytes', 1, 1048576], ['maxQuestions', 1, 256]] as const) {
     const value = config[key];
     if (value !== undefined && (!Number.isSafeInteger(value) || value < min || value > max)) throw new JevError('INVALID_CONFIG', `Invalid Jev ${key}.`);
@@ -144,7 +143,8 @@ export function validateJevResponse(value: unknown, request: JevRequest, request
     if (q.type === 'noul') { if (!probability(a.noul)) fail('NOUL_RANGE'); answers[id] = { type: 'noul', noul: a.noul }; continue; }
     if (q.type === 'box') {
       const b = a.box;
-      if (!object(b) || !['top', 'bottom', 'left', 'right'].every(k => probability(b[k])) || b.left >= b.right || b.top >= b.bottom || !probability(a.confidence)) fail('BOX_SHAPE');
+      // A side can round to zero on a small target (observed from jev-1.14.0): a point, still usable. Inverted is not.
+      if (!object(b) || !['top', 'bottom', 'left', 'right'].every(k => probability(b[k])) || b.left > b.right || b.top > b.bottom || !probability(a.confidence)) fail('BOX_SHAPE');
       answers[id] = { type: 'box', box: { top: b.top, bottom: b.bottom, left: b.left, right: b.right }, confidence: a.confidence };
       continue;
     }
@@ -155,12 +155,10 @@ export function validateJevResponse(value: unknown, request: JevRequest, request
     // Permit their rounding envelope, capped at two percentage points. Keep
     // full-precision responses strict; never renormalize or raise confidence.
     const values = Object.values(p);
-    const roundedHundredths = values.every(n => Math.abs(n * 100 - Math.round(n * 100)) <= ROUNDING_EPSILON);
-    const tolerance = roundedHundredths ? Math.min(0.02, values.length * 0.005) : 0.001;
+    const tolerance = roundedHundredths(values) ? Math.min(0.02, values.length * 0.005) : 0.001;
     if (Math.abs(values.reduce((sum, n) => sum + n, 0) - 1) > tolerance + ROUNDING_EPSILON) fail('DISTRIBUTION_SUM');
     if (q.type === 'choice') {
-      // jev-1.14.0 occasionally names a choice one hundredth below the rounded maximum (low-confidence, many options).
-      if (typeof a.choice !== 'string' || !keys.includes(a.choice) || keys.some(k => p[k] > p[a.choice] + (roundedHundredths ? 0.01 : 0.00001) + ROUNDING_EPSILON)) fail('CHOICE_MISMATCH');
+      if (typeof a.choice !== 'string' || !keys.includes(a.choice) || !choiceAtTop(p, a.choice)) fail('CHOICE_MISMATCH');
       answers[id] = { type: 'choice', choice: a.choice, confidence: a.confidence, probabilities: p };
     } else {
       const expected = keys.reduce((sum, k) => sum + Number(k) * p[k], 0);

@@ -15,6 +15,8 @@ export type JevAnswer =
   | { type: 'score'; score: number; confidence: number; probabilities: Record<string, number>; legend: Record<string, string> }
   | { type: 'box'; box: JevBox; confidence: number };
 export interface JevRequest { state: JevContent; questions: Record<string, JevQuestion>; assets?: Record<string, JevImageAsset>; requestId?: string }
+/** The first Jev release that answers Box questions; the pinned model for image requests. */
+export const JEV_IMAGE_MODEL = 'jev-1.14.0';
 export interface JevConfig {
   /** Tool-free reasoning connection; instructions and output contracts live in Jev Loop. */
   thinking?: import('./browser-contract').BrowserTextHelperConfig;
@@ -22,8 +24,9 @@ export interface JevConfig {
   enabled?: boolean; provider?: 'typesafe' | 'upstream'; model?: string; baseUrl?: string;
   apiKeyFile?: string; apiKeyEnv?: string; timeoutMs?: number; maxConcurrentRequests?: number;
   maxQueueSize?: number; maxInputBytes?: number; maxQuestions?: number;
-  /** Experimental image input (TypeSafe-Danger-Zone-Images). Off unless enabled; image bytes are capped separately from maxInputBytes. */
-  images?: { enabled?: boolean; maxImageBytes?: number };
+  /** Image input (TypeSafe-Danger-Zone-Images preview). Off unless enabled; image bytes are capped separately from maxInputBytes.
+   * Requests carrying images use `model` (default JEV_IMAGE_MODEL): Box answers need Jev 1.14, and jev-latest can lag behind. */
+  images?: { enabled?: boolean; maxImageBytes?: number; model?: string };
   allowedAgentIds?: string[];
   features?: Partial<Record<'computerTasks' | 'computerSteps' | 'browserTasks' | 'browserSteps', { enabled?: boolean }>>;
 }
