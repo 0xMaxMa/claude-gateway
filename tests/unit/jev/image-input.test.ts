@@ -150,6 +150,8 @@ describe('image-first vision step', () => {
   it('locates a Box target only when the Noul agrees it is visible', () => {
     expect(readVisionStep(input(), result({}))).toEqual({ kind: 'click', target: { box } });
     expect(readVisionStep(input(), result({ visible: { type: 'noul', noul: 0.1 } }))).toEqual({ kind: 'scroll', direction: 'down', amount: 'SCREEN' });
+    // Not visible because it is above: the same answer says which way.
+    expect(readVisionStep(input(), result({ visible: { type: 'noul', noul: 0.1 }, scroll: choice('UP', { DOWN: 0.2, UP: 0.8 }) }))).toEqual({ kind: 'scroll', direction: 'up', amount: 'SCREEN' });
     expect(readVisionStep(input(), result({ target: { type: 'box', box, confidence: 0.1 } }))).toEqual({ kind: 'give_up', reason: 'LOW_CONFIDENCE' });
   });
   it('reads a key and its repeat count', () => {

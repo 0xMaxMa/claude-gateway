@@ -84,6 +84,11 @@ exports.mcpBrowserTransport=invoke=>async(name,args,signal)=>{const r=await invo
 exports.runBrowserUse=async(input,deps)=>{const seen=[typeof deps.screenshot];if(deps.screenshot)for(const scope of [input.scope,input.scope,{...input.scope,tab_id:'other'}]){try{seen.push((await deps.screenshot({...scope,lease_token:'L'},new AbortController().signal)).slice(0,11));}catch(e){seen.push(e.message);}}globalThis.__captures=seen;return {status:'needs_verification',reason:'COMMAND_WAITING_INPUT',steps:0,evaluations:0};};`);
  return file;
 }
+test('page_screenshot is not a generic tool: a runner cannot capture around the images switch',async()=>{
+ mockCall.mockImplementation(async()=>reply({state:'completed',result:{}}));
+ await expect(executeBrowserModule(runner(['page_screenshot']),binding,context({images:()=>false}),connection)).rejects.toThrow('BROWSER_SCOPE_DENIED');
+ expect(mockCall).not.toHaveBeenCalled();
+});
 test('jev.images: page_screenshot is a leased read for a runner that advertises images, checked live before each capture',async()=>{
  const png='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
  mockCall.mockImplementation(async({name})=>name==='page_screenshot'?{content:[{type:'image',mimeType:'image/png',data:png}]}:reply({state:'completed',result:{}}));

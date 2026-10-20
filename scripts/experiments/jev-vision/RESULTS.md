@@ -57,13 +57,13 @@ Module boundaries:
 
 ## Setup
 
-- develop host, standalone harness (`run.ts`, bundled with bun), headless Chromium via playwright-core.
+- A Linux test machine, standalone harness (`run.ts`, bundled with bun), headless Chromium via playwright-core.
   The gateway was not redeployed or restarted.
 - 55 fixture scenarios (`scenarios.ts`), served at `http://lab.test/` by route interception. Ground truth
   is recorded in the page (`data-k` click log, field values, URL). Groups: labelled buttons 6, icon-only 6,
   forms 6, typing 6, keys 5, scrolling 8, navigation 3, Thai pages 5, canvas 4, done-already 2,
   not-found 2, safety 2.
-- 1280x800 PNG screenshots, `jev-1.14.0`. Baseline text-only also on `jev-1.13.0` (develop's configured model).
+- 1280x800 PNG screenshots, `jev-1.14.0`. Baseline text-only also on `jev-1.13.0` (the text model configured there).
 - One run per task, up to 10 steps. Tasks that ended on HTTP 529 (provider overloaded, 9 tasks) or on a
   harness stuck-detector bug (3 identical scrolls that were moving the page) were rerun once
   (35 tasks); every other task kept its first result. Raw results: `results/*.jsonl.gz`, full summary:
@@ -127,7 +127,7 @@ Per action:
   (accept cookies, tick a checkbox, Save, Add to cart, Next step). This comes from the existing
   `IMPACT_CRITERIA` wording ("submitting", "buying"), not from images; text-only shows it too.
 
-Model support, measured on develop: `jev-1.13.0` and `jev-1.14.0` accept images; Box needs `jev-1.14.0` or
+Model support, measured on that machine: `jev-1.13.0` and `jev-1.14.0` accept images; Box needs `jev-1.14.0` or
 `jev-preview` (1.13 returns HTTP 400). Without the `TypeSafe-Danger-Zone-Images` header any image request
 is HTTP 400.
 
@@ -143,7 +143,7 @@ Provider findings:
 ## Answers
 
 1. **Feasible?** Yes for browser use. Every action type worked from the screenshot, including keys,
-   scroll direction, navigation and Thai pages. Computer use (macOS AX) was not tested: develop is Linux.
+   scroll direction, navigation and Thai pages. Computer use (macOS AX) was not tested: the test machine is Linux.
 2. **Speed?** A step is one call, p50 about 270 ms (text-only 235 ms). Zoom plus dot check adds about
    560 ms per click. Tasks took 1.2-2.1 s median (text 0.8 s).
 3. **Cost?** About $0.0002 per step with a screenshot, $0.0007-0.001 per task here: 4-6 times the
@@ -177,7 +177,7 @@ Risks:
 
 ## Production loop (#632)
 
-Same 55 fixtures, 2026-10-20, develop, `jev-1.14.0` for image requests and `jev-1.13.0` for the impact
+Same 55 fixtures, 2026-10-20, the same Linux machine, `jev-1.14.0` for image requests and `jev-1.13.0` for the impact
 question. `run.ts` runs the real `runVisionComputerUse` loop with `jevVisionDecider`: the impact gate,
 receipts and refusals are the gateway's, and headless Chromium stands in for the Mac helper (in-view DOM
 controls become Accessibility controls with bounds; raw pointer, key, scroll and type actions are replayed).
@@ -189,35 +189,36 @@ stop). "Success" also requires the run to end as expected, so a goal met and the
 
 | Mode | Goal met | Success | Decision p50/p95 | Task p50/p95 | Jev calls/task | Cost/task |
 |---|---|---|---|---|---|---|
-| hybrid (Set-of-Mark + Box) | 48/52 (92%) | 44/52 (85%) | 293/534 ms | 1.9/7.6 s | 5.5 | $0.00067 |
-| vision (Box only) | 44/52 (85%) | 39/52 (75%) | 745/969 ms | 3.1/9.0 s | 12.1 | $0.00107 |
+| hybrid (Set-of-Mark + Box) | 49/52 (94%) | 43/52 (83%) | 308/741 ms | 2.0/5.3 s | 5.5 | $0.00065 |
+| vision (Box only) | 47/52 (90%) | 42/52 (81%) | 723/964 ms | 3.1/8.5 s | 11.7 | $0.00102 |
 
 For comparison, the experiment's som-zoom met 47 of the same 52 goals (90%). Jev calls include the impact
-question the loop asks before every action.
+question the loop asks before every action. An earlier run, before the review fixes, met 48/52
+(hybrid) and 44/52 (vision): one run per task, so a goal or two either way is noise.
 
 What changed against the experiment:
 
 - **Impact over-flagging.** 1 confirmation per mode, both on the "delete the draft row" icon, which is a delete
   and so correctly asked about (the goal saying it is fine does not override the gate); the experiment had 10
   (som-zoom) to 26 false confirmations. Both safety tasks stopped for confirmation. See the impact eval below.
-- **Done detection.** After the goal was met, the loop ran 3 more actions in 3 tasks (hybrid; the experiment's
-  image variants repeated the last step on 37-82 steps). Repeat checks ended 2 runs (hybrid) and both had met
-  the goal. In vision mode, 2 of 4 repeat checks ended a run before the goal was met: one more reason to use
-  hybrid.
-- **Scroll.** All 8 scroll tasks met their goal in hybrid with 20 scrolls (som-zoom: 7 of 8 with 22 scrolls, 16 of
-  them "small").
-- **No progress.** A step that twice changes nothing is not tried again (`NO_PROGRESS`). The 4 canvas fixtures
-  give no visible feedback on a click, so they end this way although the goal was met; in a real app the
-  selection shows.
+- **Done detection.** After the goal was met, the loop ran 7 more actions in 4 tasks (hybrid; the experiment's
+  image variants repeated the last step on 37-82 steps). Every run that a repeat check ended (2 per mode) had
+  met its goal.
+- **Scroll.** All 8 scroll tasks met their goal in both modes, with 17 scrolls each (som-zoom: 7 of 8 with 22
+  scrolls, 16 of them "small").
+- **No progress.** A step that twice changes nothing (same controls in the same places, same coarse picture) is
+  not tried again (`NO_PROGRESS`). The 4 canvas fixtures give no visible feedback on a click, so they end this
+  way although the goal was met; in a real app the selection shows.
 
 Remaining hybrid failures: a false "done" before acting on a heart icon (also in every image variant of the
-experiment), a wrong product on a Thai page, a give-up after a search that the fixture submits silently, and a
-Delete key chosen for Backspace. Vision mode refuses many Box clicks at the dot check (71) and is slower.
+experiment), a wrong product on a Thai page, a give-up after a search that the fixture submits silently (twice),
+and Delete chosen where Backspace was needed. Vision mode refuses many Box clicks at the dot check (54) and is
+slower; use hybrid.
 
 ### Impact criteria eval
 
 `impact-eval.ts` asks the loop's impact question, exactly as the gate does, about labelled actions; flagged is
-"not a confident ROUTINE". 3 runs each, develop.
+"not a confident ROUTINE". 3 runs each.
 
 | Set | Model | False high-impact (before → after) | Missed high-impact (before → after) |
 |---|---|---|---|

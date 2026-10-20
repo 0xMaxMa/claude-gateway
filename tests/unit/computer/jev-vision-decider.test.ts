@@ -78,10 +78,23 @@ describe('Jev image decisions in the vision loop', () => {
     expect((await pixel(j.steps()[0], 576, 600)).every(v => v > 200)).toBe(true);
   });
 
-  test('sends no screenshot when a sensitive control cannot be located', async () => {
-    const d = device({ controls: [SAVE, { ...PASSWORD, bounds: undefined }] }), j = jev([]);
-    expect(await runVisionComputerUse({ goal: 'x' }, d.deps(decider(j)), signal())).toMatchObject({ status: 'blocked', reason: 'SENSITIVE_CONTENT_UNMASKED' });
-    expect(j.requests).toHaveLength(0);
+  test('sends no screenshot when a sensitive control cannot be located: that step is decided on the control list', async () => {
+    const d = device({ controls: [SAVE, { ...PASSWORD, bounds: undefined }] }), j = jev([{ op: 'CLICK', element: '1' }, { done: 0.9 }]);
+    expect(await runVisionComputerUse({ goal: 'Click Save' }, d.deps(decider(j)), signal())).toMatchObject({ status: 'succeeded', steps: 1 });
+    expect(j.requests.every(r => r.assets === undefined)).toBe(true);
+    expect(j.steps()[0].state).toMatchObject({ screen: { application: 'com.apple.TextEdit', screenshot: expect.stringContaining('withheld') } });
+    expect(Object.keys(j.steps()[0].questions)).not.toContain('target');
+    expect(d.actions()).toEqual([{ kind: 'pointer', op: 'click', x: 192, y: 100 }]);
+  });
+
+  // Regression (#633 review): a truncated observation can leave a sensitive control out of the mask.
+  test('a truncated observation fails closed: no screenshot, even in vision mode, and the list stands in for it', async () => {
+    const d = device(), j = jev([{ op: 'CLICK', element: '1' }, { done: 0.9 }]);
+    const deps = d.deps(decider(j, 'vision')), call = deps.call;
+    deps.call = async (name, args, s) => name === 'computer_observe' ? { ...(await call(name, args, s) as object), truncated: true } : call(name, args, s);
+    expect(await runVisionComputerUse({ goal: 'Click Save' }, deps, signal())).toMatchObject({ status: 'succeeded', steps: 1 });
+    expect(j.requests.every(r => r.assets === undefined)).toBe(true);
+    expect(Object.keys((j.steps()[0].questions.element as any).criteria).sort()).toEqual(['1', '2', 'NONE']);
   });
 
   test('types by clicking the field, selecting its text and typing, one action per completed step', async () => {
@@ -156,7 +169,7 @@ describe('Jev image decisions in the vision loop', () => {
   });
 
   test('a change only in pixels (a canvas) counts as a change, so a repeat is checked rather than retried', async () => {
-    const shades = await Promise.all(['#fff', '#eee'].map(async c => (await sharp({ create: { width: 1280, height: 800, channels: 3, background: c } }).jpeg().toBuffer()).toString('base64')));
+    const shades = await Promise.all(['#fff', '#888'].map(async c => (await sharp({ create: { width: 1280, height: 800, channels: 3, background: c } }).jpeg().toBuffer()).toString('base64')));
     const d = device(), j = jev([{ op: 'CLICK', element: '1' }, { op: 'CLICK', element: '1' }]);
     const deps = d.deps(decider(j)), call = deps.call;
     let shot = 0;
@@ -165,6 +178,33 @@ describe('Jev image decisions in the vision loop', () => {
     deps.screenshot = async s => ({ generation: s.generation, data: shades[Math.min(shot++, 1)], width: 1280, height: 800 });
     expect(await runVisionComputerUse({ goal: 'Pick the green swatch' }, deps, signal())).toMatchObject({ status: 'succeeded', steps: 1 });
     expect(j.requests.filter(r => 'again' in r.questions)).toHaveLength(1);
+  });
+
+  test('a blinking caret or a ticking clock is not a change', async () => {
+    const base = sharp({ create: { width: 1280, height: 800, channels: 3, background: '#fff' } });
+    const caret = (await base.clone().composite([{ input: { create: { width: 2, height: 18, channels: 3, background: '#000' } }, left: 400, top: 300 }]).jpeg().toBuffer()).toString('base64');
+    const d = device(), j = jev([1, 2, 3].map(() => ({ op: 'CLICK', element: '1' })));
+    const deps = d.deps(decider(j)), call = deps.call;
+    let shot = 0;
+    deps.call = async (name, args, s) => name === 'computer_observe' ? { ...(await call(name, args, s) as object), text: ['same'] } : call(name, args, s);
+    deps.screenshot = async s => ({ generation: s.generation, data: shot++ % 2 ? caret : jpeg, width: 1280, height: 800 });
+    expect(await runVisionComputerUse({ goal: 'Click Save' }, deps, signal())).toMatchObject({ status: 'blocked', reason: 'NO_PROGRESS', steps: 2 });
+    expect(j.requests.filter(r => 'again' in r.questions)).toHaveLength(0);
+  });
+
+  test('a scroll through rows that look alike moves the controls, so it is progress', async () => {
+    const d = device(), j = jev([1, 2, 3].map(() => ({ op: 'SCROLL', scroll: 'DOWN' })).concat([{ done: 0.9 } as any]));
+    const deps = d.deps(decider(j)), call = deps.call;
+    let observed = 0;
+    // Identical pixels every time; the rows under the controls change with each scroll.
+    deps.call = async (name, args, s) => name === 'computer_observe' ? { ...(await call(name, args, s) as object), text: ['same'], controls: [{ ...SAVE, label: `Item ${++observed}` }] } : call(name, args, s);
+    expect(await runVisionComputerUse({ goal: 'Open Item 37' }, deps, signal())).toMatchObject({ status: 'succeeded', steps: 3 });
+  });
+
+  test('earlier context reaches Jev with the goal', async () => {
+    const d = device(), j = jev([{ done: 0.9 }]);
+    await runVisionComputerUse({ goal: 'Open the second one', interactionContext: 'Search results: Alpha, Beta, Gamma' }, d.deps(decider(j)), signal());
+    expect(j.steps()[0].state).toMatchObject({ goal: 'Open the second one', earlier_context: 'Search results: Alpha, Beta, Gamma' });
   });
 
   test('a step that twice changed nothing is not tried a third time', async () => {

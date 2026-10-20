@@ -63,6 +63,17 @@ describe("browser decisions with the tab screenshot (jev.images.enabled)", () =>
     expect(j.requests[0].assets).toBeUndefined();
     expect(result.trace?.events.some(e => e.reason === "SCREENSHOT_SKIPPED_SENSITIVE")).toBe(true);
   });
+  test("in-view elements left out of a truncated observation keep the screenshot off too", async () => {
+    const j = jev({ operation: { choice: "DONE" } });
+    const screenshot = jest.fn(async () => viewport);
+    const truncated = { ...page([el("e1", "Cart")]), truncated: { text: false, elements: true, viewport_elements: true } };
+    await runBrowserUse({ goal: "Check the cart", scope }, { call: call(truncated), evaluate: j.evaluate, screenshot }, signal());
+    expect(screenshot).not.toHaveBeenCalled();
+    expect(j.requests[0].assets).toBeUndefined();
+    // Only elements outside the viewport were left out: the screenshot is sent.
+    await runBrowserUse({ goal: "Check the cart", scope }, { call: call({ ...truncated, truncated: { text: false, elements: true, viewport_elements: false } }), evaluate: j.evaluate, screenshot }, signal());
+    expect(screenshot).toHaveBeenCalledTimes(1);
+  });
   test("a failed capture never stops the run: the decision goes ahead on text", async () => {
     const j = jev({ operation: { choice: "DONE" } });
     const result = await runBrowserUse({ goal: "Check the cart", scope }, { call: call(page([el("e1", "Cart")])), evaluate: j.evaluate, screenshot: async () => { throw Error("BROWSER_SCREENSHOT_UNAVAILABLE"); } }, signal());

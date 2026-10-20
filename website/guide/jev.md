@@ -804,9 +804,11 @@ scroll, done or give up) and all of its arguments.
   times. Each of these runs only after the previous one completed, and a run that
   returns control after each action returns after the last of them.
 - Scrolling moves one screen (80% of the window) or several.
-- Sensitive controls are painted out before the image is encoded. If a sensitive
-  control has no bounds, nothing is sent and the run stops with
-  `SENSITIVE_CONTENT_UNMASKED`.
+- Sensitive controls are painted out before the image is encoded. When one
+  cannot be painted out (it has no bounds, or the observation was truncated and
+  may have left it out), that step sends no screenshot: Jev decides on the
+  listed controls alone, and the log line says `withheld`. Everything else on
+  screen is sent.
 - Images are scaled into the provider limits (PNG or JPEG, 280 to 1568 pixels a
   side); Box answers are mapped back to screenshot coordinates.
 - Repeating the step that just changed the screen asks Jev whether the goal
@@ -823,8 +825,9 @@ Remote Browser tasks use the same switch: with `images.enabled`, each Jev
 decision also carries the approved tab's screenshot (`page_screenshot`, scaled
 into the limits), so Jev sees the page as well as its element list. The
 extension reports no element geometry and clicks by element reference, so the
-browser uses neither marks nor Box clicks. A step with a sensitive field in view
-sends no screenshot (trace reason `SCREENSHOT_SKIPPED_SENSITIVE`); a failed
+browser uses neither marks nor Box clicks. A step with a sensitive field in view,
+or with in-view elements left out of a truncated observation, sends no screenshot
+(trace reason `SCREENSHOT_SKIPPED_SENSITIVE`); a failed
 capture continues on text (`SCREENSHOT_UNAVAILABLE`).
 
 #### Mac acceptance test

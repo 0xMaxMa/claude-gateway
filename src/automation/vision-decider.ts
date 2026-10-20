@@ -197,9 +197,9 @@ export interface VisionTurn { content: unknown[]; stopReason?: string;
   /** More actions of the same decision follow (a Jev click, select-all and type): a run that returns control after
    * each action returns after the last of them instead. */
   continues?: boolean }
-/** What the loop is looking at, for deciders that do not read the conversation (Jev): the goal, the observation and
+/** What the loop is looking at, for deciders that do not read the conversation (Jev): the goal and earlier context, the observation and
  * its screenshot, and whether the decider's previous call ran an action (`completed`) or not (`not_run`). */
-export interface VisionView { goal: string; state: ComputerState; shot: VisionScreenshot; previous?: 'completed' | 'not_run' }
+export interface VisionView { goal: string; context?: string; state: ComputerState; shot: VisionScreenshot; previous?: 'completed' | 'not_run' }
 export type VisionDecide = (messages: unknown[], signal: AbortSignal, view: VisionView) => Promise<VisionTurn>;
 export interface VisionDecisionEvent {
   model: string; elapsedMs: number; outcome: 'completed' | 'failed'; errorCode?: string; requestBytes: number; images: number;
@@ -391,7 +391,7 @@ export async function runVisionComputerUse(raw: unknown, deps: VisionDependencie
       round++; check(); checkInterruption(deps.interruptSignal);
       if (round > maxTurns) return result('blocked', 'LOOP_CYCLE_BUDGET');
       emit('evaluating', { decisionMode: 'model', targetGeneration: seen.state.generation });
-      const view: VisionView = { goal: input.goal, state: seen.state, shot: seen.shot, ...(previous ? { previous } : {}) };
+      const view: VisionView = { goal: input.goal, ...(input.interactionContext ? { context: input.interactionContext } : {}), state: seen.state, shot: seen.shot, ...(previous ? { previous } : {}) };
       previous = 'not_run';
       const turn = await interruptible(child => deps.decide(withRecentImages(messages), child, view), runSignal, deps.interruptSignal); evaluations++;
       check();

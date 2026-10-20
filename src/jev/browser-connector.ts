@@ -73,7 +73,7 @@ export function resolveBrowserConnection(config: GatewayConfig, agent: AgentConf
 }
 
 // tab_open is deliberately absent: a binding is one approved tab and a new tab would widen it.
-const tools = new Set(['browser_task_acquire','browser_task_renew','browser_task_release','page_observe','page_screenshot','page_click','page_type','page_select','page_scroll','page_keypress','tab_navigate','tab_history']);
+const tools = new Set(['browser_task_acquire','browser_task_renew','browser_task_release','page_observe','page_click','page_type','page_select','page_scroll','page_keypress','tab_navigate','tab_history']);
 /** Tab/page mutations that need the durable write-ahead fence. */
 export const BROWSER_MUTATIONS = new Set(['page_click','page_type','page_select','page_scroll','page_keypress','tab_navigate','tab_history']);
 async function credential(binding: BrowserConnectorConfig): Promise<string> {
@@ -86,8 +86,8 @@ async function credential(binding: BrowserConnectorConfig): Promise<string> {
   return key;
 }
 const CONSENT_WAITING_DELAY_MS=1500;
-const READS = new Set(['page_observe','page_screenshot']);
-/** A leased viewport capture: one PNG image, bounded before it is decoded. */
+/** A leased viewport capture: one PNG image, bounded before it is decoded. Not in `tools`: a runner gets it only
+ * through the screenshot dependency, which checks jev.images first. */
 async function leasedScreenshot(client: Client, args: Record<string, unknown>, signal: AbortSignal): Promise<string> {
   const reply = await client.callTool({name:'page_screenshot',arguments:args}, undefined, {signal,timeout:10000});
   const content = (reply.content as Array<{type:string;mimeType?:string;data?:string}>).find(c => c.type === 'image');
@@ -125,7 +125,7 @@ export async function executeBrowserModule(modulePath: string, binding: BrowserC
       // Release only the already-held lease even after config revocation; no other late call is allowed.
       if (name !== 'browser_task_release') assertAccess();
       if (!tools.has(name) || ['device_id','grant_id','tab_id'].some(k => args[k] !== binding.scope[k as keyof typeof binding.scope])) throw Error('BROWSER_SCOPE_DENIED');
-      if (BROWSER_MUTATIONS.has(name) || (name.startsWith('page_') && !READS.has(name))) {
+      if (BROWSER_MUTATIONS.has(name) || (name.startsWith('page_') && name !== 'page_observe')) {
         if(context.interruptSignal?.aborted)return {content:[{type:'text',text:JSON.stringify({error:'REVISION_SUPERSEDED',action_executed:false})}],isError:true};
         if (!context.beforeMutation || typeof args.operation_id !== 'string') throw Error('BROWSER_CHECKPOINT_UNAVAILABLE');
         context.signal.throwIfAborted();

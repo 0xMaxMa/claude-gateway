@@ -662,11 +662,13 @@ export async function runBrowserUse(
       }
     }
   }
-  /** The viewport for this decision, or undefined: images off, a sensitive field in view (the extension gives no
-   * geometry to paint it out), or a capture that failed. A missing screenshot never stops the run. */
+  /** The viewport for this decision, or undefined: images off, a sensitive field in view or possibly in view (the
+   * extension gives no geometry to paint it out, and a truncated list may have left one out), or a capture that
+   * failed. A missing screenshot never stops the run. */
   async function decisionScreenshot() {
     if (!deps.screenshot || !lease) return;
-    if (page!.elements.some(e => e.sensitive && e.in_viewport !== false)) { emit({phase:"recovery",reason:"SCREENSHOT_SKIPPED_SENSITIVE"}); return; }
+    const unlisted = page!.truncated.elements && page!.truncated.viewport_elements !== false;
+    if (unlisted || page!.elements.some(e => e.sensitive && e.in_viewport !== false)) { emit({phase:"recovery",reason:"SCREENSHOT_SKIPPED_SENSITIVE"}); return; }
     try {
       const png = await bounded(s => deps.screenshot!({ ...input.scope, lease_token: lease }, s), 10000);
       return await (await ScreenImage.open(Buffer.from(png, "base64"))).render();
