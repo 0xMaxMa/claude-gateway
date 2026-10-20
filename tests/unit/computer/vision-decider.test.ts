@@ -118,7 +118,7 @@ describe('request shape', () => {
     const events: any[] = [];
     const decide = visionModelDecider({ model: 'claude-sonnet-5', timeoutMs: 2000, fetch, authorize: () => true, onDecision: e => events.push(e),
       connection: async () => ({ baseUrl: 'https://proxy.example.test', apiKey: TOKEN, scheme: 'bearer' }) });
-    const turn = await decide([{ role: 'user', content: [{ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: '/9j/AAAA' } }] }], new AbortController().signal);
+    const turn = await decide([{ role: 'user', content: [{ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: '/9j/AAAA' } }] }], new AbortController().signal, { goal: 'x', state: { generation: 'g1' } as any, shot });
     expect(turn.content[0]).toMatchObject({ name: 'screenshot', toolset_name: 'computer' });
     expect(sent[0].url).toBe('https://proxy.example.test/v1/messages');
     expect(Object.keys(sent[0].headers).map(h => h.toLowerCase())).not.toContain('anthropic-beta');

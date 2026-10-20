@@ -36,7 +36,10 @@ const targetQuestions:Record<string,string>={
 };
 type Request=Parameters<ComputerUseDependencies['evaluate']>[0];
 export const IMPACT_QUESTION='Would doing `command` on what is shown be high-impact: hard to undo, or acting for the user toward others or their accounts and data?';
-export const IMPACT_CRITERIA={ROUTINE:'Routine: looking, moving around, opening, scrolling, searching, or typing without sending',HIGH_IMPACT:'High-impact: for example deleting, sending, submitting, paying or buying, publishing, quitting an application, signing out, or confirming such an operation'};
+// Routine names the reversible in-app steps that the old wording ("submitting", "buying") flagged: about a
+// third of routine actions in the labelled eval (scripts/experiments/jev-vision/impact-eval.ts). High-impact
+// keeps every category and is about the final commit, not the words on the control.
+export const IMPACT_CRITERIA={ROUTINE:'Routine: looking, moving around, opening, scrolling, searching, typing without sending, or a step the user can simply change back inside the app: ticking a box, choosing an option or time, accepting or dismissing a cookie or notice banner, going to the next step of a form or checkout before the final confirmation, saving their own draft or document, or adding to a cart',HIGH_IMPACT:'High-impact: the final step that commits something hard to undo or that reaches other people or accounts: deleting, sending or posting a message, publishing, placing an order or paying, submitting a form or application to someone else, changing a password, account or security setting, quitting an application, signing out, or confirming such an operation'};
 export function buildComputerCommand(state:ComputerState,command:string,targets:Map<string,Record<string,unknown>>,descriptions:Record<string,string>,context:string|undefined,allowSubmit:boolean,readRequest=false,impact=false,goal=false){
  const kinds:Record<string,string>={WAIT:'The interface is still changing; wait for a later command',BLOCKED:'No offered operation matches this command',DONE:goal?'The observed state already shows the outcome `command` asks for; no further operation is needed':'No operation is required by the current observed state'};
  // Only the user's own direct command can be a question for the assistant.

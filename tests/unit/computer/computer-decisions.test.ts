@@ -220,6 +220,7 @@ describe('decision dispatch', () => {
 });
 
 describe('computerVision', () => {
+  const view = { goal: 'x', state: { generation: 'g1', application: 'app', controls: [], apps: [], truncated: false } as any, shot: { generation: 'g1', data: '/9j/', width: 1, height: 1 } };
   const vision = (computerUse: boolean | undefined, extra: Record<string, unknown> = {}, fetch?: any) => computerVision(gatewayConfig(undefined, undefined, computerUse, extra), agentConfig(), () => true, fetch)();
   test('ax mode, no mode, or Computer Use off keeps the Accessibility path', () => {
     expect(vision(true)).toBeUndefined();
@@ -238,19 +239,39 @@ describe('computerVision', () => {
     const fetch = jest.fn(async (_url: URL, _init: RequestInit) => new Response(JSON.stringify({ content: [], stop_reason: 'end_turn' }), { headers: { 'content-type': 'application/json' } }));
     const v = vision(true, { mode: 'hybrid' }, fetch)!;
     expect(v.mode).toBe('hybrid');
-    await v.decide(task, () => true)([], new AbortController().signal);
+    await v.decide(task, () => true)([], new AbortController().signal, view);
     const [url, init] = fetch.mock.calls[0];
     const body = JSON.parse(String(init.body));
     expect(String(url)).toBe('https://api.getpod.test/v1/messages');
     expect(body.model).toBe('claude-sonnet-5'); expect(body).not.toHaveProperty('temperature');
     expect(Object.keys(init.headers as object).map(h => h.toLowerCase())).not.toContain('anthropic-beta');
   });
+  test('on the Jev backend with images enabled, Jev decides on the screenshot and the model is never called', async () => {
+    const config = gatewayConfig(true, undefined, undefined, {}) as any;
+    config.gateway.computerUse = { mode: 'hybrid' }; config.gateway.jev.images = { enabled: true };
+    const evaluate = jest.fn(async () => { throw Object.assign(Error('stop'), { code: 'PROVIDER_UNAVAILABLE' }); });
+    const fetch = jest.fn();
+    const v = computerVision(config, agentConfig(), () => true, fetch as any, () => ({ evaluate }))!()!;
+    expect(v.mode).toBe('hybrid');
+    const jpeg = (await require('sharp')({ create: { width: 640, height: 400, channels: 3, background: '#fff' } }).jpeg().toBuffer()).toString('base64');
+    const state = { generation: 'g1', application: 'app', controls: [], apps: [], truncated: false } as any;
+    await expect(v.decide(task, () => true)([], new AbortController().signal, { goal: 'x', state, shot: { generation: 'g1', data: jpeg, width: 640, height: 400 } })).rejects.toThrow('stop');
+    const [request, options] = evaluate.mock.calls[0] as any[];
+    expect(request.assets).toBeDefined();
+    expect(options).toMatchObject({ consumer: 'computer', principalId: 'p', taskId: 't1' });
+    expect(options.authorize()).toBe(true);
+    config.gateway.jev.images.enabled = false;
+    expect(options.authorize()).toBe(false);
+    expect(fetch).not.toHaveBeenCalled();
+    // Images off: the model decider, as before.
+    expect(computerVision(config, agentConfig(), () => true, fetch as any, () => ({ evaluate }))()).toMatchObject({ mode: 'hybrid' });
+  });
   test('switching back to ax revokes an in-flight decision', async () => {
     jest.spyOn(console, 'warn').mockImplementation(() => undefined);
     const config = gatewayConfig(undefined, undefined, true, { mode: 'vision' }), fetch = jest.fn();
     const v = computerVision(config, agentConfig(), () => true, fetch as any)()!;
     (config.gateway.computerUse as any).mode = 'ax';
-    await expect(v.decide(task, () => true)([], new AbortController().signal)).rejects.toMatchObject({ code: 'ACCESS_DENIED' });
+    await expect(v.decide(task, () => true)([], new AbortController().signal, view)).rejects.toMatchObject({ code: 'ACCESS_DENIED' });
     expect(fetch).not.toHaveBeenCalled();
   });
 });

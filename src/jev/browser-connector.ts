@@ -73,7 +73,7 @@ export function resolveBrowserConnection(config: GatewayConfig, agent: AgentConf
 }
 
 // tab_open is deliberately absent: a binding is one approved tab and a new tab would widen it.
-const tools = new Set(['browser_task_acquire','browser_task_renew','browser_task_release','page_observe','page_click','page_type','page_select','page_scroll','page_keypress','tab_navigate','tab_history']);
+const tools = new Set(['browser_task_acquire','browser_task_renew','browser_task_release','page_observe','page_screenshot','page_click','page_type','page_select','page_scroll','page_keypress','tab_navigate','tab_history']);
 /** Tab/page mutations that need the durable write-ahead fence. */
 export const BROWSER_MUTATIONS = new Set(['page_click','page_type','page_select','page_scroll','page_keypress','tab_navigate','tab_history']);
 async function credential(binding: BrowserConnectorConfig): Promise<string> {
@@ -86,6 +86,14 @@ async function credential(binding: BrowserConnectorConfig): Promise<string> {
   return key;
 }
 const CONSENT_WAITING_DELAY_MS=1500;
+const READS = new Set(['page_observe','page_screenshot']);
+/** A leased viewport capture: one PNG image, bounded before it is decoded. */
+async function leasedScreenshot(client: Client, args: Record<string, unknown>, signal: AbortSignal): Promise<string> {
+  const reply = await client.callTool({name:'page_screenshot',arguments:args}, undefined, {signal,timeout:10000});
+  const content = (reply.content as Array<{type:string;mimeType?:string;data?:string}>).find(c => c.type === 'image');
+  if (reply.isError || !content || content.mimeType !== 'image/png' || typeof content.data !== 'string' || content.data.length > 8*1024*1024 || !/^iVBORw0KGgo[A-Za-z0-9+/]*={0,2}$/.test(content.data)) throw Error('BROWSER_SCREENSHOT_UNAVAILABLE');
+  return content.data;
+}
 export async function executeBrowserModule(modulePath: string, binding: BrowserConnectorConfig, context: BrowserExecutionContext, connection?: BrowserConnection, helper?:import('./browser-contract').BrowserTextHelperConfig, timezone='UTC'): Promise<BrowserExecutionResult> {
   const assertAccess = () => { if (!context.authorized()) throw Error('ACCESS_DENIED'); };
   assertAccess(); context.signal.throwIfAborted();
@@ -117,7 +125,7 @@ export async function executeBrowserModule(modulePath: string, binding: BrowserC
       // Release only the already-held lease even after config revocation; no other late call is allowed.
       if (name !== 'browser_task_release') assertAccess();
       if (!tools.has(name) || ['device_id','grant_id','tab_id'].some(k => args[k] !== binding.scope[k as keyof typeof binding.scope])) throw Error('BROWSER_SCOPE_DENIED');
-      if (BROWSER_MUTATIONS.has(name) || (name.startsWith('page_') && name !== 'page_observe')) {
+      if (BROWSER_MUTATIONS.has(name) || (name.startsWith('page_') && !READS.has(name))) {
         if(context.interruptSignal?.aborted)return {content:[{type:'text',text:JSON.stringify({error:'REVISION_SUPERSEDED',action_executed:false})}],isError:true};
         if (!context.beforeMutation || typeof args.operation_id !== 'string') throw Error('BROWSER_CHECKPOINT_UNAVAILABLE');
         context.signal.throwIfAborted();
@@ -140,6 +148,15 @@ export async function executeBrowserModule(modulePath: string, binding: BrowserC
       interruptSignal:context.interruptSignal,
       evaluate: async(request,signal) => { assertAccess(); const response = await context.evaluate(request,signal); assertAccess(); return {model:response.model,answers:response.answers}; },
       progress: event => { assertAccess(); context.progress(event); },
+      ...(context.images && features.has('images') ? {screenshot: async (args: Record<string, unknown>, signal: AbortSignal) => {
+        assertAccess();
+        if (['device_id','grant_id','tab_id'].some(k => args[k] !== binding.scope[k as keyof typeof binding.scope])) throw Error('BROWSER_SCOPE_DENIED');
+        // Switched off mid-run: this decision goes ahead on text.
+        if (!context.images!()) throw Error('BROWSER_SCREENSHOT_DISABLED');
+        const image = await leasedScreenshot(client, args, signal);
+        assertAccess();
+        return image;
+      }} : {}),
       ...(module.verifyBrowserTask ? {verify:async(observation:unknown,signal:AbortSignal) => {assertAccess();const verified = await module.verifyBrowserTask!(context.goal,observation,signal);assertAccess();signal.throwIfAborted();independentlyVerified=validateBrowserVerification(verified);return independentlyVerified;}} : {}),
       ...(helper?{
         resolveFieldText:async(request:unknown,signal:AbortSignal)=>{assertAccess();const result=await thinkBrowserField(await thinkingProvider(helper),{...(request as object),referenceTime:new Date().toISOString(),timezone},signal);assertAccess();return result;},
@@ -208,10 +225,10 @@ export async function inspectBrowser(binding: BrowserConnectorConfig, result: Pa
     const operationStatus=result?.lastAction ? await read('operation_status',{operation_id:result.lastAction.operationId}) : undefined;
     let image: {type:'image';mimeType:'image/png';data:string}|undefined;
     if(screenshot){
-      check();const reply=await client.callTool({name:'page_screenshot',arguments:{...binding.scope,lease_token:lease}},undefined,{signal,timeout:10000});check();
-      const content=(reply.content as Array<{type:string;mimeType?:string;data?:string}>).find(c=>c.type==='image');
-      if(reply.isError||!content||content.mimeType!=='image/png'||typeof content.data!=='string'||content.data.length>8*1024*1024||!/^iVBORw0KGgo[A-Za-z0-9+/]*={0,2}$/.test(content.data))throw Error('BROWSER_EVIDENCE_INVALID');
-      image={type:'image',mimeType:'image/png',data:content.data};
+      check();
+      let data:string;try{data=await leasedScreenshot(client,{...binding.scope,lease_token:lease},signal);}catch(e){if(e instanceof Error&&e.message==='BROWSER_SCREENSHOT_UNAVAILABLE')throw Error('BROWSER_EVIDENCE_INVALID');throw e;}
+      check();
+      image={type:'image',mimeType:'image/png',data};
     }
     return {observedAt:Date.now(),observation,...(operationStatus ? {operationStatus}: {}),...(image?{screenshot:image}:{})};
   } finally {

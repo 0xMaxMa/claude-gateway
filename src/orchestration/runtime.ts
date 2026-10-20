@@ -307,6 +307,7 @@ export class AgentOrchestrationRuntime {
         if(progress.phase==='decided')store.appendEvent(task.conversationId,'browser.decision',{taskId:task.taskId,requestId:progress.requestId,model:progress.model,operationConfidence:progress.operation_confidence,targetConfidence:progress.target_confidence,steps:progress.steps,evaluations:progress.evaluations},task.taskId);
         store.saveTask(current,current.stateVersion);
       }),
+      images:()=>gateway.gateway.jev?.images?.enabled===true,
       evaluate:(task,request,signal,authorized)=>gatewayJev(gateway).service.evaluate(request,{
         principalId:task.ownerPrincipalId,agentId:agent.id,sessionId:task.agentSessionId,taskId:task.taskId,consumer:'browser',signal,
         authorize:()=>{try{store.assertMember(task.conversationId,task.ownerPrincipalId);return authorized()&&jevAllowed(gateway,agent)&&gateway.gateway.jev?.features?.browserTasks?.enabled===true;}catch{return false;}}

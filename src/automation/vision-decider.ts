@@ -194,7 +194,10 @@ export function mapComputerCall(name: string, input: unknown, caps: RawCapabilit
 
 /** A Messages response, trimmed to what the loop reads. */
 export interface VisionTurn { content: unknown[]; stopReason?: string }
-export type VisionDecide = (messages: unknown[], signal: AbortSignal) => Promise<VisionTurn>;
+/** What the loop is looking at, for deciders that do not read the conversation (Jev): the goal, the observation and
+ * its screenshot, and whether the decider's previous call ran an action (`completed`) or not (`not_run`). */
+export interface VisionView { goal: string; state: ComputerState; shot: VisionScreenshot; previous?: 'completed' | 'not_run' }
+export type VisionDecide = (messages: unknown[], signal: AbortSignal, view: VisionView) => Promise<VisionTurn>;
 export interface VisionDecisionEvent {
   model: string; elapsedMs: number; outcome: 'completed' | 'failed'; errorCode?: string; requestBytes: number; images: number;
   usage?: { input_tokens: number; output_tokens: number }; stopReason?: string;
@@ -380,12 +383,14 @@ export async function runVisionComputerUse(raw: unknown, deps: VisionDependencie
     if ('error' in seen) return fallback(seen.error);
     const goal = `<goal>\n${input.goal}\n</goal>${input.interactionContext ? `\n<earlier_context>\n${input.interactionContext}\n</earlier_context>` : ''}`;
     messages.push({ role: 'user', content: [{ type: 'text', text: goal }, stateText(seen.state, seen.shot), image(seen.shot)] });
-    let nudged = false;
+    let nudged = false, previous: VisionView['previous'];
     for (;;) {
       round++; check(); checkInterruption(deps.interruptSignal);
       if (round > maxTurns) return result('blocked', 'LOOP_CYCLE_BUDGET');
       emit('evaluating', { decisionMode: 'model', targetGeneration: seen.state.generation });
-      const turn = await interruptible(child => deps.decide(withRecentImages(messages), child), runSignal, deps.interruptSignal); evaluations++;
+      const view: VisionView = { goal: input.goal, state: seen.state, shot: seen.shot, ...(previous ? { previous } : {}) };
+      previous = 'not_run';
+      const turn = await interruptible(child => deps.decide(withRecentImages(messages), child, view), runSignal, deps.interruptSignal); evaluations++;
       check();
       // Append-only, as the model returned it: models with preserved thinking require the exact prior content.
       messages.push({ role: 'assistant', content: turn.content });
@@ -493,7 +498,7 @@ export async function runVisionComputerUse(raw: unknown, deps: VisionDependencie
             const failed = await fresh(use, `${refusal}: the action was not run. This is the current window.`, true);
             if (failed) return result('blocked', failed);
           } else {
-            steps++; refusals = 0;
+            steps++; refusals = 0; previous = 'completed';
             lastAction = { kind: action.kind, ...(action.kind === 'key_chord' ? { key: action.keys.join('+') } : {}), ...(action.kind === 'scroll' ? { direction: action.dy ? (action.dy > 0 ? 'down' : 'up') : (action.dx! > 0 ? 'right' : 'left') } : {}) };
             emit('acted', { ...summary, operationId, outcome: 'completed', elapsedMs: Date.now() - started });
             if (steps >= input.maxSteps || input.yieldAfterAction) {
