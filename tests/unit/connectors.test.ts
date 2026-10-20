@@ -978,8 +978,7 @@ describe('connectors-router', () => {
     expect(getSecret(`CUSTOM__${id}__api_key`)).toBe('sk_test_new');
 
     const status = await request(app).get(`/api/v1/connectors/${id}/status`).set('X-Api-Key', adminKey);
-    // New connectors are opt-in (#634), and the status route reports that.
-    expect(status.body).toEqual({ id, connected: true, defaultEnabled: false });
+    expect(status.body).toEqual({ id, connected: true });
   });
 
   it('POST .../connect on a gateway-owned connector rejects with a clear message instead of trying to store a plain token', async () => {

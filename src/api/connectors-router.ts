@@ -910,11 +910,7 @@ export function createConnectorsRouter(
       const entry: CustomConnectorEntry = {
         label: body.label.trim(),
         ...(typeof body.resourcesPath === 'string' ? { resourcesPath: body.resourcesPath } : {}),
-        // Opt-in when the caller does not say: a new connector reaches no agent until
-        // it is scoped (PUT /:id/agents) or this is flipped (PATCH /:id). Entries
-        // stored before this default existed carry no field and keep resolving as
-        // they always did.
-        defaultEnabled: typeof body.defaultEnabled === 'boolean' ? body.defaultEnabled : false,
+        ...(typeof body.defaultEnabled === 'boolean' ? { defaultEnabled: body.defaultEnabled } : {}),
         description: typeof body.description === 'string' ? body.description : undefined,
         config: body.config as Record<string, unknown>,
         secretNames,
@@ -956,7 +952,7 @@ export function createConnectorsRouter(
 
       const connected = secretNames.every((name: string) => hasSecret(customSecretKey(id, name)));
       if (connected) await restartSessionsUsing(id, { overlay: { [id]: entry } });
-      res.json({ id, label: entry.label, connected, defaultEnabled: entry.defaultEnabled });
+      res.json({ id, label: entry.label, connected, ...(entry.defaultEnabled !== undefined ? { defaultEnabled: entry.defaultEnabled } : {}) });
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
     }

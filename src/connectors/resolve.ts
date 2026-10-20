@@ -55,8 +55,6 @@ export function isConnectorEnabledFor(
  * deliberate choice, not a silent change of meaning for existing installs.
  *
  * Per connector, an entry's own `defaultEnabled: false` opts it in regardless.
- * POST /v1/connectors/custom stores that for every new connector unless the caller
- * says otherwise; entries stored before that carry no field and stay opt-out.
  * A `paused` entry resolves for no agent at all.
  */
 export function resolveEnabledConnectors(

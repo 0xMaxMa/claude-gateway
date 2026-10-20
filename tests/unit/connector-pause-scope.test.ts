@@ -1,5 +1,5 @@
 /**
- * Connector pause/resume, agent scope (all vs selected) and the opt-in default for
+ * Connector pause/resume, agent scope (all vs selected) and the default reach of
  * new custom connectors (#634).
  *
  * Every assertion about "which agents get the connector" is checked against
@@ -78,19 +78,31 @@ async function addConnector(app: express.Express, body: Record<string, unknown> 
   return res.body.id;
 }
 
-describe('opt-in default for new custom connectors', () => {
-  it('a connector added without defaultEnabled reaches no agent until scoped', async () => {
+describe('default reach of new custom connectors', () => {
+  it('a connector added without any scope reaches every agent, as before', async () => {
     const cfgPath = tmpConfig(['a', 'b']);
-    const app = makeApp(cfgPath);
-    const id = await addConnector(app);
+    const res = await request(makeApp(cfgPath)).post('/api/v1/connectors/custom').set('X-Api-Key', adminKey)
+      .send({ label: 'Ops API', config: HTTP_CONFIG, secrets: { api_key: 'sk-ops' } });
+    expect(res.status).toBe(200);
+    expect(res.body).not.toHaveProperty('defaultEnabled');
+    expect(readConfig(cfgPath).gateway.customConnectors[res.body.id]).not.toHaveProperty('defaultEnabled');
+    expect(resolvedFor(cfgPath, res.body.id)).toEqual({ a: true, b: true });
+  });
+
+  it('an explicit defaultEnabled: false restricts it to agents that opt in', async () => {
+    const cfgPath = tmpConfig(['a', 'b']);
+    const id = await addConnector(makeApp(cfgPath), { defaultEnabled: false });
     expect(readConfig(cfgPath).gateway.customConnectors[id].defaultEnabled).toBe(false);
     expect(resolvedFor(cfgPath, id)).toEqual({ a: false, b: false });
   });
 
-  it('an explicit defaultEnabled: true keeps the old opt-out behaviour', async () => {
+  it('an explicit selected scope restricts it to the listed agents', async () => {
     const cfgPath = tmpConfig(['a', 'b']);
-    const id = await addConnector(makeApp(cfgPath), { defaultEnabled: true });
-    expect(resolvedFor(cfgPath, id)).toEqual({ a: true, b: true });
+    const app = makeApp(cfgPath);
+    const id = await addConnector(app);
+    await request(app).put(`/api/v1/connectors/${id}/agents`).set('X-Api-Key', adminKey)
+      .send({ mode: 'selected', agents: ['a'] }).expect(200);
+    expect(resolvedFor(cfgPath, id)).toEqual({ a: true, b: false });
   });
 
   it('a stored entry without the field still resolves for every agent', () => {
@@ -103,7 +115,7 @@ describe('opt-in default for new custom connectors', () => {
   it('defaultEnabled can be changed after creation without touching the secret', async () => {
     const cfgPath = tmpConfig(['a']);
     const app = makeApp(cfgPath);
-    const id = await addConnector(app);
+    const id = await addConnector(app, { defaultEnabled: false });
     const tokenBefore = fs.readFileSync(TOKEN_ENV, 'utf8');
     const res = await request(app).patch(`/api/v1/connectors/${id}`).set('X-Api-Key', adminKey).send({ defaultEnabled: true });
     expect(res.status).toBe(200);

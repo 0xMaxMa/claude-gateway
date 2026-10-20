@@ -399,12 +399,10 @@ Before relying on per-connector opt-in, clients should check that
 `GET /api/v1/connectors` returns `capabilities.perConnectorDefaults: true`.
 Older gateways may ignore unknown fields.
 
-A new connector is **opt-in**: when the request omits `defaultEnabled`, the entry is
-stored with `defaultEnabled: false` and reaches no agent until it is scoped through
-[`PUT /:id/agents`](#put-apiv1connectorsidagents) or flipped through
-[`PATCH /:id`](#patch-apiv1connectorsid). Send `defaultEnabled: true` to give it to
-every agent at once. Entries stored before this default existed carry no
-`defaultEnabled` and keep reaching every agent, as they did.
+When the request does not specify a scope, the new connector reaches every agent, as
+it always has. Restrict it only when you mean to: send `defaultEnabled: false` here, or
+scope it afterwards through [`PUT /:id/agents`](#put-apiv1connectorsidagents) or
+[`PATCH /:id`](#patch-apiv1connectorsid).
 
 **Request body:**
 
@@ -415,7 +413,7 @@ every agent at once. Entries stored before this default existed carry no
 | `secrets` | object | Optional `{ "<placeholderName>": "<value>" }`. All values must be strings; blank ones are skipped, leaving the connector "not connected" until filled in later via `/connect` |
 | `description` | string | Optional |
 | `sourceUrl` | string | Optional — where the admin says the config came from. Unverified |
-| `defaultEnabled` | boolean | Optional, default `false` (see above). Returned in the response |
+| `defaultEnabled` | boolean | Optional. `false` restricts the connector to agents with their own `{"enabled": true}`. Omitted, it reaches every agent (subject to `gateway.connectorsDefaultEnabled`). Returned in the response when sent |
 | `oauth` | boolean | Optional. Asks the gateway to run the sign-in itself — stores `credentialOwner: "gateway"`. Requires `config.url` and an `{access_token}` placeholder, and refuses an `access_token` in `secrets` (the gateway mints that one at `/oauth/start`). Without it the entry is `static` (it declares `{placeholder}`s) or `none` (it declares none) |
 
 ```bash

@@ -104,10 +104,8 @@ Override that file's path with `GATEWAY_MCP_TOKEN_ENV_PATH`.
 Custom connectors are **admin-trusted but not code-reviewed** — the config is whatever
 the admin pasted. Per-agent enablement lives on the agent (`PATCH /api/v1/agents/:id`
 with `connectors`). Set an entry's `defaultEnabled: false` to require explicit
-per-agent opt-in, for example when pairing a personal browser. `POST /api/v1/connectors/custom`
-stores `false` when the request omits it; an entry with no `defaultEnabled` at all (one
-stored before that default existed) follows the gateway default. `true` does not override a
-gateway-wide opt-in policy. `paused: true` (written by `PATCH /api/v1/connectors/:id`)
+per-agent opt-in, for example when pairing a personal browser. An omitted value
+follows the gateway default; `true` does not override a gateway-wide opt-in policy. `paused: true` (written by `PATCH /api/v1/connectors/:id`)
 keeps the connector off every agent without removing its secret. See
 [Connectors API](../api/connectors.md) for the full model, the OAuth flow, and the refresh
 behaviour.

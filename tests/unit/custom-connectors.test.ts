@@ -238,12 +238,11 @@ describe('connectors-router — custom connectors', () => {
         },
       });
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ id: 'smithery-google-calendar', label: 'Smithery Google Calendar', connected: false, defaultEnabled: false });
+    expect(res.body).toEqual({ id: 'smithery-google-calendar', label: 'Smithery Google Calendar', connected: false });
 
     const written = JSON.parse(fs.readFileSync(cfgPath, 'utf-8'));
     expect(written.gateway.customConnectors['smithery-google-calendar']).toEqual({
       label: 'Smithery Google Calendar',
-      defaultEnabled: false,
       description: 'Calendar via Smithery',
       config: {
         type: 'streamable-http',
@@ -319,7 +318,7 @@ describe('connectors-router — custom connectors', () => {
         config: { type: 'streamable-http', url: 'https://mcp.airshelf.ai/mcp' },
       });
     expect(create.status).toBe(200);
-    expect(create.body).toEqual({ id: 'no-auth-server', label: 'No Auth Server', connected: true, defaultEnabled: false });
+    expect(create.body).toEqual({ id: 'no-auth-server', label: 'No Auth Server', connected: true });
 
     const list = await request(app).get('/api/v1/connectors').set('X-Api-Key', adminKey);
     const github = list.body.connectors.find((c: { id: string }) => c.id === 'github');

@@ -1877,7 +1877,7 @@ describe('a connector id that names an Object.prototype member is simply unknown
       .set('Authorization', `Bearer ${ADMIN_KEY.key}`);
     expect(status.status).toBe(200);
     // No placeholders at all, so it is vacuously connected — the 'none' owner.
-    expect(status.body).toEqual({ id: 'constructor', connected: true, defaultEnabled: false });
+    expect(status.body).toEqual({ id: 'constructor', connected: true });
   });
 });
 
