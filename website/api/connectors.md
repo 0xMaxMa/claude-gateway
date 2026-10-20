@@ -224,12 +224,15 @@ any other admin caller.
 | `access_token` | string | Required, non-empty |
 | `label` | string | Required, non-empty |
 | `config` | object | Required. Must contain **exactly one** `{access_token}` placeholder and no others |
-| `defaultEnabled` | boolean | Optional. `false` requires explicit per-agent opt-in. Omitted preserves existing gateway defaults; `true` never overrides `gateway.connectorsDefaultEnabled: false`. Returned in create/list/status responses when configured |
 | `description` | string | Optional |
 | `sourceUrl` | string | Optional |
 
 `secretNames` is never read from the request body — it is derived from `config` and
 required to be exactly `["access_token"]`.
+
+A push onto an existing id keeps that entry's `paused` and `defaultEnabled`, so a control
+plane that re-pushes on every token refresh does not resume a paused connector or undo
+its agent scope. Set both through [`PATCH /:id`](#patch-apiv1connectorsid).
 
 ```bash
 curl -X POST \

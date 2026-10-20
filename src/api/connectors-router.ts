@@ -339,11 +339,13 @@ export function createConnectorsRouter(
           const own = { ...(agent.connectors ?? {}) };
           delete own[id];
           if (mode === 'all' ? !scope.defaultEnabled : wanted.has(agent.id)) own[id] = { enabled: true };
-          agent.connectors = own;
+          // No empty map on an agent that never had one: the watcher would report
+          // a connectors change for every agent on the gateway.
+          if (agent.connectors || Object.keys(own).length) agent.connectors = own;
         }
         const changed = scope.agents
           .filter((a) => before.get(a.id) !== isConnectorEnabledFor(a.connectors, id, entry, scope.defaultEnabled))
-          .map((a) => ({ id: a.id, connectors: a.connectors }));
+          .map((a) => ({ id: a.id, connectors: a.connectors ?? {} }));
         return {
           result: { status: 200, view: scopeView(id, scope), entry: { ...entry }, changed },
           write: true,
@@ -617,6 +619,11 @@ export function createConnectorsRouter(
         staleSecretKeys = (previous?.secretNames ?? [])
           .filter((name: string) => !entry.secretNames.includes(name))
           .map((name: string) => customSecretKey(id, name));
+        // A push replaces the connector's shape and token, not the admin's choices
+        // about it. A control plane re-pushes on every token refresh, so dropping
+        // these would silently resume a paused connector and undo its agent scope.
+        if (previous?.paused === true) entry.paused = true;
+        if (previous?.defaultEnabled !== undefined) entry.defaultEnabled = previous.defaultEnabled;
         c[id] = entry;
       });
       updateSecrets({ [customSecretKey(id, 'access_token')]: accessToken.trim() }, [

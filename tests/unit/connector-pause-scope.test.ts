@@ -167,7 +167,31 @@ describe('pause / resume', () => {
   });
 });
 
+describe('external pushes keep the admin\'s choices', () => {
+  it('POST /:id/oauth/receive preserves paused and defaultEnabled on an existing entry', async () => {
+    const cfgPath = tmpConfig(['a']);
+    const app = makeApp(cfgPath);
+    const push = () => request(app).post('/api/v1/connectors/gmail/oauth/receive').set('X-Api-Key', adminKey).send({
+      access_token: 'tok', label: 'Gmail', config: { type: 'http', url: 'https://gmail.example/mcp', headers: { Authorization: 'Bearer {access_token}' } },
+    });
+    expect((await push()).status).toBe(200);
+    await request(app).patch('/api/v1/connectors/gmail').set('X-Api-Key', adminKey).send({ paused: true, defaultEnabled: false }).expect(200);
+    expect((await push()).status).toBe(200);
+    expect(readConfig(cfgPath).gateway.customConnectors.gmail).toMatchObject({ paused: true, defaultEnabled: false });
+    expect(resolvedFor(cfgPath, 'gmail')).toEqual({ a: false });
+  });
+});
+
 describe('agent scope', () => {
+  it('does not write an empty connectors map onto agents it does not scope', async () => {
+    const cfgPath = tmpConfig(['a', 'b']);
+    const app = makeApp(cfgPath);
+    const id = await addConnector(app);
+    await request(app).put(`/api/v1/connectors/${id}/agents`).set('X-Api-Key', adminKey)
+      .send({ mode: 'selected', agents: ['a'] }).expect(200);
+    expect(readConfig(cfgPath).agents).toEqual([{ id: 'a', connectors: { [id]: { enabled: true } } }, { id: 'b' }]);
+  });
+
   it('selected → only the listed agents resolve it; all → every agent again', async () => {
     const cfgPath = tmpConfig(['a', 'b', 'c']);
     const app = makeApp(cfgPath);
