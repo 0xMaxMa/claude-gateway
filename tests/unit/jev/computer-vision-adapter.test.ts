@@ -49,6 +49,16 @@ test('vision mode decides the goal from screenshots sized by the helper and neve
  }finally{await f.close();}
 });
 
+test('a user one-command Computer Use round also decides from its screenshot and yields after that command',async()=>{
+ const f=fixture(()=>({mode:'hybrid',decide:()=>f.decide}));try{
+  f.task.revision=2; // Revision one is the agent's opening goal; later revisions are user commands.
+  runVisionComputerUse.mockImplementationOnce(async(input:any)=>{expect(input).toMatchObject({goal:'click Save',yieldAfterAction:true});return reached;});
+  expect((await f.run('r1','click Save')).type).toBe('completed');
+  expect(runVisionComputerUse).toHaveBeenCalledTimes(1);
+  expect(runComputerUse).not.toHaveBeenCalled();
+ }finally{await f.close();}
+});
+
 test('a vision fallback (no raw-input capabilities) runs the same goal on Accessibility',async()=>{
  const f=fixture(()=>({mode:'vision',decide:()=>jest.fn()}));try{
   runVisionComputerUse.mockImplementationOnce(async()=>({fallback:'RAW_CAPABILITIES_MISSING',trace:[]}));
