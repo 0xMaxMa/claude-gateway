@@ -3661,9 +3661,16 @@ export class AgentRunner extends EventEmitter {
    */
   async restartSessionsUsingConnector(
     connectorId: string,
-    opts?: { overlay?: Record<string, CustomConnectorEntry | null> },
+    opts?: {
+      overlay?: Record<string, CustomConnectorEntry | null>;
+      /** This agent's new per-agent enablement map, just written by a scope route. */
+      agentConnectors?: AgentConfig['connectors'];
+    },
   ): Promise<{ restarted: boolean }> {
     const overlay = opts?.overlay;
+    // Adopted for the overlay's reason below: the watcher has not delivered the
+    // write yet, and the restarted sessions respawn from this.agentConfig.
+    if (opts?.agentConnectors) this.agentConfig.connectors = opts.agentConnectors;
     const customConnectors = {
       ...this.gatewayConfig?.gateway?.customConnectors,
       ...overlay,

@@ -105,7 +105,8 @@ Custom connectors are **admin-trusted but not code-reviewed** — the config is 
 the admin pasted. Per-agent enablement lives on the agent (`PATCH /api/v1/agents/:id`
 with `connectors`). Set an entry's `defaultEnabled: false` to require explicit
 per-agent opt-in, for example when pairing a personal browser. An omitted value
-preserves the gateway default; `true` does not override a gateway-wide opt-in policy. See
+follows the gateway default; `true` does not override a gateway-wide opt-in policy. `paused: true` (written by `PATCH /api/v1/connectors/:id`)
+keeps the connector off every agent without removing its secret. See
 [Connectors API](../api/connectors.md) for the full model, the OAuth flow, and the refresh
 behaviour.
 
