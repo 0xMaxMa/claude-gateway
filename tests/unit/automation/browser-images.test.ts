@@ -92,3 +92,54 @@ describe("browser decisions with the tab screenshot (jev.images.enabled)", () =>
     expect(result.trace?.events.some(e => e.reason === "SCREENSHOT_UNAVAILABLE")).toBe(true);
   });
 });
+
+/** The extension as it behaves: every read issues a new generation, and an action that carries any other generation
+ * is refused before it runs (STALE_OBSERVATION, not executed). */
+function rotatingExtension(base: Observation) {
+  let generation = 0;
+  const actions: string[] = [];
+  const fresh = () => ({ ...structuredClone(base), generation: `g${++generation}` });
+  const call: BrowserUseDependencies["call"] = async (name, args) => {
+    if (name === "browser_task_acquire") return { state: "completed", result: { protocol_version: 1, lease_token: randomUUID() } };
+    if (name.startsWith("browser_task_")) return { state: "completed", result: {} };
+    if (name === "page_observe") return fresh();
+    if (args.generation !== `g${generation}`) return { error: "STALE_OBSERVATION", action_executed: false };
+    actions.push(name);
+    return { state: "completed", result: { observation: fresh() } };
+  };
+  return { call, actions };
+}
+
+describe("one observation per decision with the tab screenshot", () => {
+  // Regression (#632, develop session defe0d1a): the check read after the capture rotated the generation, and the
+  // click went out with the older one: CLICK/SCROLL 0/15 after deploy, every one STALE_RETRY_BUDGET.
+  test("a click runs on the generation of the observation Jev saw with the picture", async () => {
+    const extension = rotatingExtension(page([el("cart", "Cart")]));
+    const j = jev({ operation: { choice: "CLICK" }, click_target: { choice: "cart" } });
+    const result = await runBrowserUse({ goal: "Open the cart", scope, yieldAfterAction: true }, { call: extension.call, evaluate: j.evaluate, screenshot: async () => viewport }, signal());
+    expect(extension.actions).toEqual(["page_click"]);
+    expect(result).toMatchObject({ status: "needs_verification", reason: "COMMAND_WAITING_INPUT", lastConfirmedAction: { operation: "CLICK" } });
+    expect(j.requests).toHaveLength(1);
+    expect(j.requests[0].assets).toBeDefined();
+    expect(result.trace?.events.some(e => e.reason === "STALE_OBSERVATION")).toBe(false);
+  });
+  test("a scroll runs on it too", async () => {
+    const extension = rotatingExtension({ ...page([el("cart", "Cart")]), scroll: { up: false, down: true } });
+    const j = jev({ operation: { choice: "SCROLL_DOWN" } });
+    const result = await runBrowserUse({ goal: "Scroll down", scope, yieldAfterAction: true }, { call: extension.call, evaluate: j.evaluate, screenshot: async () => viewport }, signal());
+    expect(extension.actions).toEqual(["page_scroll"]);
+    expect(result).toMatchObject({ lastConfirmedAction: { operation: "SCROLL_DOWN" } });
+  });
+  test("the offered targets come from the observation read after the capture", async () => {
+    // The page re-rendered between the previous read and the capture: only the later read's refs exist.
+    let reads = 0;
+    const extension = rotatingExtension(page([el("cart", "Cart")]));
+    const call: BrowserUseDependencies["call"] = async (name, args, s) => {
+      const reply = await extension.call(name, args, s);
+      return name === "page_observe" && ++reads >= 2 ? { ...(reply as object), elements: [el("cart-2", "Cart")] } : reply;
+    };
+    const j = jev({ operation: { choice: "CLICK" } });
+    await runBrowserUse({ goal: "Open the cart", scope, yieldAfterAction: true }, { call, evaluate: j.evaluate, screenshot: async () => viewport }, signal());
+    expect(Object.keys(j.requests[0].questions.click_target.criteria)).toEqual(["cart-2"]);
+  });
+});

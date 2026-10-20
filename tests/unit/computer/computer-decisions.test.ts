@@ -254,7 +254,7 @@ describe('computerVision', () => {
     const v = computerVision(config, agentConfig(), () => true, fetch as any, () => ({ evaluate }))!()!;
     expect(v.mode).toBe('hybrid');
     const jpeg = (await require('sharp')({ create: { width: 640, height: 400, channels: 3, background: '#fff' } }).jpeg().toBuffer()).toString('base64');
-    const state = { generation: 'g1', application: 'app', controls: [], apps: [], truncated: false } as any;
+    const state = { generation: 'g1', application: 'app', controls: [], apps: [], truncated: false, screenshotAvailable: true, observationStats: { visited: 0, candidates: 0, exported: 0, incomplete: false } } as any;
     await expect(v.decide(task, () => true)([], new AbortController().signal, { goal: 'x', state, shot: { generation: 'g1', data: jpeg, width: 640, height: 400 } })).rejects.toThrow('stop');
     const [request, options] = evaluate.mock.calls[0] as any[];
     expect(request.assets).toBeDefined();

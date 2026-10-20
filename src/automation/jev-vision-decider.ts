@@ -55,10 +55,11 @@ export function jevVisionDecider(options: JevVisionOptions): VisionDecide {
     queue = [];
     const { state, shot } = view;
     const sensitive = state.controls.filter(c => c.sensitive);
-    // Fail closed: when a sensitive control may be on screen but cannot be painted out (no bounds, or an observation
-    // truncated before listing it), no screenshot leaves the device this step. Jev decides on the listed controls
-    // instead (text only). The local copy still serves change detection.
-    const withheld = state.truncated || sensitive.some(c => !c.bounds) || (state.focusedControl?.sensitive === true && !sensitive.some(c => c.ref === state.focusedControl!.ref && c.bounds));
+    // The helper's screenshotAvailable flag is set only after a complete sensitive-content scan; `truncated` can
+    // also mean harmless output caps (for example text or the exported control list). An unfinished scan still
+    // withholds the image. Sensitive controls we did receive are painted out; without bounds, keep the image home.
+    const withheld = state.screenshotAvailable !== true || state.observationStats?.incomplete === true ||
+      sensitive.some(c => !c.bounds) || (state.focusedControl?.sensitive === true && !sensitive.some(c => c.ref === state.focusedControl!.ref && c.bounds));
     const screen = await ScreenImage.open(Buffer.from(shot.data, 'base64'), shot, sensitive.filter(c => c.bounds).map(c => pixels(c.bounds!, shot)));
     const thumbnail = await screen.thumbnail();
     // Settle the previous decision: its note and evidence go into the history Jev reads.
@@ -78,7 +79,7 @@ export function jevVisionDecider(options: JevVisionOptions): VisionDecide {
     const marks: Mark[] = listed.map((c, i) => ({ id: String(i + 1), rect: pixels(c.bounds!, shot) }));
     const elements: VisionElement[] = listed.map((c, i) => ({ id: String(i + 1), role: c.role, label: c.label, ...(c.context ? { context: c.context } : {}), ...(c.value ? { value: c.value } : {}) }));
     const image = withheld ? { withheld: true as const, application: state.application, ...(state.windowTitle ? { windowTitle: state.windowTitle } : {}) } : await screen.render({ marks });
-    const input: VisionStepInput = { goal: view.goal, ...(view.context ? { context: view.context } : {}), history, screen: image, elements, point: !withheld };
+    const input: VisionStepInput = { goal: view.goal, ...(view.context ? { context: view.context } : {}), history, screen: image, elements, apps: state.apps, point: !withheld };
     const decision = readVisionStep(input, await ask(buildVisionStep(input)));
     let extra: Omit<JevVisionEvent, 'elapsedMs' | 'requests' | 'decision'> = withheld ? { withheld: true } : {};
     if (decision.kind === 'done') { report('DONE', extra); return tool({ name: 'finish', input: { outcome: 'done' } }); }
@@ -86,7 +87,12 @@ export function jevVisionDecider(options: JevVisionOptions): VisionDecide {
 
     const calls: Call[] = [];
     let note: string, key: string;
-    if (decision.kind === 'key') {
+    if (decision.kind === 'open') {
+      const app = state.apps.find(candidate => candidate.id === decision.appId);
+      if (!app) throw Error('INVALID_DECISION');
+      calls.push({ name: 'open_application', input: { app_id: app.id } });
+      note = `opened or activated ${app.name}`; key = `open:${app.id}`;
+    } else if (decision.kind === 'key') {
       for (let i = 0; i < decision.count; i++) calls.push({ name: 'key', input: { text: KEYS[decision.key] } });
       note = `pressed ${KEYS[decision.key]}${decision.count > 1 ? ` ${decision.count} times` : ''}`; key = 'key:' + decision.key;
     } else if (decision.kind === 'scroll') {

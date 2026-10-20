@@ -79,7 +79,7 @@ export function computerVision(gateway: GatewayConfig, agent: AgentConfig, membe
       evaluate: (request, signal) => jev().evaluate(request, { principalId: task.ownerPrincipalId, agentId: agent.id, sessionId: task.agentSessionId, taskId: task.taskId, consumer: 'computer', signal,
         authorize: () => authorized() && member(task) && (gateway.gateway.computerUse?.mode ?? 'ax') === mode && computerDecisions(gateway, agent) === 'jev' && gateway.gateway.jev?.images?.enabled === true }),
       // Codes and timings only; never screenshots, screen text or typed text.
-      onDecision: event => { try { logger().debug('computer_jev_vision_decision', { agentId: agent.id, taskId: task.taskId, ...event }); } catch { /* computer_model_log_unavailable is reported by the evaluator path. */ } },
+      onDecision: event => { try { logger().info('computer_jev_vision_decision', { agentId: agent.id, taskId: task.taskId, ...event }); } catch { /* computer_model_log_unavailable is reported by the evaluator path. */ } },
     }) };
     const model = gateway.gateway.computerUse?.visionModel ?? DEFAULT_COMPUTER_VISION_MODEL;
     if (!supportsComputerToolset(model)) {
@@ -95,7 +95,7 @@ export function computerVision(gateway: GatewayConfig, agent: AgentConfig, membe
       onDecision: event => {
         const entry = { agentId: agent.id, taskId: task.taskId, ...event };
         if (event.outcome === 'failed') console.warn(JSON.stringify({ event: 'computer_vision_decision', ...entry }));
-        else try { logger().debug('computer_vision_decision', entry); } catch { /* computer_model_log_unavailable is reported by the evaluator path. */ }
+        else try { logger().info('computer_vision_decision', entry); } catch { /* computer_model_log_unavailable is reported by the evaluator path. */ }
       },
     }) };
   };

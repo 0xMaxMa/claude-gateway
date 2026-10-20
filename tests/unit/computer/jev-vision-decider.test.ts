@@ -13,7 +13,7 @@ let jpeg: string;
 beforeAll(async () => { jpeg = (await sharp({ create: { width: 1280, height: 800, channels: 3, background: '#fff' } }).jpeg().toBuffer()).toString('base64'); });
 
 /** A fake Mac: every observe is a new generation; `text` grows with each completed action, so actions change the screen. */
-function device(options: { controls?: unknown[]; receipts?: Array<Record<string, unknown>>; impact?: (command: string) => 'ROUTINE' | 'HIGH_IMPACT'; distribution?: Record<string, number> } = {}) {
+function device(options: { controls?: unknown[]; apps?: Array<{ id: string; name: string }>; receipts?: Array<Record<string, unknown>>; impact?: (command: string) => 'ROUTINE' | 'HIGH_IMPACT'; distribution?: Record<string, number> } = {}) {
   let generation = 0, done = 0;
   const calls: Array<{ name: string; args: any }> = [], receipts = [...(options.receipts ?? [])];
   const deps = (decide: VisionDependencies['decide'], mode: 'vision' | 'hybrid' = 'hybrid'): VisionDependencies => ({
@@ -25,7 +25,7 @@ function device(options: { controls?: unknown[]; receipts?: Array<Record<string,
     call: async (name, args) => {
       calls.push({ name, args });
       if (name === 'computer_acquire') return { lease_token: 'lease' };
-      if (name === 'computer_observe') return { generation: 'g' + ++generation, application: 'com.apple.TextEdit', windowTitle: 'Doc', controls: options.controls ?? [SAVE, NAME, PASSWORD], text: [`actions ${done}`], apps: [], truncated: false, capabilities: CAPS };
+      if (name === 'computer_observe') return { generation: 'g' + ++generation, application: 'com.apple.TextEdit', windowTitle: 'Doc', controls: options.controls ?? [SAVE, NAME, PASSWORD], text: [`actions ${done}`], apps: options.apps ?? [], truncated: false, screenshotAvailable: true, observationStats: { visited: 3, candidates: 3, exported: 3, incomplete: false }, capabilities: CAPS };
       if (name === 'computer_action') { const receipt = receipts.shift() ?? { state: 'completed' }; if (receipt.state === 'completed') done++; return receipt; }
       return {};
     },
@@ -61,6 +61,14 @@ const pixel = async (request: JevRequest, x: number, y: number) => {
 };
 
 describe('Jev image decisions in the vision loop', () => {
+  test('opens an approved application selected from the screenshot decision and app catalogue', async () => {
+    const d = device({ apps: [{ id: 'com.apple.Maps', name: 'Maps' }] }), j = jev([{ op: 'OPEN', app: 'com.apple.Maps' }, { done: 0.9 }]);
+    await runVisionComputerUse({ goal: 'Open Maps' }, d.deps(decider(j)), signal());
+    expect(j.steps()[0].state).toMatchObject({ applications: [{ id: 'com.apple.Maps', name: 'Maps' }] });
+    expect((j.steps()[0].questions.app as any).criteria['com.apple.Maps']).toContain('Maps');
+    expect(d.actions()).toEqual([{ kind: 'open', app_id: 'com.apple.Maps' }]);
+  });
+
   test('clicks a Set-of-Mark control at its center, then finishes when Jev sees the goal done', async () => {
     const d = device(), j = jev([{ op: 'CLICK', element: '1' }, { done: 0.9 }]);
     const result = await runVisionComputerUse({ goal: 'Click Save' }, d.deps(decider(j)), signal());
@@ -87,14 +95,26 @@ describe('Jev image decisions in the vision loop', () => {
     expect(d.actions()).toEqual([{ kind: 'pointer', op: 'click', x: 192, y: 100 }]);
   });
 
-  // Regression (#633 review): a truncated observation can leave a sensitive control out of the mask.
-  test('a truncated observation fails closed: no screenshot, even in vision mode, and the list stands in for it', async () => {
+  // The helper sets screenshotAvailable only after the sensitive-content scan is complete. `truncated` also covers
+  // harmless output caps, so it must not hide a safe screenshot from Jev.
+  test('a safe screenshot remains available when only the exported observation is truncated', async () => {
     const d = device(), j = jev([{ op: 'CLICK', element: '1' }, { done: 0.9 }]);
     const deps = d.deps(decider(j, 'vision')), call = deps.call;
-    deps.call = async (name, args, s) => name === 'computer_observe' ? { ...(await call(name, args, s) as object), truncated: true } : call(name, args, s);
+    deps.call = async (name, args, s) => name === 'computer_observe' ? { ...(await call(name, args, s) as object), truncated: true, screenshotAvailable: true,
+      observationStats: { visited: 200, candidates: 200, exported: 32, incomplete: false } } : call(name, args, s);
+    expect(await runVisionComputerUse({ goal: 'Click Save' }, deps, signal())).toMatchObject({ status: 'succeeded', steps: 1 });
+    expect(j.requests[0].assets).toBeDefined();
+    expect((j.steps()[0].state as any).screen).toBeDefined();
+  });
+
+  test('an unfinished sensitive-content scan still withholds the screenshot', async () => {
+    const d = device(), j = jev([{ op: 'CLICK', element: '1' }, { done: 0.9 }]);
+    const deps = d.deps(decider(j, 'vision')), call = deps.call;
+    deps.call = async (name, args, s) => name === 'computer_observe' ? { ...(await call(name, args, s) as object), truncated: true, screenshotAvailable: false,
+      observationStats: { visited: 150, candidates: 80, exported: 32, incomplete: true } } : call(name, args, s);
     expect(await runVisionComputerUse({ goal: 'Click Save' }, deps, signal())).toMatchObject({ status: 'succeeded', steps: 1 });
     expect(j.requests.every(r => r.assets === undefined)).toBe(true);
-    expect(Object.keys((j.steps()[0].questions.element as any).criteria).sort()).toEqual(['1', '2', 'NONE']);
+    expect((j.steps()[0].state as any).screen).toMatchObject({ screenshot: expect.stringContaining('withheld') });
   });
 
   test('types by clicking the field, selecting its text and typing, one action per completed step', async () => {
