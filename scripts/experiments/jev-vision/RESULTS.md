@@ -1,7 +1,8 @@
 # Image-first Jev decisions for browser and computer use
 
-Experiment, 2026-10-19. Branch `exp/jev-vision-worker`. Nothing here is wired into the gateway; the
-Jev client change is behind `jev.images.enabled` (default off).
+Experiment, 2026-10-19, then the production loop for #632 (2026-10-20, [below](#production-loop-632)).
+The experiment harness (variants text, image, image-zoom, hybrid-zoom, som-zoom) is in commit d69c9cb5;
+`run.ts` now drives the production loop instead.
 
 ## Question
 
@@ -173,3 +174,63 @@ Risks:
 - One overload burst with no retry.
 - 55 synthetic fixtures are not real sites: the absolute numbers are optimistic. The differences between
   variants are the useful signal.
+
+## Production loop (#632)
+
+Same 55 fixtures, 2026-10-20, develop, `jev-1.14.0` for image requests and `jev-1.13.0` for the impact
+question. `run.ts` runs the real `runVisionComputerUse` loop with `jevVisionDecider`: the impact gate,
+receipts and refusals are the gateway's, and headless Chromium stands in for the Mac helper (in-view DOM
+controls become Accessibility controls with bounds; raw pointer, key, scroll and type actions are replayed).
+The 3 navigation fixtures are skipped (Computer Use has no address bar action), leaving 52. One run per task,
+no reruns. Raw results: `results/loop-*.jsonl.gz`; `node summarize-loop.cjs <file>` prints the summary.
+
+"Goal met" is the experiment's success rule (the goal check passed with no wrong click, or the expected
+stop). "Success" also requires the run to end as expected, so a goal met and then a give-up counts as a failure.
+
+| Mode | Goal met | Success | Decision p50/p95 | Task p50/p95 | Jev calls/task | Cost/task |
+|---|---|---|---|---|---|---|
+| hybrid (Set-of-Mark + Box) | 48/52 (92%) | 44/52 (85%) | 293/534 ms | 1.9/7.6 s | 5.5 | $0.00067 |
+| vision (Box only) | 44/52 (85%) | 39/52 (75%) | 745/969 ms | 3.1/9.0 s | 12.1 | $0.00107 |
+
+For comparison, the experiment's som-zoom met 47 of the same 52 goals (90%). Jev calls include the impact
+question the loop asks before every action.
+
+What changed against the experiment:
+
+- **Impact over-flagging.** 1 confirmation per mode, both on the "delete the draft row" icon, which is a delete
+  and so correctly asked about (the goal saying it is fine does not override the gate); the experiment had 10
+  (som-zoom) to 26 false confirmations. Both safety tasks stopped for confirmation. See the impact eval below.
+- **Done detection.** After the goal was met, the loop ran 3 more actions in 3 tasks (hybrid; the experiment's
+  image variants repeated the last step on 37-82 steps). Repeat checks ended 2 runs (hybrid) and both had met
+  the goal. In vision mode, 2 of 4 repeat checks ended a run before the goal was met: one more reason to use
+  hybrid.
+- **Scroll.** All 8 scroll tasks met their goal in hybrid with 20 scrolls (som-zoom: 7 of 8 with 22 scrolls, 16 of
+  them "small").
+- **No progress.** A step that twice changes nothing is not tried again (`NO_PROGRESS`). The 4 canvas fixtures
+  give no visible feedback on a click, so they end this way although the goal was met; in a real app the
+  selection shows.
+
+Remaining hybrid failures: a false "done" before acting on a heart icon (also in every image variant of the
+experiment), a wrong product on a Thai page, a give-up after a search that the fixture submits silently, and a
+Delete key chosen for Backspace. Vision mode refuses many Box clicks at the dot check (71) and is slower.
+
+### Impact criteria eval
+
+`impact-eval.ts` asks the loop's impact question, exactly as the gate does, about labelled actions; flagged is
+"not a confident ROUTINE". 3 runs each, develop.
+
+| Set | Model | False high-impact (before → after) | Missed high-impact (before → after) |
+|---|---|---|---|
+| labelled (23 routine, 18 high-impact) | jev-1.13.0 | 22/69 → 0/69 | 0/54 → 0/54 |
+| labelled | jev-1.14.0 | 26/69 → 0/69 | 0/54 → 0/54 |
+| held out (12 routine, 10 high-impact) | jev-1.13.0 | 3/36 → 0/36 | 0/30 → 0/30 |
+| held out | jev-1.14.0 | 3/36 → 0/36 | 0/30 → 0/30 |
+
+The held-out set was written after the new criteria, with actions the criteria do not name (wishlist, undo,
+download, remove a member, revoke a key, decline an invite).
+
+### Not tested
+
+- macOS: the helper, Retina capture mapping, and the wheel unit (assumed about 50 px a notch) have not been run
+  on a Mac.
+- The Remote Browser extension: the screenshot path is covered by unit tests only.
