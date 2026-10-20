@@ -53,6 +53,7 @@ import { createSkillsRouter } from './skills-router';
 import { createPackagesRouter } from './packages';
 import { createWebhooksRouter } from './webhooks-router';
 import { createConnectorsRouter } from './connectors-router';
+import { createConnectorProxyRouter, handleConnectorUpgrade, setConnectorProxyOrigin } from '../connectors/proxy';
 import { createOauthConnectorsRouter, createOauthCallbackRouter } from './oauth-connectors-router';
 import { createCustomConnectorsStore, type CustomConnectorsStore } from '../connectors/custom-connectors-store';
 import { pendingOAuthStore } from '../connectors/pending-oauth-store';
@@ -635,6 +636,11 @@ export class GatewayRouter {
       '/webhooks',
       createWebhooksRouter(this.agents, this.gatewayConfig?.gateway?.logDir ?? '/tmp'),
     );
+
+    // Loopback MCP proxy for connector credentials (#635). Before the JSON parser:
+    // it forwards the agent's request body as raw bytes. Authenticated by the
+    // per-spawn grant in its own handler, not by an API key.
+    this.app.use(createConnectorProxyRouter());
 
     // Jev evaluation parses its own body after authentication, against a limit
     // that fits the configurable maxInputBytes (see jev-router.ts).
@@ -1608,6 +1614,7 @@ export class GatewayRouter {
     }
     return new Promise((resolve, reject) => {
       this.server = this.app.listen(port, host, () => {
+        setConnectorProxyOrigin(this.server?.address());
         resolve();
       });
       this.server.on('error', (err: NodeJS.ErrnoException) => {
@@ -1649,6 +1656,7 @@ export class GatewayRouter {
 
       this.server.on('upgrade', (req: http.IncomingMessage, socket, head) => {
         if (this.voiceApi?.upgrade(req, socket, head)) return;
+        if (handleConnectorUpgrade(req, socket, head)) return;
         const url = req.url ?? '';
         const match = url.match(/\/api\/v1\/agents\/([^/?]+)\/pty-stream(?:\?.*)?$/);
         if (!match) {

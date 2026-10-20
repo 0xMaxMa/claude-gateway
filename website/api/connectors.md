@@ -3,8 +3,9 @@
 A **connector** is an MCP server the gateway injects into a Claude Code session's
 `mcp-config.json`. The gateway owns three things and nothing else: the connector
 definition, the per-connector secret, and the per-agent enablement. At spawn, an
-enabled + connected connector is resolved into an `mcpServers` entry and Claude Code
-then talks to the real MCP server directly.
+enabled + connected connector is resolved into an `mcpServers` entry. The secret stays
+in the gateway: Claude Code reaches the connector through the gateway (see
+[Credential isolation](#credential-isolation)).
 
 Every connector lives in `gateway.customConnectors` in `config.json` — admin-trusted
 raw `mcpServers` JSON, **not** code-reviewed. Connectors differ along exactly one axis,
@@ -56,6 +57,114 @@ Invalid connector id`, ahead of any lookup.
 **Auth levels:** read routes take any valid API key; every mutating route requires an
 **admin** key (`admin: true`). The gateway mounts connector management routes only when `gateway.api.keys` is configured.
 
+### Credential isolation {#credential-isolation}
+
+The agent, and every tool or shell command it runs, can read the MCP config files the
+gateway writes for it. So for an HTTP connector (`type: "http"` or `"streamable-http"`) whose placeholders sit only in
+`url` and `headers`, the file holds a proxy entry instead of the substituted one:
+
+```json
+{
+  "type": "http",
+  "url": "http://127.0.0.1:10850/internal/mcp/connectors/<connectorId>",
+  "headers": { "Authorization": "Bearer <per-session grant>" }
+}
+```
+
+The URL is the address the gateway listens on. The grant is random, held only in
+gateway memory, bound to the agent's enabled connectors, and revoked when the
+session or worker stops; every spawn, respawn or resume gets a new one. The grant
+is the credential: the proxy also refuses non-local connections and requests a
+reverse proxy forwarded (`X-Forwarded-For` / `Forwarded`), but treat a grant like
+the session's own API key. On every request it resolves the connector again from
+`gateway.customConnectors` and `mcp-token.env`, then forwards the MCP request to
+the configured `url` with the configured headers. The caller cannot change the
+upstream URL or add headers. A redirect to the same origin (a trailing-slash rewrite,
+a moved path) is followed with the configured headers, as Claude Code's own transport
+did: a `GET`/`DELETE` follows any such redirect, and a `POST` follows a `307`/`308`
+with its body (up to 5 hops). A redirect to any other origin is refused with `502`,
+so the credential is never sent somewhere the connector config does not name. So a rotated
+or refreshed token applies on the next call, and a disconnected, paused, or newly
+out-of-scope connector fails with `403` even mid-session. Nothing changes for the operator: no new
+configuration, no re-connect.
+
+A stdio or SSE connector, whose secret sits in `env`, `args` or `headers`, gets a
+launcher entry instead:
+
+```json
+{
+  "command": "/path/to/node",
+  "args": ["<gateway>/mcp/connector-launcher.mjs"],
+  "env": {
+    "GATEWAY_CONNECTOR_URL": "http://127.0.0.1:10850/internal/mcp/connectors/<connectorId>/stdio",
+    "GATEWAY_CONNECTOR_GRANT": "<per-session grant>"
+  }
+}
+```
+
+Claude Code starts the launcher as the connector's stdio server. The launcher
+upgrades a connection to the gateway with the grant and sends the working directory
+and environment Claude Code gave it. The gateway resolves the connector again and
+spawns `mcp/connector-bridge.ts`, writing the resolved entry to its stdin. For a stdio
+entry, the bridge starts the server with a small allowlist of non-secret runtime
+variables from the launcher's environment plus the entry's explicit `env`, in the
+launcher's working directory. Other inherited environment variables are not passed
+to connectors. Before forwarding each MCP operation, the bridge rechecks the live
+pause and agent-scope settings; an operation already accepted can finish, while the
+next one is rejected after a pause or scope change. For an SSE entry, it forwards each
+JSON-RPC message to the configured `url` with the configured headers, under the same
+redirect policy as the HTTP proxy: same-origin redirects are followed, a redirect to
+another origin fails the request. The same grant rules apply. A revoked grant stops running bridges, and a disconnected or disabled
+connector fails on its next launch.
+
+The launched server's stderr, and the bridge's own errors, go to the gateway log as
+they arrive, one line per entry prefixed `connector-proxy: agent=<agentId>
+connector=<connectorId> stderr:` (capped at 256 KiB per launch). Before, Claude Code
+kept a stdio server's stderr in its own per-server MCP log; that log no longer
+receives it.
+
+A placeholder in any other field of the entry is resolved in the gateway too. That
+field is left out of the file, because no transport the gateway drives reads it.
+For example, an `env` block on an HTTP entry.
+
+**Legacy app-agent containers.** An app-agent's own Claude Code session runs inside
+its container, where the gateway's loopback address is unreachable. Every connector
+of that session, HTTP included, gets a launcher entry that connects through a unix
+socket the gateway binds in the bind-mounted workspace
+(`/workspace/.gateway-connectors/<random>.sock`, mode `0600`). The bridge runs inside
+the same container with `docker exec`, so stdio servers and upstream URLs see the
+container's filesystem and network as before. Its code is sent over the same pipe as
+the resolved entry, so no file the agent can edit receives the secret. The directory
+holds a `.gitignore` of `*`, so an agent workspace that is a git repository never
+tracks it, and sockets a crashed gateway left behind are removed when the next session
+prepares it.
+
+This needs Node in the container. The gateway checks for it when the session spawns.
+A container without Node keeps the substituted entries it had before, and so does a
+workspace whose socket path exceeds the 107-byte unix socket limit. The gateway logs a
+warning and reports those connectors with `secretExposure: "agent-readable"` and
+`exposedAgents` naming the agent, until that agent's next spawn reaches the gateway.
+
+**Still written to the file.** Three cases keep the direct path they had before, are
+still written resolved, and are reported with `secretExposure: "agent-readable"`:
+
+- an entry with a `headersHelper`, a command that only Claude Code runs and whose
+  headers it adds to each request;
+- an entry with an `oauth` block, which starts Claude Code's own sign-in against the
+  entry's `url`;
+- a `ws` transport, which the gateway cannot carry.
+
+The first two apply whether or not the field holds a placeholder: behind the proxy
+the helper's headers would be dropped, and sign-in would target the proxy URL.
+
+**Residual exposure.** A stdio server runs as the agent's OS user and reads its secret
+from its own environment or command line. A process of that user can read
+`/proc/<pid>/environ`, and any local user can read `/proc/<pid>/cmdline`. That was
+true before this change, and it stays true. The change removes the copy in the config
+file: the secret is no longer in any file the agent can read, list or upload. The SSE
+bridge receives its headers over a pipe, so they are not in any process's
+environment or arguments.
+
 ---
 
 ## GET /api/v1/connectors {#get-apiv1connectors}
@@ -93,6 +202,8 @@ curl -s -H "X-Api-Key: admin-key-456" \
 | `connected` | Every required secret is present (always `true` for `credentialOwner: "none"`) |
 | `defaultEnabled` | Present when the entry stores one. `false` means an agent gets the connector only with its own `{"enabled": true}` |
 | `paused` | Present and `true` only while the connector is paused (see [`PATCH /:id`](#patch-apiv1connectorsid)). A paused connector still reports `connected: true` |
+| `secretExposure` | `"agent-readable"` when the connector's secret is still written into a session's MCP config file: for every agent when the entry has a `headersHelper` or `oauth` field or a `ws` transport, or for the agents in `exposedAgents` (see [Credential isolation](#credential-isolation)). Absent when the secret stays in the gateway. Also returned by `GET /api/v1/connectors/:id/status` |
+| `exposedAgents` | With `secretExposure`, when only some agents' live sessions write the secret: agents with at least one active session that could not use the gateway route (an app-agent container without Node, or a socket path too long to bind). Sorted agent ids; in memory, so empty again after a gateway restart until those sessions spawn |
 | `refresh` | **Absent when healthy.** Present only while a `gateway`-owned connector's background token refresh is failing — either transiently (a network error, DNS, a 5xx) or because the authorization server itself refused the grant. See below. Never present for any other owner: this gateway holds a `refresh_token` for none of them. |
 
 `connected` is computed purely from secret presence, and a transient refresh
