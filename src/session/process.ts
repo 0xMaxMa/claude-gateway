@@ -2,6 +2,7 @@ import { sanitizeJevChildEnv, jevCredentialEnvNames } from '../jev/child-env';
 import { workerEnvironment } from './worker-environment';
 import { ProcessDiagnostics, TurnOutcome } from './process-diagnostics';
 import { prepareManagedConnectors } from './managed-connectors';
+import { agentFacingConnectors, revokeConnectorGrant } from '../connectors/proxy';
 import { RequestToolCapture, RequestToolSchemas } from './request-tool-capture';
 import type { InputImage } from './input-image';
 import { prepareContainerProfile, stopContainerProfile, CONTAINER_SUPERVISOR, containerNode, assertContainerBinding } from '../orchestration/container';
@@ -739,6 +740,8 @@ export class SessionProcess extends EventEmitter {
   /** Host file holding the appended system prompt (see writeSystemPromptFile). */
   private systemPromptPath?: string;
   private managedConnectorPaths = new Set<string>();
+  /** Loopback proxy grant (connectors/proxy.ts) the current spawn's MCP config holds. */
+  private connectorGrant?: string;
   /** `.sessions/<id>`, once a spawn without a runtime profile has written its mcp-config.json there. */
   private sessionDirPath?: string;
 
@@ -831,6 +834,9 @@ export class SessionProcess extends EventEmitter {
   }
 
   private writeMcpConfig(): string | null {
+    // A respawn replaces the config, so the handle the previous one held goes too.
+    revokeConnectorGrant(this.connectorGrant);
+    this.connectorGrant = undefined;
     if (this.runtimeProfile) {
       // Orchestrators dispatch execution; only eligible workers receive connectors.
       // App and isolated workers must never receive host connector credentials
@@ -838,7 +844,8 @@ export class SessionProcess extends EventEmitter {
       // Isolate mode (#609) is default-deny: connectors are agent-wide accounts.
       if (this.runtimeProfile.role === 'agent' || this.agentConfig.allow_tools === false || this.runtimeProfile.connectorsAllowed === false || this.agentConfig.type === 'app-agent' || this.agentConfig.isolateMemory || (this.runtimeProfile.role === 'worker' && !this.runtimeProfile.hostExecution)) return this.runtimeProfile.mcpConfigPath;
       const ticket = JSON.parse(fs.readFileSync(this.runtimeProfile.mcpConfigPath, 'utf8'));
-      const { servers, connectors } = prepareManagedConnectors(this.agentConfig, this.gatewayConfig, this.runtimeProfile, this.managedConnectorPaths);
+      const { servers, connectors, grant } = prepareManagedConnectors(this.agentConfig, this.gatewayConfig, this.runtimeProfile, this.managedConnectorPaths);
+      this.connectorGrant = grant;
       this.spawnedConnectors = new Map(Object.entries(connectors).map(([id, server]) => [id, connectorFingerprint(server)]));
       const configPath = path.join(path.dirname(this.runtimeProfile.mcpConfigPath), 'managed-connectors.json');
       const mcpServers = { ...servers, ...ticket.mcpServers };
@@ -873,12 +880,20 @@ export class SessionProcess extends EventEmitter {
 
     // Connectors enabled for THIS agent AND connected (every secret present in
     // mcp-token.env). Resolved fresh each spawn so a web "connect" is picked up
-    // without a daemon restart. Secrets land only in this 0600 mcp-config.json.
+    // without a daemon restart. The resolved form only feeds the fingerprints:
+    // the file gets agent-facing entries, so an HTTP connector's secret stays in
+    // the gateway behind the loopback proxy (#635).
     const connectorServers = isolated ? {} : resolveEnabledConnectors(
       this.agentConfig,
       this.gatewayConfig.gateway.customConnectors,
       this.gatewayConfig.gateway.connectorsDefaultEnabled ?? true,
     );
+    // An app-agent's CLI runs inside its container, where the gateway's loopback
+    // address is not reachable, so it keeps talking to the upstream directly.
+    const { servers: agentFacing, grant } = this.isContainerAgent()
+      ? { servers: connectorServers, grant: undefined }
+      : agentFacingConnectors(this.agentConfig, this.gatewayConfig, connectorServers);
+    this.connectorGrant = grant;
     const spawnedConnectors = new Map<string, string>();
     for (const [name, server] of Object.entries(connectorServers)) {
       // Defence in depth: slugify() and /oauth/receive both refuse these ids now,
@@ -894,7 +909,7 @@ export class SessionProcess extends EventEmitter {
             ` the user/project Claude Code config for agent=${this.agentConfig.id}`,
         );
       }
-      extraServers[name] = server;
+      extraServers[name] = agentFacing[name];
       spawnedConnectors.set(name, connectorFingerprint(server));
     }
     this.spawnedConnectors = spawnedConnectors;
@@ -2243,7 +2258,9 @@ export class SessionProcess extends EventEmitter {
       systemPrompt: this.systemPromptPath,
       connectors: [...this.managedConnectorPaths],
       managedMcpConfig: this.managedMcpConfigPath,
+      connectorGrant: this.connectorGrant,
     };
+    this.connectorGrant = undefined;
     this.systemPromptPath = undefined;
     this.managedConnectorPaths = new Set();
     this.managedMcpConfigPath = undefined;
@@ -2278,7 +2295,7 @@ export class SessionProcess extends EventEmitter {
       }
     }
     // mcp-config.json under here holds fully-substituted secrets (channel bot
-    // tokens, GATEWAY_API_KEY, connector OAuth tokens) — it must not outlive
+    // tokens, GATEWAY_API_KEY, stdio connector secrets) — it must not outlive
     // the session that needed it (issue #460). Recreated automatically on the
     // next spawn, so removing it here is safe across restarts. Deferred until
     // the process has actually exited below (not removed up front here) — the
@@ -2287,6 +2304,7 @@ export class SessionProcess extends EventEmitter {
     // window immediately after this point, and must not find it gone under it.
     // A newer spawn that wrote the shared directory owns it now; its stop removes it.
     const removeSessionDir = (): void => {
+      revokeConnectorGrant(owned.connectorGrant);
       const reclaimed = (file: string): boolean => this.managedConnectorPaths.has(file) || file === this.managedMcpConfigPath;
       for (const file of [...owned.connectors, owned.managedMcpConfig, owned.systemPrompt]) {
         if (file && !reclaimed(file)) { try { fs.rmSync(file, { force: true }); } catch {} }

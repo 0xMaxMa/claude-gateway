@@ -18,6 +18,7 @@ import {
   isValidConnectorId,
   isReservedPlaceholder,
   isReservedConnectorId,
+  exposesSecretToAgent,
 } from '../connectors/custom';
 import { createCustomConnectorsStore, type CustomConnectorsStore } from '../connectors/custom-connectors-store';
 import { internalSecretKeysOf } from '../connectors/oauth-refresh-sweep';
@@ -186,7 +187,7 @@ export function createConnectorsRouter(
       // them and every counter would read a constant 0.
       const refresh =
         custom.credentialOwner === 'gateway' ? refreshStatusOf(req.params.id, tokenEnv) : undefined;
-      res.json({ id: req.params.id, connected, ...(custom.defaultEnabled !== undefined ? { defaultEnabled: custom.defaultEnabled } : {}), ...(refresh ? { refresh } : {}) });
+      res.json({ id: req.params.id, connected, ...(custom.defaultEnabled !== undefined ? { defaultEnabled: custom.defaultEnabled } : {}), ...(refresh ? { refresh } : {}), ...(exposesSecretToAgent(custom) ? { secretExposure: 'agent-readable' } : {}) });
     } catch (err) {
       console.error(
         `connectors-router: status for connector=${req.params.id} failed: ${(err as Error).message}`,

@@ -63,6 +63,12 @@ export interface ConnectorStatus {
   /** CustomConnectorEntry.sourceUrl — where the user says the config came from. */
   repoUrl?: string;
   /**
+   * 'agent-readable' when this connector's secret is still written into the agent's
+   * MCP config file: a stdio or SSE server whose secret sits in env/args the gateway's
+   * loopback proxy cannot carry. Omitted when the secret stays in the gateway.
+   */
+  secretExposure?: 'agent-readable';
+  /**
    * Present only while an oauth connector's background token refresh is failing —
    * see oauth-refresh-sweep.ts, which distinguishes the two kinds below.
    *

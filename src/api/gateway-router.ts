@@ -53,6 +53,7 @@ import { createSkillsRouter } from './skills-router';
 import { createPackagesRouter } from './packages';
 import { createWebhooksRouter } from './webhooks-router';
 import { createConnectorsRouter } from './connectors-router';
+import { createConnectorProxyRouter } from '../connectors/proxy';
 import { createOauthConnectorsRouter, createOauthCallbackRouter } from './oauth-connectors-router';
 import { createCustomConnectorsStore, type CustomConnectorsStore } from '../connectors/custom-connectors-store';
 import { pendingOAuthStore } from '../connectors/pending-oauth-store';
@@ -635,6 +636,11 @@ export class GatewayRouter {
       '/webhooks',
       createWebhooksRouter(this.agents, this.gatewayConfig?.gateway?.logDir ?? '/tmp'),
     );
+
+    // Loopback MCP proxy for connector credentials (#635). Before the JSON parser:
+    // it forwards the agent's request body as raw bytes. Authenticated by the
+    // per-spawn grant in its own handler, not by an API key.
+    this.app.use(createConnectorProxyRouter());
 
     // Jev evaluation parses its own body after authentication, against a limit
     // that fits the configurable maxInputBytes (see jev-router.ts).

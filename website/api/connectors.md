@@ -3,8 +3,9 @@
 A **connector** is an MCP server the gateway injects into a Claude Code session's
 `mcp-config.json`. The gateway owns three things and nothing else: the connector
 definition, the per-connector secret, and the per-agent enablement. At spawn, an
-enabled + connected connector is resolved into an `mcpServers` entry and Claude Code
-then talks to the real MCP server directly.
+enabled + connected connector is resolved into an `mcpServers` entry. An HTTP
+connector's secret stays in the gateway: Claude Code talks to it through the
+gateway's loopback proxy (see [Credential isolation](#credential-isolation)).
 
 Every connector lives in `gateway.customConnectors` in `config.json` — admin-trusted
 raw `mcpServers` JSON, **not** code-reviewed. Connectors differ along exactly one axis,
@@ -56,6 +57,34 @@ Invalid connector id`, ahead of any lookup.
 **Auth levels:** read routes take any valid API key; every mutating route requires an
 **admin** key (`admin: true`). The gateway mounts connector management routes only when `gateway.api.keys` is configured.
 
+### Credential isolation {#credential-isolation}
+
+The agent, and every tool or shell command it runs, can read the MCP config files the
+gateway writes for it. So for an HTTP connector (`type: "http"` or `"streamable-http"`) whose placeholders sit only in
+`url` and `headers`, the file holds a proxy entry instead of the substituted one:
+
+```json
+{
+  "type": "http",
+  "url": "http://127.0.0.1:10850/internal/mcp/connectors/<connectorId>",
+  "headers": { "Authorization": "Bearer <per-session grant>" }
+}
+```
+
+The grant is random, held only in gateway memory, bound to the agent's enabled
+connectors, and revoked when the session or worker stops. The proxy accepts only
+same-host connections. On every request it resolves the connector again from
+`config.json` and `mcp-token.env`, then forwards the MCP request to the configured
+`url` with the configured headers. The caller cannot change the upstream URL or add
+headers, and the proxy refuses upstream redirects. So a rotated or refreshed token
+applies on the next call, and a disconnected or disabled connector fails with `403`
+even mid-session. Nothing changes for the operator: no new configuration, no
+re-connect.
+
+A stdio or SSE connector whose secret sits in `env`, `args` or SSE `headers` cannot
+go through this proxy. It still receives the substituted values in its config file,
+works exactly as before, and is reported with `secretExposure: "agent-readable"`.
+
 ---
 
 ## GET /api/v1/connectors {#get-apiv1connectors}
@@ -91,6 +120,7 @@ curl -s -H "X-Api-Key: admin-key-456" \
 |-------|-------------|
 | `credentialOwner` | `none` \| `static` \| `gateway` \| `external` — see the table above. Also tells a UI which way to offer connecting: a paste-token box (`static`), a "Sign in" link pointing at `/oauth/start` (`gateway`), or neither |
 | `connected` | Every required secret is present (always `true` for `credentialOwner: "none"`) |
+| `secretExposure` | `"agent-readable"` when the connector's secret is still written into the agent's MCP config file (see [Credential isolation](#credential-isolation)). Absent when the secret stays in the gateway. Also returned by `GET /api/v1/connectors/:id/status` |
 | `refresh` | **Absent when healthy.** Present only while a `gateway`-owned connector's background token refresh is failing — either transiently (a network error, DNS, a 5xx) or because the authorization server itself refused the grant. See below. Never present for any other owner: this gateway holds a `refresh_token` for none of them. |
 
 `connected` is computed purely from secret presence, and a transient refresh

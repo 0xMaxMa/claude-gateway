@@ -4,6 +4,8 @@
  * not code — see CustomConnectorEntry's doc comment in connectors/types.ts.
  */
 
+import type { CustomConnectorEntry } from './types';
+
 const PLACEHOLDER_RE = /\{([a-zA-Z_][a-zA-Z0-9_]*)\}/g;
 
 /**
@@ -155,4 +157,26 @@ export const MAX_CONNECTOR_ID_LENGTH = 64;
 
 export function isValidConnectorId(id: string): boolean {
   return id.length <= MAX_CONNECTOR_ID_LENGTH && CONNECTOR_ID_RE.test(id);
+}
+
+/** True when this connector's secret stays in the gateway behind the loopback
+ * MCP proxy (connectors/proxy.ts) instead of being written into an mcp-config file.
+ * Only `url` and `headers` reach the upstream through the proxy, so an entry with a
+ * placeholder anywhere else keeps its resolved form rather than silently losing it. */
+export function isProxiedConnector(entry: CustomConnectorEntry | undefined): boolean {
+  if (!entry || !Array.isArray(entry.secretNames) || !entry.secretNames.length) return false;
+  if (!entry.config || !isStreamableHttpType(entry.config.type)) return false;
+  const { url: _url, headers: _headers, ...rest } = entry.config;
+  return extractPlaceholders(rest).length === 0;
+}
+
+/** The streamable-HTTP transport, under either name a pasted mcpServers entry uses. */
+export function isStreamableHttpType(type: unknown): boolean {
+  return type === 'http' || type === 'streamable-http';
+}
+
+/** True when resolving this connector still writes its secret into an agent-readable
+ * file: a stdio or SSE server whose secret sits in env/args/headers the proxy cannot carry. */
+export function exposesSecretToAgent(entry: CustomConnectorEntry): boolean {
+  return Array.isArray(entry.secretNames) && entry.secretNames.length > 0 && !isProxiedConnector(entry);
 }
