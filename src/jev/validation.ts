@@ -1,14 +1,12 @@
 import { validateBrowserIntegration } from './browser-connector';
 import { isReservedJevCredentialEnv, jevCredentialEnvNames } from './child-env';
 import { ROUNDING_EPSILON, choiceAtTop, roundedHundredths } from './distribution';
-import { JevConfig, JevError, JevImageAsset, JevRequest, JevResult } from './types';
+import { JEV_IMAGE_MAX_PIXELS, JEV_IMAGE_MAX_SIDE, JEV_IMAGE_MIN_PIXELS, JEV_IMAGE_MIN_SIDE, JevConfig, JevError, JevImageAsset, JevRequest, JevResult } from './types';
 const object = (v: unknown): v is Record<string, any> => Boolean(v) && typeof v === 'object' && !Array.isArray(v);
 const text = (v: unknown): v is string => typeof v === 'string' && v.length > 0 && v.length <= 1024;
 const probability = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 1;
 const content = (v: unknown): boolean => typeof v === 'string' || Array.isArray(v) || object(v);
 const bad = (message: string): never => { throw new JevError('INVALID_REQUEST', message); };
-// TypeSafe image limits (https://docs.typesafe.ai/images): out-of-range images are rejected, never resized.
-export const JEV_IMAGE_MIN_SIDE = 280, JEV_IMAGE_MAX_SIDE = 1568, JEV_IMAGE_MIN_PIXELS = 78400, JEV_IMAGE_MAX_PIXELS = 2458624;
 const IMAGE_MAX_BYTES = 16 << 20, IMAGES_MAX_BYTES = 24 << 20, REFERENCE_MAX_BYTES = 1024, REFERENCES_MAX_BYTES = 65536;
 /** Pixel size read from the PNG IHDR or a JPEG SOF segment; undefined for anything else, including animated PNG. */
 export function imageDimensions(bytes: Buffer, format: JevImageAsset['format']): { width: number; height: number } | undefined {

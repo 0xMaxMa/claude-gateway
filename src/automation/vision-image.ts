@@ -1,5 +1,4 @@
-import { JEV_IMAGE_MAX_SIDE, JEV_IMAGE_MIN_SIDE } from '../jev/validation';
-import type { JevBox } from '../jev/types';
+import { JEV_IMAGE_MAX_SIDE, JEV_IMAGE_MIN_SIDE, type JevBox } from '../jev/types';
 
 /**
  * Screenshots prepared for Jev image questions. Every rectangle and point is in the caller's coordinate space
@@ -10,8 +9,8 @@ export interface Point { x: number; y: number }
 export interface Rect { x: number; y: number; width: number; height: number }
 /** A Set-of-Mark label: `id` drawn at the control's top-left corner with an outline around it. */
 export interface Mark { id: string; rect: Rect }
-/** One image as Jev receives it. `origin` and `unitsPerPixel` map its pixels back to the coordinate space. */
-export interface JevImage { data: string; format: 'jpg'; width: number; height: number; origin: Point; unitsPerPixel: number }
+/** One image as Jev receives it. `origin` and `unitsPerPixel` (per axis) map its pixels back to the coordinate space. */
+export interface JevImage { data: string; format: 'jpg'; width: number; height: number; origin: Point; unitsPerPixel: Point }
 
 type Sharp = typeof import('sharp').default;
 let sharpModule: Sharp | undefined;
@@ -68,11 +67,11 @@ export class ScreenImage {
     const padRight = Math.max(0, JEV_IMAGE_MIN_SIDE - outWidth), padBottom = Math.max(0, JEV_IMAGE_MIN_SIDE - outHeight);
     const data = await this.sharp(drawn).extract({ left, top, width, height }).resize(outWidth, outHeight, { fit: 'fill' })
       .extend({ right: padRight, bottom: padBottom, background: '#808080' }).flatten({ background: '#808080' }).jpeg({ quality: 85 }).toBuffer();
-    return { data: data.toString('base64'), format: 'jpg', width: outWidth + padRight, height: outHeight + padBottom, origin: { x: left / sx, y: top / sy }, unitsPerPixel: 1 / (sx * scale) };
+    return { data: data.toString('base64'), format: 'jpg', width: outWidth + padRight, height: outHeight + padBottom, origin: { x: left / sx, y: top / sy }, unitsPerPixel: { x: 1 / (sx * scale), y: 1 / (sy * scale) } };
   }
 }
 
 /** The center of a normalized Jev box, in the coordinate space. */
 export function boxCenter(image: JevImage, box: JevBox): Point {
-  return { x: image.origin.x + (box.left + box.right) / 2 * image.width * image.unitsPerPixel, y: image.origin.y + (box.top + box.bottom) / 2 * image.height * image.unitsPerPixel };
+  return { x: image.origin.x + (box.left + box.right) / 2 * image.width * image.unitsPerPixel.x, y: image.origin.y + (box.top + box.bottom) / 2 * image.height * image.unitsPerPixel.y };
 }

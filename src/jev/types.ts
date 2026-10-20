@@ -15,6 +15,8 @@ export type JevAnswer =
   | { type: 'score'; score: number; confidence: number; probabilities: Record<string, number>; legend: Record<string, string> }
   | { type: 'box'; box: JevBox; confidence: number };
 export interface JevRequest { state: JevContent; questions: Record<string, JevQuestion>; assets?: Record<string, JevImageAsset>; requestId?: string }
+// TypeSafe image limits (https://docs.typesafe.ai/images): out-of-range images are rejected, never resized.
+export const JEV_IMAGE_MIN_SIDE = 280, JEV_IMAGE_MAX_SIDE = 1568, JEV_IMAGE_MIN_PIXELS = 78400, JEV_IMAGE_MAX_PIXELS = 2458624;
 /** The first Jev release that answers Box questions; the pinned model for image requests. */
 export const JEV_IMAGE_MODEL = 'jev-1.14.0';
 export interface JevConfig {

@@ -801,7 +801,8 @@ scroll, done or give up) and all of its arguments.
   drawn at the final point; a dot that is not on the target clicks nothing.
 - Typing clicks the field, selects its text (`cmd+a`) when it is not empty, and
   types text taken verbatim from the goal; a key is pressed the counted number of
-  times. Each of these runs only after the previous one completed.
+  times. Each of these runs only after the previous one completed, and a run that
+  returns control after each action returns after the last of them.
 - Scrolling moves one screen (80% of the window) or several.
 - Sensitive controls are painted out before the image is encoded. If a sensitive
   control has no bounds, nothing is sent and the run stops with

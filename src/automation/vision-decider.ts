@@ -193,7 +193,10 @@ export function mapComputerCall(name: string, input: unknown, caps: RawCapabilit
 }
 
 /** A Messages response, trimmed to what the loop reads. */
-export interface VisionTurn { content: unknown[]; stopReason?: string }
+export interface VisionTurn { content: unknown[]; stopReason?: string;
+  /** More actions of the same decision follow (a Jev click, select-all and type): a run that returns control after
+   * each action returns after the last of them instead. */
+  continues?: boolean }
 /** What the loop is looking at, for deciders that do not read the conversation (Jev): the goal, the observation and
  * its screenshot, and whether the decider's previous call ran an action (`completed`) or not (`not_run`). */
 export interface VisionView { goal: string; state: ComputerState; shot: VisionScreenshot; previous?: 'completed' | 'not_run' }
@@ -501,7 +504,7 @@ export async function runVisionComputerUse(raw: unknown, deps: VisionDependencie
             steps++; refusals = 0; previous = 'completed';
             lastAction = { kind: action.kind, ...(action.kind === 'key_chord' ? { key: action.keys.join('+') } : {}), ...(action.kind === 'scroll' ? { direction: action.dy ? (action.dy > 0 ? 'down' : 'up') : (action.dx! > 0 ? 'right' : 'left') } : {}) };
             emit('acted', { ...summary, operationId, outcome: 'completed', elapsedMs: Date.now() - started });
-            if (steps >= input.maxSteps || input.yieldAfterAction) {
+            if (steps >= input.maxSteps || (input.yieldAfterAction && !turn.continues)) {
               try { await observe(); await deps.screenshot(last!, runSignal); } catch { check(); checkInterruption(deps.interruptSignal); emit('waiting', { reason: 'GOAL_EVIDENCE_UNAVAILABLE' }); }
               // The agent decides the next step on the new screen, as after an Accessibility action.
               return input.yieldAfterAction ? result('needs_input', 'COMMAND_WAITING_INPUT') : result('blocked', 'STEP_LIMIT');

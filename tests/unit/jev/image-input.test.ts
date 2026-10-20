@@ -93,6 +93,11 @@ describe('screenshots prepared for Jev', () => {
     const center = boxCenter(image, { top: 0.5, bottom: 0.5, left: 0.25, right: 0.25 });
     expect(center.x).toBeCloseTo(360); expect(center.y).toBeCloseTo(450);
   });
+  it('maps each axis with its own scale when the capture is not the coordinate space scaled evenly', async () => {
+    const image = await (await ScreenImage.open(await capture(2560, 1200), { width: 1280, height: 800 })).render();
+    const center = boxCenter(image, { top: 0.5, bottom: 0.5, left: 0.5, right: 0.5 });
+    expect(center.x).toBeCloseTo(640); expect(center.y).toBeCloseTo(400);
+  });
   it('pads a small capture to the minimum side without moving its origin', async () => {
     const image = await (await ScreenImage.open(await capture(200, 120, 'jpeg'))).render();
     expect([image.width, image.height]).toEqual([280, 280]);
@@ -107,8 +112,8 @@ describe('screenshots prepared for Jev', () => {
   it('paints masked rectangles before marks or crops can show them', async () => {
     const screen = await ScreenImage.open(await capture(1280, 800), { width: 1280, height: 800 }, [{ x: 100, y: 100, width: 200, height: 50 }]);
     for (const image of [await screen.render({ marks: [{ id: '1', rect: { x: 400, y: 400, width: 50, height: 20 } }] }), await screen.render({ crop: { x: 0, y: 0, width: 400, height: 400 } })]) {
-      const raw = Buffer.from(image.data, 'base64'), unit = 1 / image.unitsPerPixel;
-      const at = await sharp(raw).extract({ left: Math.round((200 - image.origin.x) * unit), top: Math.round((125 - image.origin.y) * unit), width: 1, height: 1 }).raw().toBuffer();
+      const raw = Buffer.from(image.data, 'base64');
+      const at = await sharp(raw).extract({ left: Math.round((200 - image.origin.x) / image.unitsPerPixel.x), top: Math.round((125 - image.origin.y) / image.unitsPerPixel.y), width: 1, height: 1 }).raw().toBuffer();
       expect([...at]).toEqual([0, 0, 0]);
     }
   });
@@ -116,7 +121,7 @@ describe('screenshots prepared for Jev', () => {
 
 describe('image-first vision step', () => {
   // A PNG header is enough for request validation; the step module never decodes it.
-  const screen = { data: png(1280, 800).toString('base64'), format: 'png' as unknown as 'jpg', width: 1280, height: 800, origin: { x: 0, y: 0 }, unitsPerPixel: 1 };
+  const screen = { data: png(1280, 800).toString('base64'), format: 'png' as unknown as 'jpg', width: 1280, height: 800, origin: { x: 0, y: 0 }, unitsPerPixel: { x: 1, y: 1 } };
   const input = (over: Partial<VisionStepInput> = {}): VisionStepInput => ({ goal: 'Save the document', history: [], screen, point: true, ...over });
   const choice = (choice: string, p: Record<string, number>) => ({ type: 'choice' as const, choice, confidence: p[choice], probabilities: p });
   const box = { top: 0.2, bottom: 0.3, left: 0.1, right: 0.2 };

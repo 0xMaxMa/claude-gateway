@@ -30,7 +30,7 @@ type Call = { name: string; input: Record<string, unknown> };
 export const WHEEL_PX = 50;
 export const scrollUnits = (amount: 'SCREEN' | 'FAR', height: number) => Math.min(50, Math.max(1, Math.round(0.8 * height / WHEEL_PX)) * (amount === 'FAR' ? 3 : 1));
 const MAX_ELEMENTS = 100;
-const tool = (call: Call): VisionTurn => ({ content: [{ type: 'tool_use', id: `jev_${randomUUID()}`, name: call.name, input: call.input, ...(call.name === 'finish' ? {} : { toolset_name: 'computer' }) }], stopReason: 'tool_use' });
+const tool = (call: Call, continues = false): VisionTurn => ({ content: [{ type: 'tool_use', id: `jev_${randomUUID()}`, name: call.name, input: call.input, ...(call.name === 'finish' ? {} : { toolset_name: 'computer' }) }], stopReason: 'tool_use', ...(continues ? { continues } : {}) });
 const pixels = (b: NonNullable<ComputerState['controls'][number]['bounds']>, shot: { width: number; height: number }): Rect => ({ x: b.x * shot.width, y: b.y * shot.height, width: b.width * shot.width, height: b.height * shot.height });
 const point = (p: Point) => [Math.round(p.x), Math.round(p.y)];
 
@@ -54,7 +54,7 @@ export function jevVisionDecider(options: JevVisionOptions): VisionDecide {
     // Settle the previous decision: its note and evidence go into the history Jev reads.
     if (pending) {
       if (view.previous === 'completed') {
-        if (queue.length) return tool(queue.shift()!);
+        if (queue.length) return tool(queue.shift()!, queue.length > 0);
         // Pixels count too: a canvas or an image changes without any Accessibility change.
         const changed = observedEffect(pending.before, view.state, {}) || digest(view.shot.data) !== pending.shot;
         history.push(pending.note + (changed ? '' : '; the screen did not change'));
@@ -87,7 +87,7 @@ export function jevVisionDecider(options: JevVisionOptions): VisionDecide {
     } else if (decision.kind === 'scroll') {
       // A screen is the scrolled area's height: a short panel scrolled by the window's height skips past its rows.
       const at = decision.area ? boxCenter(image, decision.area) : { x: shot.width / 2, y: shot.height / 2 };
-      const height = decision.area ? (decision.area.bottom - decision.area.top) * image.height * image.unitsPerPixel : shot.height;
+      const height = decision.area ? (decision.area.bottom - decision.area.top) * image.height * image.unitsPerPixel.y : shot.height;
       calls.push({ name: 'scroll', input: { coordinate: point(at), scroll_direction: decision.direction, scroll_amount: scrollUnits(decision.amount, height) } });
       note = `scrolled ${decision.direction} ${decision.amount === 'FAR' ? 'several screens' : 'one screen'}${decision.area ? ' in the area at (' + point(at).join(', ') + ')' : ''}`; key = 'scroll:' + decision.direction;
     } else {
@@ -129,7 +129,7 @@ export function jevVisionDecider(options: JevVisionOptions): VisionDecide {
     pending = { key, note, before: state, shot: digest(shot.data) };
     queue = calls.slice(1);
     report(decision.kind.toUpperCase(), extra);
-    return tool(calls[0]);
+    return tool(calls[0], queue.length > 0);
   };
 }
 

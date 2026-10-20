@@ -91,6 +91,13 @@ describe('Jev image decisions in the vision loop', () => {
     expect(j.steps()).toHaveLength(2);
   });
 
+  test('a run that returns control after each action still finishes the decision it started', async () => {
+    const d = device(), j = jev([{ op: 'TYPE', element: '2', text: 'TEXT:0' }]);
+    expect(await runVisionComputerUse({ goal: 'Type "Somchai" into Name', yieldAfterAction: true }, d.deps(decider(j)), signal())).toMatchObject({ status: 'needs_input', reason: 'COMMAND_WAITING_INPUT', steps: 3 });
+    expect(d.actions().map(a => a.kind)).toEqual(['pointer', 'key_chord', 'type_focused']);
+    expect(j.steps()).toHaveLength(1);
+  });
+
   test('a step that did not run drops the rest of its decision and is recorded as not run', async () => {
     const d = device({ receipts: [{ state: 'not_executed', error: 'TARGET_OCCLUDED' }] }), j = jev([{ op: 'TYPE', element: '2', text: 'TEXT:0' }, { done: 0.9 }]);
     await runVisionComputerUse({ goal: 'Type "Somchai" into Name' }, d.deps(decider(j)), signal());
