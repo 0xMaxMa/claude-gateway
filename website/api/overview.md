@@ -168,6 +168,9 @@ Boot restore (`gateway.appRestore`): at startup every app stored as `running` is
 | `POST` | `/api/v1/connectors/:id/connect` | Admin | Store a pasted token |
 | `POST` | `/api/v1/connectors/:id/oauth/receive` | Admin | Accept an `access_token` + connector shape pushed by an external control plane |
 | `DELETE` | `/api/v1/connectors/:id` | Admin | Disconnect — clears the credential; removes the whole entry for `none`/`external` connectors |
+| `PATCH` | `/api/v1/connectors/:id` | Admin | Pause/resume, or change `defaultEnabled`. Keeps the credential |
+| `GET` | `/api/v1/connectors/:id/agents` | Admin | Which agents get the connector (`all` / `selected`) |
+| `PUT` | `/api/v1/connectors/:id/agents` | Admin | Scope the connector to all agents or to selected ones |
 | `POST` | `/api/v1/connectors/custom` | Admin | Add a user-pasted connector |
 | `POST` | `/api/v1/connectors/custom/:id/oauth/start` | Admin | Begin the gateway-owned OAuth 2.1 + PKCE sign-in → `authorizeUrl` |
 | `GET` | `/oauth/mcp/callback` | None (single-use `state`) | OAuth redirect target — the provider sends the end user's own browser here |

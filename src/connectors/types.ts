@@ -50,6 +50,8 @@ export interface ConnectorStatus {
   label: string;
   /** False requires explicit per-agent enablement, even on opt-out gateways. */
   defaultEnabled?: boolean;
+  /** Mirrors CustomConnectorEntry.paused. Omitted when the connector is not paused. */
+  paused?: boolean;
   /** Optional same-origin resource listing/revocation path, configured by an admin. */
   resourcesPath?: string;
   description?: string;
@@ -114,6 +116,12 @@ export interface CustomConnectorEntry {
   label: string;
   /** False requires explicit per-agent enablement, even on opt-out gateways. */
   defaultEnabled?: boolean;
+  /**
+   * True while an admin has switched the connector off without disconnecting it
+   * (PATCH /v1/connectors/:id). resolve.ts skips a paused entry for every agent,
+   * but its secrets stay in mcp-token.env, so resuming needs no re-entry.
+   */
+  paused?: boolean;
   /** Optional same-origin resource listing/revocation path, configured by an admin. */
   resourcesPath?: string;
   description?: string;

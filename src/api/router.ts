@@ -2005,9 +2005,11 @@ export function createApiRouter(
         // Shape only, not existence: enablement is stored per agent and read back
         // by id, so an id that can't be a connector id is an entry nothing will
         // ever match — it just accumulates in config.json. Existence is
-        // deliberately NOT required; enablement defaults to opt-out, so
-        // pre-setting `{enabled: false}` for a connector nobody has added yet is a
-        // legitimate way to keep it off an agent from the moment it appears.
+        // deliberately NOT required: an entry can still default to opt-out (one
+        // stored before POST /custom defaulted to opt-in, or one pushed via
+        // /oauth/receive), so pre-setting `{enabled: false}` for a connector nobody
+        // has added yet is a legitimate way to keep it off an agent from the moment
+        // it appears.
         if (!isValidConnectorId(id)) {
           res.status(400).json({ error: `Invalid connector id '${id}'` });
           return;
