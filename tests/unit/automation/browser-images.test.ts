@@ -74,6 +74,16 @@ describe("browser decisions with the tab screenshot (jev.images.enabled)", () =>
     await runBrowserUse({ goal: "Check the cart", scope }, { call: call({ ...truncated, truncated: { text: false, elements: true, viewport_elements: false } }), evaluate: j.evaluate, screenshot }, signal());
     expect(screenshot).toHaveBeenCalledTimes(1);
   });
+  test("a sensitive field rendered between the check and the capture keeps the screenshot off", async () => {
+    const j = jev({ operation: { choice: "DONE" } });
+    let observed = 0;
+    const lazy = page([el("pay", "Card number", { tag: "input", sensitive: true, operations: ["TYPE_TEXT"] })]);
+    const base = call(page([el("e1", "Cart")]));
+    // The payment form appears on the read that follows the capture.
+    const racing: BrowserUseDependencies["call"] = async (name, args, s) => name === "page_observe" && ++observed > 1 ? structuredClone(lazy) : base(name, args, s);
+    await runBrowserUse({ goal: "Check the cart", scope }, { call: racing, evaluate: j.evaluate, screenshot: async () => viewport }, signal());
+    expect(j.requests[0].assets).toBeUndefined();
+  });
   test("a failed capture never stops the run: the decision goes ahead on text", async () => {
     const j = jev({ operation: { choice: "DONE" } });
     const result = await runBrowserUse({ goal: "Check the cart", scope }, { call: call(page([el("e1", "Cart")])), evaluate: j.evaluate, screenshot: async () => { throw Error("BROWSER_SCREENSHOT_UNAVAILABLE"); } }, signal());

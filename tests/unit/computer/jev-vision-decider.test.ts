@@ -13,14 +13,14 @@ let jpeg: string;
 beforeAll(async () => { jpeg = (await sharp({ create: { width: 1280, height: 800, channels: 3, background: '#fff' } }).jpeg().toBuffer()).toString('base64'); });
 
 /** A fake Mac: every observe is a new generation; `text` grows with each completed action, so actions change the screen. */
-function device(options: { controls?: unknown[]; receipts?: Array<Record<string, unknown>>; impact?: (command: string) => 'ROUTINE' | 'HIGH_IMPACT' } = {}) {
+function device(options: { controls?: unknown[]; receipts?: Array<Record<string, unknown>>; impact?: (command: string) => 'ROUTINE' | 'HIGH_IMPACT'; distribution?: Record<string, number> } = {}) {
   let generation = 0, done = 0;
   const calls: Array<{ name: string; args: any }> = [], receipts = [...(options.receipts ?? [])];
   const deps = (decide: VisionDependencies['decide'], mode: 'vision' | 'hybrid' = 'hybrid'): VisionDependencies => ({
     mode, decide, authorized: () => true, beforeMutation: jest.fn(),
     evaluate: async request => {
       const choice = options.impact?.((request.questions.impact.instructions as any).command) ?? 'ROUTINE';
-      return { answers: { impact: { choice, confidence: 0.9, probabilities: choice === 'ROUTINE' ? { ROUTINE: 0.9, HIGH_IMPACT: 0.1 } : { ROUTINE: 0.1, HIGH_IMPACT: 0.9 } } } };
+      return { answers: { impact: { choice, confidence: 0.9, probabilities: options.distribution ?? (choice === 'ROUTINE' ? { ROUTINE: 0.9, HIGH_IMPACT: 0.1 } : { ROUTINE: 0.1, HIGH_IMPACT: 0.9 }) } } };
     },
     call: async (name, args) => {
       calls.push({ name, args });
@@ -146,6 +146,28 @@ describe('Jev image decisions in the vision loop', () => {
     const d = device({ impact: command => command.includes('Save') ? 'HIGH_IMPACT' : 'ROUTINE' }), j = jev([{ op: 'CLICK', element: '1' }]);
     expect(await runVisionComputerUse({ goal: 'Click Save' }, d.deps(decider(j)), signal())).toMatchObject({ status: 'needs_input', reason: 'COMMAND_WAITING_INPUT', lastAction: { confirm: true, label: 'Save' } });
     expect(d.actions()).toEqual([]);
+  });
+
+  // Regression (#633 review): a routine pick a hundredth below high-impact is a tie, not a routine action.
+  test('a routine answer tied with high-impact at the reported precision waits for the user', async () => {
+    const d = device({ distribution: { ROUTINE: 0.5, HIGH_IMPACT: 0.51 } }), j = jev([{ op: 'CLICK', element: '1' }]);
+    expect(await runVisionComputerUse({ goal: 'Click Save' }, d.deps(decider(j)), signal())).toMatchObject({ status: 'needs_input', lastAction: { confirm: true } });
+    expect(d.actions()).toEqual([]);
+  });
+
+  test('typing at a Box target clicks and types without select-all: after a Box click the focus is unknown', async () => {
+    const d = device(), j = jev([{ op: 'TYPE', text: 'TEXT:0', element: 'NONE' }, { done: 0.9 }]);
+    await runVisionComputerUse({ goal: 'Type "Somchai" into the note' }, d.deps(decider(j, 'vision')), signal());
+    expect(d.actions().map(a => a.kind)).toEqual(['pointer', 'type_focused']);
+  });
+
+  test('a decision that stopped partway is recorded as such, and the step limit lets a started decision finish', async () => {
+    const partial = device({ receipts: [{ state: 'completed' }, { state: 'not_executed', error: 'TARGET_OCCLUDED' }] }), j = jev([{ op: 'TYPE', element: '2', text: 'TEXT:0' }, { done: 0.9 }]);
+    await runVisionComputerUse({ goal: 'Type "Somchai" into Name' }, partial.deps(decider(j)), signal());
+    expect((j.steps()[1].state as any).previous_steps).toEqual(['typed "Somchai" into "Name" (AXTextField); it stopped after 1 of its 3 actions']);
+    const limited = device(), k = jev([{ op: 'TYPE', element: '2', text: 'TEXT:0' }]);
+    expect(await runVisionComputerUse({ goal: 'Type "Somchai" into Name', maxSteps: 1 }, limited.deps(decider(k)), signal())).toMatchObject({ status: 'blocked', reason: 'STEP_LIMIT', steps: 3 });
+    expect(limited.actions().map(a => a.kind)).toEqual(['pointer', 'key_chord', 'type_focused']);
   });
 
   test('repeating the step that just changed the screen ends as done unless Jev says the goal needs it again', async () => {

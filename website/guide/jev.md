@@ -799,10 +799,12 @@ scroll, done or give up) and all of its arguments.
 - `vision`: the screenshot only; every target is a Box.
 - A Box click is refined on a 400-pixel crop and then checked with a red dot
   drawn at the final point; a dot that is not on the target clicks nothing.
-- Typing clicks the field, selects its text (`cmd+a`) when it is not empty, and
-  types text taken verbatim from the goal; a key is pressed the counted number of
-  times. Each of these runs only after the previous one completed, and a run that
-  returns control after each action returns after the last of them.
+- Typing clicks the field, selects its text (`cmd+a`) when it is a listed text
+  field that is not empty (never after a Box click, where the focus is unknown),
+  and types text taken verbatim from the goal; a key is pressed the counted
+  number of times. Each of these runs only after the previous one completed and
+  passes the impact question on its own; a run that returns control after each
+  action, or reaches its action limit, finishes the decision first.
 - Scrolling moves one screen (80% of the window) or several.
 - Sensitive controls are painted out before the image is encoded. When one
   cannot be painted out (it has no bounds, or the observation was truncated and
@@ -826,7 +828,8 @@ decision also carries the approved tab's screenshot (`page_screenshot`, scaled
 into the limits), so Jev sees the page as well as its element list. The
 extension reports no element geometry and clicks by element reference, so the
 browser uses neither marks nor Box clicks. A step with a sensitive field in view,
-or with in-view elements left out of a truncated observation, sends no screenshot
+or with in-view elements left out of a truncated observation, before or right after
+the capture, sends no screenshot
 (trace reason `SCREENSHOT_SKIPPED_SENSITIVE`); a failed
 capture continues on text (`SCREENSHOT_UNAVAILABLE`).
 

@@ -9,3 +9,7 @@ export function choiceAtTop(probabilities: Record<string, number>, choice: strin
   const values = Object.values(probabilities), gap = roundedHundredths(values) ? 0.01 : 0.00001;
   return Object.hasOwn(probabilities, choice) && values.every(p => p <= probabilities[choice] + gap + ROUNDING_EPSILON);
 }
+/** The named choice is the highest probability, with no rounding allowance: only such a choice can be confident.
+ * A pick accepted by choiceAtTop below the top is a tie at the reported precision, never a confident answer. */
+export const choiceIsTop = (probabilities: Record<string, number>, choice: string): boolean =>
+  Object.hasOwn(probabilities, choice) && Object.values(probabilities).every(p => p <= probabilities[choice] + ROUNDING_EPSILON);

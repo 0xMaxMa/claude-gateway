@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { ComputerState } from './computer-use';
 import { observedEffect } from './computer-policy';
-import { KEYS, buildDotCheck, buildRefineStep, buildRepeatCheck, buildVisionStep, dotHits, readRefineStep, readVisionStep, refineCrop, repeatNeeded, type VisionElement, type VisionStepInput } from './jev-vision-step';
+import { KEYS, MAX_ELEMENTS, buildDotCheck, buildRefineStep, buildRepeatCheck, buildVisionStep, dotHits, readRefineStep, readVisionStep, refineCrop, repeatNeeded, type VisionElement, type VisionStepInput } from './jev-vision-step';
 import { ScreenImage, boxCenter, screensDiffer, type JevImage, type Mark, type Point, type Rect } from './vision-image';
 import type { VisionDecide, VisionTurn, VisionView } from './vision-decider';
 import type { JevBox, JevRequest, JevResult } from '../jev/types';
@@ -29,7 +29,6 @@ type Call = { name: string; input: Record<string, unknown> };
  * window, so a target just below stays in view; far is three screens. mapComputerCall clamps to 1-50 notches. */
 export const WHEEL_PX = 50;
 export const scrollUnits = (amount: 'SCREEN' | 'FAR', height: number) => Math.min(50, Math.max(1, Math.round(0.8 * height / WHEEL_PX)) * (amount === 'FAR' ? 3 : 1));
-const MAX_ELEMENTS = 100;
 const tool = (call: Call, continues = false): VisionTurn => ({ content: [{ type: 'tool_use', id: `jev_${randomUUID()}`, name: call.name, input: call.input, ...(call.name === 'finish' ? {} : { toolset_name: 'computer' }) }], stopReason: 'tool_use', ...(continues ? { continues } : {}) });
 const pixels = (b: NonNullable<ComputerState['controls'][number]['bounds']>, shot: { width: number; height: number }): Rect => ({ x: b.x * shot.width, y: b.y * shot.height, width: b.width * shot.width, height: b.height * shot.height });
 const point = (p: Point) => [Math.round(p.x), Math.round(p.y)];
@@ -41,7 +40,7 @@ export function jevVisionDecider(options: JevVisionOptions): VisionDecide {
   let queue: Call[] = [];
   // The last decision that ran an action and changed the screen, and the one in flight: its identity, its note,
   // and the state and screenshot thumbnail it ran on.
-  type Step = { key: string; note: string; before: ComputerState; thumbnail: Buffer };
+  type Step = { key: string; note: string; before: ComputerState; thumbnail: Buffer; actions: number; ran: number };
   let last: Step | undefined, pending: Step | undefined;
   // The same step that ran without changing anything, and how many times in a row.
   let stalled: { key: string; times: number } | undefined;
@@ -52,7 +51,7 @@ export function jevVisionDecider(options: JevVisionOptions): VisionDecide {
     const report = (decision: string, extra: Omit<JevVisionEvent, 'elapsedMs' | 'requests' | 'decision'> = {}) => {
       try { options.onDecision?.({ elapsedMs: Date.now() - started, requests, decision, ...extra }); } catch { /* Diagnostics cannot change a decision. */ }
     };
-    if (pending && view.previous === 'completed' && queue.length) return tool(queue.shift()!, queue.length > 0);
+    if (pending && view.previous === 'completed' && queue.length) { pending.ran++; return tool(queue.shift()!, queue.length > 0); }
     queue = [];
     const { state, shot } = view;
     const sensitive = state.controls.filter(c => c.sensitive);
@@ -71,7 +70,7 @@ export function jevVisionDecider(options: JevVisionOptions): VisionDecide {
         history.push(pending.note + (changed ? '' : '; the screen did not change'));
         last = changed ? pending : undefined;
         stalled = changed ? undefined : { key: pending.key, times: stalled?.key === pending.key ? stalled.times + 1 : 1 };
-      } else history.push(pending.note + '; it was not run');
+      } else history.push(pending.note + (pending.ran ? `; it stopped after ${pending.ran} of its ${pending.actions} actions` : '; it was not run'));
       pending = undefined;
     }
     const listed = options.mode === 'hybrid' || withheld ? state.controls.filter(c => c.bounds && !c.sensitive).slice(0, MAX_ELEMENTS) : [];
@@ -120,8 +119,9 @@ export function jevVisionDecider(options: JevVisionOptions): VisionDecide {
       else {
         const focused = control && (control.focused === true || control.ref === state.focusedControl?.ref);
         if (!focused) calls.push({ name: 'left_click', input: { coordinate: point(at) } });
-        // TYPE replaces the field's text: select what it holds first (unknown for a Box target).
-        if (!control || control.value) calls.push({ name: 'key', input: { text: 'cmd+a' } });
+        // TYPE replaces the field's text: select what it holds first, but only in a known text field. After a Box
+        // click the focus is unknown, and select-all there could take a whole document.
+        if (control?.actions.includes('type') && control.value) calls.push({ name: 'key', input: { text: 'cmd+a' } });
         calls.push({ name: 'type', input: { text: decision.text! } });
         note = `typed ${JSON.stringify(decision.text!.slice(0, 80))} into ${named}`;
       }
@@ -135,7 +135,7 @@ export function jevVisionDecider(options: JevVisionOptions): VisionDecide {
       report('DONE', { ...extra, reason: 'REPEAT_NOT_NEEDED' });
       return tool({ name: 'finish', input: { outcome: 'done' } });
     }
-    pending = { key, note, before: state, thumbnail };
+    pending = { key, note, before: state, thumbnail, actions: calls.length, ran: 0 };
     queue = calls.slice(1);
     report(decision.kind.toUpperCase(), extra);
     return tool(calls[0], queue.length > 0);

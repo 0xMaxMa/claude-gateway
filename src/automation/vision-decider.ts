@@ -504,7 +504,9 @@ export async function runVisionComputerUse(raw: unknown, deps: VisionDependencie
             steps++; refusals = 0; previous = 'completed';
             lastAction = { kind: action.kind, ...(action.kind === 'key_chord' ? { key: action.keys.join('+') } : {}), ...(action.kind === 'scroll' ? { direction: action.dy ? (action.dy > 0 ? 'down' : 'up') : (action.dx! > 0 ? 'right' : 'left') } : {}) };
             emit('acted', { ...summary, operationId, outcome: 'completed', elapsedMs: Date.now() - started });
-            if (steps >= input.maxSteps || (input.yieldAfterAction && !turn.continues)) {
+            // A decision under way (select-all done, typing next) is finished first: stopping between its actions
+            // could leave a field's text selected for whatever comes next. Its actions are bounded and each is judged.
+            if (!turn.continues && (steps >= input.maxSteps || input.yieldAfterAction)) {
               try { await observe(); await deps.screenshot(last!, runSignal); } catch { check(); checkInterruption(deps.interruptSignal); emit('waiting', { reason: 'GOAL_EVIDENCE_UNAVAILABLE' }); }
               // The agent decides the next step on the new screen, as after an Accessibility action.
               return input.yieldAfterAction ? result('needs_input', 'COMMAND_WAITING_INPUT') : result('blocked', 'STEP_LIMIT');

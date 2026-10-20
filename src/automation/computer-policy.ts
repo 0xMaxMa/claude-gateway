@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import type { ComputerState } from './computer-use';
-import { choiceAtTop } from '../jev/distribution';
+import { choiceAtTop, choiceIsTop } from '../jev/distribution';
 
 /** Pure policy: no provider, persistence, device calls or application-specific recipes. */
 export const decisionInstructions = {
@@ -17,7 +17,7 @@ export function readChoice(raw: unknown, options: Record<string,string>) {
     keys.some(key => !Object.hasOwn(p,key)) ||
     Math.abs(Object.values(p).reduce((a,b)=>a+b,0)-1) > .02 + 1e-12 ||
     !choiceAtTop(p,result.choice)) throw Error('INVALID_DECISION');
-  return { ...result, confident: result.confidence >= .55 && p[result.choice] >= .5 };
+  return { ...result, confident: result.confidence >= .55 && p[result.choice] >= .5 && choiceIsTop(p, result.choice) };
 }
 /** Meaningful observed effect, deliberately separate from strict freshness checks. */
 export function observedEffect(before: ComputerState, after: ComputerState, action: Record<string,unknown>) {

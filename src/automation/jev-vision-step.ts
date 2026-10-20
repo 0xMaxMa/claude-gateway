@@ -63,7 +63,8 @@ const COUNTS = [1, 2, 3, 4, 5, 6, 8, 10];
 export const SCROLL_AMOUNTS = { SCREEN: 'About one screen: the control is near, or how far is unclear', FAR: 'Several screens: the control is far down a long page or list' } as const;
 export type VisionScrollAmount = keyof typeof SCROLL_AMOUNTS;
 const NONE = 'NONE';
-const MAX_ELEMENTS = 200;
+/** Listed controls per request: marks stay legible, and a Choice stays under its 255 options. */
+export const MAX_ELEMENTS = 100;
 
 export function buildVisionStep(input: VisionStepInput): JevRequest {
   const state = { goal: input.goal, ...(input.context ? { earlier_context: input.context.slice(0, 4000) } : {}), previous_steps: input.history.slice(-6), screen: screenState(input.screen) };

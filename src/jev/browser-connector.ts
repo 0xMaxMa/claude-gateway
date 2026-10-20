@@ -146,7 +146,12 @@ export async function executeBrowserModule(modulePath: string, binding: BrowserC
       call,
       trace:context.trace,
       interruptSignal:context.interruptSignal,
-      evaluate: async(request,signal) => { assertAccess(); const response = await context.evaluate(request,signal); assertAccess(); return {model:response.model,answers:response.answers}; },
+      evaluate: async(request,signal) => {
+        assertAccess();
+        // Images switched off after the capture: the decision goes ahead on text, as the runner promises.
+        if (request.assets && !context.images?.()) { const {assets:_assets,...text} = request; request = text; }
+        const response = await context.evaluate(request,signal); assertAccess(); return {model:response.model,answers:response.answers};
+      },
       progress: event => { assertAccess(); context.progress(event); },
       ...(context.images && features.has('images') ? {screenshot: async (args: Record<string, unknown>, signal: AbortSignal) => {
         assertAccess();
