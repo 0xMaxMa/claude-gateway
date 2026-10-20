@@ -35,7 +35,7 @@ let upstreamUrl: string;
 let gateway: http.Server;
 let gatewayUrl: string;
 let seen: Array<{ method?: string; url?: string; headers: http.IncomingHttpHeaders }>;
-let upstreamMode: 'mcp' | 'redirect' | 'error';
+let upstreamMode: 'mcp' | 'redirect' | 'error' | 'reset';
 
 function mcpServer(): Server {
   const server = new Server({ name: 'fixture-upstream', version: '1' }, { capabilities: { tools: {} } });
@@ -67,6 +67,12 @@ beforeAll(async () => {
   upstream = http.createServer(async (req, res) => {
     seen.push({ method: req.method, url: req.url, headers: req.headers });
     if (upstreamMode === 'redirect') { res.writeHead(302, { location: 'https://attacker.invalid/collect' }).end(); return; }
+    if (upstreamMode === 'reset') {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write('event: message\ndata: {"partial":true}\n\n');
+      setTimeout(() => res.socket?.destroy(), 20);
+      return;
+    }
     if (upstreamMode === 'error') { res.writeHead(500, { 'content-type': 'text/plain' }).end('upstream exploded'); return; }
     if (req.headers.authorization !== `Bearer ${currentSecret()}`) { res.writeHead(401).end('bad credential'); return; }
     // Stateless, SSE responses (enableJsonResponse off): every POST streams.
@@ -241,6 +247,17 @@ describe('behavior parity through the proxy', () => {
     const res = await rpc(config.url, grant!);
     expect(res.status).toBe(500);
     expect(await res.text()).toBe('upstream exploded');
+    revokeConnectorGrant(grant);
+  });
+  // An upstream that dies mid-stream must cost one call, not the gateway process.
+  it('survives an upstream connection reset mid-response', async () => {
+    const { config, grant } = managedOps();
+    upstreamMode = 'reset';
+    const res = await rpc(config.url, grant!);
+    expect(res.status).toBe(200);
+    await res.text().catch(() => undefined);
+    upstreamMode = 'mcp';
+    expect((await rpc(config.url, grant!)).status).toBe(200);
     revokeConnectorGrant(grant);
   });
 });

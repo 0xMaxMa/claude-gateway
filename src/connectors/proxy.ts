@@ -17,6 +17,7 @@
 import { randomBytes } from 'crypto';
 import * as http from 'node:http';
 import * as https from 'node:https';
+import { pipeline } from 'node:stream';
 import { Router, type Request, type Response } from 'express';
 import type { AgentConfig, GatewayConfig } from '../types';
 import type { CustomConnectorEntry } from './types';
@@ -160,7 +161,12 @@ export function createConnectorProxyRouter(): Router {
           if (value !== undefined) res.setHeader(name, value);
         }
         res.flushHeaders();
-        incoming.pipe(res);
+        // pipeline, not pipe: an upstream that drops mid-response must end the
+        // agent's stream too, or its call hangs on a response that never finishes.
+        pipeline(incoming, res, err => {
+          // `res.errored` tells an upstream failure from the agent cancelling the call.
+          if (err && res.errored) console.error(`connector-proxy: connector=${id} response stream failed: ${err.message}`);
+        });
       });
     } catch (err) {
       // An invalid header value in the pasted config throws synchronously.
@@ -175,7 +181,7 @@ export function createConnectorProxyRouter(): Router {
     });
     // The agent's client went away (cancelled call, closed SSE stream): stop upstream too.
     res.on('close', () => outbound.destroy());
-    req.pipe(outbound);
+    pipeline(req, outbound, () => { /* outbound errors are reported by its 'error' listener */ });
   });
   return router;
 }
