@@ -33,7 +33,8 @@ import { resolveDreamingConfig } from './agent/dreaming/config';
 import { makeClaudeSpawn } from './agent/skill-learning/reviewer';
 import { CronScheduler } from './cron/scheduler';
 import { CronManager } from './cron/manager';
-import { GatewayRouter } from './api/gateway-router';
+import { GatewayRouter, resolveBindHost } from './api/gateway-router';
+import { setConnectorProxyOrigin } from './connectors/proxy';
 import { ContextIsolationGuard } from './agent/context-isolation';
 import { createLogger, configureLogging, loggingConfig, startLogRetentionSweep } from './logger';
 import { ConfigWatcher, ConfigChange } from './config/watcher';
@@ -653,6 +654,9 @@ async function main(): Promise<void> {
     onPublicUrlUnset: () => { publicUrlUnsetAtStartup = true; },
   });
   config.gateway.logDir = expandTilde(config.gateway.logDir);
+  // Sessions spawned before the router listens (cron catch-up, channel receivers)
+  // already write connector proxy entries; point them at the planned bind address.
+  setConnectorProxyOrigin({ address: resolveBindHost(process.env.GATEWAY_BIND, config.gateway.bind), port: PORT });
 
   // Must precede the first createLogger() call: the level gate and the rotation
   // thresholds are process-wide policy, and a logger created before the policy

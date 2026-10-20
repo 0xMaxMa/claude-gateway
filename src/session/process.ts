@@ -1859,6 +1859,9 @@ export class SessionProcess extends EventEmitter {
           ? { hint: 'claude executable is not resolvable — set CLAUDE_BIN to the claude path (native install: ~/.local/bin/claude)' }
           : {}),
       });
+      // No respawn follows, and the runner drops a failed session without stop().
+      revokeConnectorGrant(this.connectorGrant);
+      this.connectorGrant = undefined;
       this.emit('failed');
       return;
     }

@@ -23,7 +23,7 @@ import { Router, type Request, type Response } from 'express';
 import type { AgentConfig, GatewayConfig } from '../types';
 import type { CustomConnectorEntry } from './types';
 import { resolveEnabledConnectors } from './resolve';
-import { isProxiedConnector, isStreamableHttpType } from './custom';
+import { fieldsOutsideProxy, isProxiedConnector, isStreamableHttpType } from './custom';
 
 export const CONNECTOR_PROXY_PATH = '/internal/mcp/connectors';
 
@@ -41,13 +41,15 @@ const FORWARDED_RESPONSE_HEADERS = ['content-type', 'content-encoding', 'mcp-ses
 
 let listenOrigin: string | undefined;
 
-/** Records the address the gateway's HTTP server actually listens on, so a proxy
- * entry never points at an address nothing serves (a specific GATEWAY_BIND, `::1`)
- * or at a GATEWAY_API_URL meant for another network. */
-export function setConnectorProxyOrigin(address: AddressInfo | string | null | undefined): void {
+/** Records where the gateway's HTTP server listens, so a proxy entry never points at
+ * an address nothing serves (a specific GATEWAY_BIND, `::1`) or at a GATEWAY_API_URL
+ * meant for another network. Set from the bind config before any agent starts, then
+ * from the bound address once listening. */
+export function setConnectorProxyOrigin(address: AddressInfo | { address: string; port: number } | string | null | undefined): void {
   if (!address || typeof address === 'string') { listenOrigin = undefined; return; }
-  const host = address.address === '0.0.0.0' || address.address === '::' ? '127.0.0.1'
-    : address.family === 'IPv6' ? `[${address.address}]` : address.address;
+  const bound = address.address.trim();
+  const host = !bound || bound === '0.0.0.0' || bound === '::' ? '127.0.0.1'
+    : bound.includes(':') && !bound.startsWith('[') ? `[${bound}]` : bound;
   listenOrigin = `http://${host}:${address.port}`;
 }
 
@@ -76,9 +78,10 @@ export function agentFacingConnectors(
   const grant = randomBytes(32).toString('base64url');
   grants.set(grant, {
     connectorIds: new Set(proxied),
-    // Re-resolved per request against the live config objects, so disconnecting a
-    // connector (its secret deleted) or disabling it for the agent takes effect on
-    // the next call rather than at the next restart.
+    // Re-resolved per request, so a disconnected connector (its secret deleted) or a
+    // removed entry fails on the next call. Per-agent enablement is read from the
+    // config object the session was spawned with; a change to it restarts the
+    // session, which revokes this grant.
     resolve: id => {
       if (agent.isolateMemory) return undefined;
       const current = gateway.gateway?.customConnectors ?? {};
@@ -90,9 +93,8 @@ export function agentFacingConnectors(
   for (const id of proxied) {
     // The unresolved config holds `{placeholder}`s, never secrets, so its remaining
     // fields (type, enabled_tools, disabled_tools, ...) are kept as configured.
-    const { url: _url, headers: _headers, ...rest } = entryOf(id)!.config;
     servers[id] = {
-      ...rest,
+      ...fieldsOutsideProxy(entryOf(id)!.config),
       url: `${base}${CONNECTOR_PROXY_PATH}/${encodeURIComponent(id)}`,
       headers: { Authorization: `Bearer ${grant}` },
     };
@@ -145,7 +147,11 @@ export function createConnectorProxyRouter(): Router {
     if (!['GET', 'POST', 'DELETE'].includes(req.method)) { res.status(405).json({ error: 'Method not allowed' }); return; }
     let upstream: ReturnType<typeof upstreamOf>;
     try {
-      upstream = upstreamOf(grant.resolve(id));
+      const resolved = grant.resolve(id);
+      upstream = upstreamOf(resolved);
+      // Disconnected/disabled resolves to nothing, which is normal; a resolved entry
+      // the proxy cannot use is a configuration error worth a line.
+      if (resolved !== undefined && !upstream) console.error(`connector-proxy: connector=${id} has no usable http url/headers`);
     } catch (err) {
       console.error(`connector-proxy: connector=${id} resolve failed: ${(err as Error).message}`);
     }

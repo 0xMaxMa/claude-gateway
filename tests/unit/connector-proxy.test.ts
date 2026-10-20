@@ -359,6 +359,19 @@ describe('proxy boundary', () => {
     }
   });
 
+  it('logs a resolved entry it cannot use instead of failing silently', async () => {
+    const m = managedOps();
+    (m.gateway.gateway.customConnectors as any).ops.config.headers = { Authorization: 42 };
+    const errors = jest.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      expect((await rpc(m.config.url, m.grant!)).status).toBe(403);
+      expect(errors.mock.calls.some(c => String(c[0]).includes('connector=ops has no usable http url/headers'))).toBe(true);
+    } finally {
+      errors.mockRestore();
+      revokeConnectorGrant(m.grant);
+    }
+  });
+
   it('fails closed once the grant is revoked', async () => {
     const { config, grant } = managedOps();
     expect((await rpc(config.url, grant!)).status).toBe(200);
@@ -377,6 +390,9 @@ describe('proxy origin', () => {
       ['::', 'IPv6', 'http://127.0.0.1:4100'],
       ['10.0.0.5', 'IPv4', 'http://10.0.0.5:4100'],
       ['::1', 'IPv6', 'http://[::1]:4100'],
+      // The planned bind, set before the server listens.
+      ['localhost', 'IPv4', 'http://localhost:4100'],
+      ['', 'IPv4', 'http://127.0.0.1:4100'],
     ] as const) {
       setConnectorProxyOrigin({ address, family, port: 4100 });
       const { config, grant } = managedOps();

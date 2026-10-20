@@ -407,11 +407,12 @@ export class CapabilityCatalog {
   ): Promise<CapabilitySnapshot> {
     const sanitizeServers = (values: Record<string, any>): Record<string, unknown> => Object.fromEntries(Object.entries(values).map(([name, server]) => [name, server && typeof server === 'object' && server.env ? { ...server, env: sanitizeJevChildEnv(server.env, this.gateway.gateway.jev) } : server]));
     const directory = await mkdtemp(join(tmpdir(), 'gateway-capabilities-'));
-    // Discovery reaches HTTP connectors through the loopback proxy too, so the
-    // probe config below never holds their secrets (#635).
-    const facing = agentFacingConnectors(this.agent, this.gateway, connectors);
-    connectors = sanitizeServers(facing.servers);
+    let facing: ReturnType<typeof agentFacingConnectors> | undefined;
     try {
+      // Discovery reaches HTTP connectors through the loopback proxy too, so the
+      // probe config below never holds their secrets (#635).
+      facing = agentFacingConnectors(this.agent, this.gateway, connectors);
+      connectors = sanitizeServers(facing.servers);
       let servers = connectors;
       let cliFailed = false;
       let observed: ObservedMcpServer[] = [];
@@ -524,7 +525,7 @@ export class CapabilityCatalog {
       });
       return snapshot;
     } finally {
-      revokeConnectorGrant(facing.grant);
+      revokeConnectorGrant(facing?.grant);
       await rm(directory, { recursive: true, force: true });
     }
   }

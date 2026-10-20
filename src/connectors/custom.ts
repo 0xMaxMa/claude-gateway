@@ -166,8 +166,13 @@ export function isValidConnectorId(id: string): boolean {
 export function isProxiedConnector(entry: CustomConnectorEntry | undefined): boolean {
   if (!entry || !Array.isArray(entry.secretNames) || !entry.secretNames.length) return false;
   if (!entry.config || !isStreamableHttpType(entry.config.type)) return false;
-  const { url: _url, headers: _headers, ...rest } = entry.config;
-  return extractPlaceholders(rest).length === 0;
+  return extractPlaceholders(fieldsOutsideProxy(entry.config)).length === 0;
+}
+
+/** An HTTP connector config minus the fields the loopback proxy sends upstream. */
+export function fieldsOutsideProxy(config: Record<string, unknown>): Record<string, unknown> {
+  const { url: _url, headers: _headers, ...rest } = config;
+  return rest;
 }
 
 /** The streamable-HTTP transport, under either name a pasted mcpServers entry uses. */

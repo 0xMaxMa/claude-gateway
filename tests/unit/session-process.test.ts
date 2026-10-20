@@ -667,6 +667,25 @@ describe('SessionProcess', () => {
       await sp.stop();
     });
 
+    // A session that gives up after MAX_RESTARTS is dropped by the runner without
+    // stop(), so the grant its config still names must die with it.
+    it('a permanently failed session revokes its connector grant', async () => {
+      fs.writeFileSync(TOKEN_ENV, 'CUSTOM__github__access_token=ghp_failed\n', { mode: 0o600 });
+      gatewayConfig.gateway.customConnectors = { github: githubCustomConnector };
+      const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+      await sp.start();
+      const grant = (readMcpConfig().github as { headers: { Authorization: string } }).headers.Authorization;
+      const request = require('supertest');
+      const app = require('express')().use(require('../../src/connectors/proxy').createConnectorProxyRouter());
+      const probe = () => request(app).post('/internal/mcp/connectors/other').set('authorization', grant);
+      expect((await probe()).status).toBe(403);
+      const priv = sp as unknown as { restartCount: number; scheduleRestart: () => void };
+      priv.restartCount = 3;
+      priv.scheduleRestart();
+      expect((await probe()).status).toBe(401);
+      await sp.stop();
+    });
+
     it('enabled but no token → github entry omitted', async () => {
       agentConfig.connectors = { github: { enabled: true } };
       gatewayConfig.gateway.customConnectors = { github: githubCustomConnector };
