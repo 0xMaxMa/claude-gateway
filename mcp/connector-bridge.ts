@@ -7,7 +7,9 @@
  *
  *   stdio entry   spawn the server exactly as Claude Code would (launcher env + entry
  *                 env, launcher cwd) and hand it the stream byte for byte
- *   sse / http    forward each JSON-RPC message to the upstream with the entry's headers
+ *   sse / http    forward each JSON-RPC message to the upstream with the entry's headers,
+ *                 following same-origin redirects only (src/connectors/redirect.ts),
+ *                 the same policy as the gateway's HTTP proxy
  *
  * Bundled for Node when it has to run inside an app-agent container.
  */
@@ -16,6 +18,7 @@ import { createInterface } from 'readline';
 import { PassThrough } from 'stream';
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { MAX_REDIRECTS, sameOriginRedirect } from '../src/connectors/redirect';
 
 const MAX_SPEC_BYTES = 4 * 1024 * 1024;
 let pending = Buffer.alloc(0);
@@ -59,12 +62,35 @@ function runStdio(spec: { config: { command: string; args?: unknown; env?: Recor
   child.on('exit', (code, signal) => process.exit(code ?? (signal ? 1 : 0)));
 }
 
+/**
+ * fetch with the connector's redirect policy. Same-origin hops keep fetch's own
+ * method rules (303, and 301/302 after a POST, continue as a bodyless GET); a hop to
+ * another origin fails the request instead of carrying the headers there.
+ */
+async function sameOriginFetch(input: string | URL | Request, init: RequestInit = {}): Promise<Response> {
+  let url = new URL(input instanceof Request ? input.url : String(input));
+  let current: RequestInit = { ...init, redirect: 'manual' };
+  for (let hop = 0; ; hop++) {
+    const res = await fetch(url, current);
+    const location = res.headers.get('location');
+    if (res.status < 300 || res.status >= 400 || location === null) return res;
+    const next = sameOriginRedirect(url, location);
+    await res.body?.cancel();
+    if (!next) throw new Error(`upstream redirect to another origin refused (${res.status})`);
+    if (hop >= MAX_REDIRECTS) throw new Error('too many upstream redirects');
+    if (res.status === 303 || ((res.status === 301 || res.status === 302) && current.method === 'POST')) {
+      current = { ...current, method: 'GET', body: undefined };
+    }
+    url = next;
+  }
+}
+
 async function runRemote(config: Record<string, any>, input: PassThrough): Promise<void> {
   const url = new URL(config.url);
   const requestInit = { headers: config.headers ?? {} };
   const transport = config.type === 'sse'
-    ? new SSEClientTransport(url, { requestInit })
-    : new StreamableHTTPClientTransport(url, { requestInit });
+    ? new SSEClientTransport(url, { requestInit, fetch: sameOriginFetch })
+    : new StreamableHTTPClientTransport(url, { requestInit, fetch: sameOriginFetch });
   const initializing = new Set<unknown>();
   transport.onmessage = (message: any) => {
     // Claude Code's own transport sends the negotiated version on later requests.

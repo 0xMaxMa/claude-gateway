@@ -4,10 +4,10 @@ import { mkdtemp, readFile, rm } from 'fs/promises';
 import { join, resolve } from 'path';
 import { tmpdir } from 'os';
 import { containerNode } from '../orchestration/container';
-import { chmodSync, copyFileSync, mkdirSync } from 'fs';
+import { chmodSync, copyFileSync, mkdirSync, writeFileSync } from 'fs';
 import type { AgentConfig, CustomConnectorEntry } from '../types';
 import { connectorSecretRoute } from '../connectors/custom';
-import type { ContainerLaunch } from '../connectors/proxy';
+import { sweepStaleSockets, type ContainerLaunch } from '../connectors/proxy';
 
 const bundles = new Map<string, Promise<string>>();
 /** Ship the same reviewed MCP proxy into the container as a standalone Node
@@ -45,7 +45,10 @@ const LAUNCH_DIR = '.gateway-connectors';
  * bridge is bundled here but only ever sent over a pipe (see ContainerLaunch). Undefined
  * when no connector needs it, or when the container has no Node or does not see the
  * workspace; that session keeps its resolved entries, as before, rather than losing
- * its connectors.
+ * its connectors (agentFacingConnectors records that for the status API).
+ *
+ * The directory ignores itself for git, since agent workspaces are often repositories,
+ * and sockets a crashed gateway left behind are removed before a new one is bound.
  */
 export async function prepareContainerLaunch(container: string, workspace: string, connectors: Record<string, CustomConnectorEntry> = {}): Promise<ContainerLaunch | undefined> {
   if (!Object.values(connectors).some(entry => ['proxy', 'launch'].includes(connectorSecretRoute(entry)))) return undefined;
@@ -54,6 +57,8 @@ export async function prepareContainerLaunch(container: string, workspace: strin
     const bridgeCode = await bundleContainerModule('connector-bridge.ts', 'cjs');
     mkdirSync(hostDir, { recursive: true, mode: 0o700 });
     chmodSync(hostDir, 0o700);
+    writeFileSync(join(hostDir, '.gitignore'), '*\n', { mode: 0o600 });
+    sweepStaleSockets(hostDir);
     copyFileSync(resolve(__dirname, '../../mcp/connector-launcher.mjs'), join(hostDir, 'connector-launcher.mjs'));
     await containerNode(container, "require('fs').accessSync(process.argv[1])", [`${containerDir}/connector-launcher.mjs`]);
     return { container, hostDir, containerDir, bridgeCode };

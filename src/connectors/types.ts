@@ -66,11 +66,14 @@ export interface ConnectorStatus {
   repoUrl?: string;
   /**
    * 'agent-readable' when this connector's secret is still written into a session's
-   * MCP config file: a placeholder only Claude Code can act on (`headersHelper`,
-   * `oauth`) or a `ws` transport (see connectorSecretRoute). Omitted when the secret
-   * stays in the gateway.
+   * MCP config file: for every agent when the config has a field only Claude Code can
+   * act on (`headersHelper`, `oauth`) or a `ws` transport (see connectorSecretRoute),
+   * or for the agents in `exposedAgents` whose runtime could not use the gateway
+   * route (see connectors/exposure.ts). Omitted when the secret stays in the gateway.
    */
   secretExposure?: 'agent-readable';
+  /** With `secretExposure`, when only these agents' sessions write the secret. */
+  exposedAgents?: string[];
   /**
    * Present only while an oauth connector's background token refresh is failing —
    * see oauth-refresh-sweep.ts, which distinguishes the two kinds below.

@@ -894,9 +894,10 @@ export class SessionProcess extends EventEmitter {
     // An app-agent's CLI runs inside its container, where the gateway's loopback
     // address is not reachable: its connectors launch through a workspace socket,
     // or, in a container that cannot run the launcher, keep their resolved entries.
-    const { servers: agentFacing, grant } = this.isContainerAgent() && !this.containerLaunch
-      ? { servers: connectorServers, grant: undefined }
-      : agentFacingConnectors(this.agentConfig, this.gatewayConfig, connectorServers, { container: this.containerLaunch });
+    const { servers: agentFacing, grant } = agentFacingConnectors(this.agentConfig, this.gatewayConfig, connectorServers, {
+      container: this.containerLaunch,
+      containerUnavailable: this.isContainerAgent() && !this.containerLaunch,
+    });
     this.connectorGrant = grant;
     const spawnedConnectors = new Map<string, string>();
     for (const [name, server] of Object.entries(connectorServers)) {

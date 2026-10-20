@@ -169,9 +169,12 @@ export function isValidConnectorId(id: string): boolean {
  *   'launch'   A stdio or SSE entry. The file holds a stdio launcher that streams the
  *              MCP session to a gateway-spawned bridge, which receives the resolved
  *              entry over a pipe (mcp/connector-launcher.mjs, mcp/connector-bridge.ts).
- *   'exposed'  Still written resolved: a placeholder sits in a field only Claude Code
- *              itself can act on (`headersHelper` runs a command, `oauth` starts its
- *              own sign-in), or the transport is one the gateway cannot carry (`ws`).
+ *   'exposed'  Still written resolved, exactly as before #635: the entry has a field
+ *              only Claude Code itself can act on (`headersHelper` runs a command whose
+ *              headers it adds per request, `oauth` starts its own sign-in against the
+ *              entry's url), or a transport the gateway cannot carry (`ws`). Either
+ *              field breaks behind the proxy even without a placeholder: the helper's
+ *              headers would be dropped there, and sign-in would target the proxy URL.
  *
  * A placeholder in any other field is resolved in the gateway and that field is left
  * out of the agent-facing entry; no transport the gateway drives reads it.
@@ -184,7 +187,7 @@ export function connectorSecretRoute(entry: CustomConnectorEntry | undefined): C
   if (!entry || !Array.isArray(entry.secretNames) || !entry.secretNames.length) return 'none';
   const config = entry.config;
   if (!config || typeof config !== 'object') return 'exposed';
-  if (CLIENT_ONLY_FIELDS.some(field => extractPlaceholders(config[field]).length)) return 'exposed';
+  if (CLIENT_ONLY_FIELDS.some(field => config[field] !== undefined)) return 'exposed';
   if (isStreamableHttpType(config.type)) return 'proxy';
   if (config.type === 'sse') return 'launch';
   if ((config.type === undefined || config.type === 'stdio') && typeof config.command === 'string') return 'launch';

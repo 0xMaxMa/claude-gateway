@@ -30,6 +30,7 @@ import { createConnectorProxyRouter, agentFacingConnectors, handleConnectorUpgra
 import { prepareContainerLaunch } from '../../src/session/container-connectors';
 import { prepareManagedConnectors } from '../../src/session/managed-connectors';
 import { listConnectorStatus } from '../../src/connectors/resolve';
+import { clearRuntimeExposure } from '../../src/connectors/exposure';
 import type { AgentConfig, GatewayConfig } from '../../src/types';
 
 // The legacy-container tests stand in for `docker` with a host script (see below).
@@ -48,6 +49,7 @@ const STDIO_FIXTURE = `
 import { Server } from ${sdk('server/index.js')};
 import { StdioServerTransport } from ${sdk('server/stdio.js')};
 import { CallToolRequestSchema, ListToolsRequestSchema } from ${sdk('types.js')};
+process.stderr.write('stdio-fixture: started\\n');
 const server = new Server({ name: 'stdio-fixture', version: '1' }, { capabilities: { tools: {} } });
 server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [{ name: 'whoami', description: 'whoami', inputSchema: { type: 'object' } }] }));
 server.setRequestHandler(CallToolRequestSchema, async req => ({ content: [{ type: 'text', text: JSON.stringify({
@@ -96,6 +98,12 @@ beforeAll(async () => {
   const sseSessions = new Map<string, SSEServerTransport>();
   upstream = http.createServer(async (req, res) => {
     seen.push({ method: req.method, url: req.url, headers: req.headers });
+    // Fixed redirect routes: a same-origin move, and a hop to another origin (the
+    // same server under `localhost`, so a followed hop would show up in `seen`).
+    const port = (upstream.address() as AddressInfo).port;
+    if (req.url?.startsWith('/moved-mcp')) { res.writeHead(307, { location: '/mcp?tenant=fixture' }).end(); return; }
+    if (req.url?.startsWith('/moved-sse')) { res.writeHead(307, { location: '/sse' }).end(); return; }
+    if (req.url?.startsWith('/away-sse')) { res.writeHead(302, { location: `http://localhost:${port}/sse` }).end(); return; }
     if (req.url?.startsWith('/sse') || req.url?.startsWith('/messages')) {
       if (req.headers.authorization !== `Bearer ${currentSecret()}`) { res.writeHead(401).end('bad credential'); return; }
       if (req.method === 'GET') {
@@ -256,6 +264,36 @@ describe('agent-facing connector files', () => {
   });
 });
 
+describe('connectors with a field only Claude Code acts on (headersHelper, oauth)', () => {
+  // Behind the proxy the helper's headers would be dropped and Claude Code's own
+  // sign-in would target the proxy URL, so these keep the direct path even when the
+  // field holds no placeholder.
+  const g = (): GatewayConfig => {
+    const out = gatewayConfig();
+    out.gateway.customConnectors = {
+      helper: { label: 'Helper', config: { type: 'http', url: upstreamUrl, headers: { 'X-Key': '{key}' }, headersHelper: '/usr/local/bin/print-headers' }, secretNames: ['key'], credentialOwner: 'static' },
+      signin: { label: 'Sign-in', config: { type: 'http', url: upstreamUrl, headers: { 'X-Key': '{key}' }, oauth: { clientId: 'public-client' } }, secretNames: ['key'], credentialOwner: 'static' },
+    } as any;
+    return out;
+  };
+
+  it('are written as configured, without a grant, even when the field has no placeholder', () => {
+    const resolved = {
+      helper: { type: 'http', url: upstreamUrl, headers: { 'X-Key': 'k' }, headersHelper: '/usr/local/bin/print-headers' },
+      signin: { type: 'http', url: upstreamUrl, headers: { 'X-Key': 'k' }, oauth: { clientId: 'public-client' } },
+    };
+    const { servers, grant } = agentFacingConnectors(agent(), g(), resolved);
+    expect(servers).toEqual(resolved);
+    expect(grant).toBeUndefined();
+  });
+
+  it('are reported as agent-readable', () => {
+    fs.writeFileSync(tokenEnv, 'CUSTOM__helper__key=k\nCUSTOM__signin__key=k\n');
+    const status = listConnectorStatus(g().gateway.customConnectors!);
+    expect(Object.fromEntries(status.map(s => [s.id, s.secretExposure]))).toEqual({ helper: 'agent-readable', signin: 'agent-readable' });
+  });
+});
+
 describe('behavior parity through the proxy', () => {
   it('lists every page, calls tools, streams progress, carries large payloads and tool errors', async () => {
     const { config, grant } = managedOps();
@@ -379,6 +417,24 @@ describe('proxy boundary', () => {
     expect(res.headers.get('location')).toBeNull();
     expect(seen).toHaveLength(1);
     revokeConnectorGrant(grant);
+  });
+
+  it('follows a same-origin redirect with the credential, as Claude Code did', async () => {
+    const g = gatewayConfig();
+    (g.gateway.customConnectors!.ops.config as any).url = upstreamUrl.replace('/mcp', '/moved-mcp');
+    const moved = managedOps(agent(), g);
+    const client = await connect(moved.config);
+    try {
+      const echo = await client.callTool({ name: 'echo', arguments: { q: 'moved' } });
+      expect((echo.content as any)[0].text).toBe('{"q":"moved"}');
+    } finally {
+      await client.close();
+      revokeConnectorGrant(moved.grant);
+    }
+    expect(seen.some(r => r.url?.startsWith('/moved-mcp'))).toBe(true);
+    const followed = seen.filter(r => r.url?.startsWith('/mcp'));
+    expect(followed.length).toBeGreaterThan(0);
+    for (const r of followed) expect(r.headers.authorization).toBe(`Bearer ${SECRET}`);
   });
 
   it('refuses a request a same-host reverse proxy forwarded', async () => {
@@ -599,6 +655,50 @@ describe('launched connectors (stdio, SSE, placeholders outside url/headers)', (
     for (const req of sse) expect(req.headers.authorization).toBe(`Bearer ${SSE_SECRET_HEADER}`);
   });
 
+  it('follows a same-origin SSE redirect and refuses one to another origin, like the HTTP proxy', async () => {
+    const g = launchedGateway();
+    const sseUrl = (g.gateway.customConnectors!.legacy.config as any).url as string;
+    (g.gateway.customConnectors!.legacy.config as any).url = sseUrl.replace('/sse', '/moved-sse');
+    let launched = managedFiles(g);
+    const client = await connectEntry(JSON.parse(fs.readFileSync(launched.files.legacy, 'utf8')));
+    try {
+      const echo = await client.callTool({ name: 'echo', arguments: { q: 'moved' } });
+      expect((echo.content as any)[0].text).toBe('{"q":"moved"}');
+    } finally {
+      await client.close();
+      revokeConnectorGrant(launched.grant);
+    }
+    expect(seen.some(r => r.url === '/sse' && r.headers.authorization === `Bearer ${SSE_SECRET_HEADER}`)).toBe(true);
+
+    seen = [];
+    (g.gateway.customConnectors!.legacy.config as any).url = sseUrl.replace('/sse', '/away-sse');
+    launched = managedFiles(g);
+    const error = jest.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await expect(connectEntry(JSON.parse(fs.readFileSync(launched.files.legacy, 'utf8')))).rejects.toThrow();
+    } finally {
+      error.mockRestore();
+      revokeConnectorGrant(launched.grant);
+    }
+    expect(seen.map(r => r.url)).toEqual(['/away-sse']);
+    expect(seen.some(r => r.headers.host?.startsWith('localhost'))).toBe(false);
+  }, 30000);
+
+  it("copies a launched server's stderr to the gateway log as it arrives", async () => {
+    const error = jest.spyOn(console, 'error').mockImplementation(() => {});
+    const { files, grant } = managedFiles(launchedGateway());
+    const client = await connectEntry(JSON.parse(fs.readFileSync(files.local, 'utf8')));
+    try {
+      await whoami(client);
+      // Logged while the server is still running, not only when it exits non-zero.
+      expect(error.mock.calls.map(c => String(c[0]))).toContain('connector-proxy: agent=alpha connector=local stderr: stdio-fixture: started');
+    } finally {
+      await client.close();
+      revokeConnectorGrant(grant);
+      error.mockRestore();
+    }
+  });
+
   it('refuses a launch without a valid grant, for another connector, or once disconnected', async () => {
     const { files, grant } = managedFiles(launchedGateway());
     const entry = JSON.parse(fs.readFileSync(files.local, 'utf8'));
@@ -652,7 +752,7 @@ process.exit(r.status ?? 1);
     const launch = await prepareContainerLaunch('app-container', workspace, g.gateway.customConnectors);
     expect(launch).toEqual({ container: 'app-container', hostDir: path.join(workspace, '.gateway-connectors'), containerDir: '/workspace/.gateway-connectors', bridgeCode: expect.any(String) });
     // Only the launcher, which never sees a secret, is put where the agent can edit it.
-    expect(fs.readdirSync(launch!.hostDir)).toEqual(['connector-launcher.mjs']);
+    expect(fs.readdirSync(launch!.hostDir).sort()).toEqual(['.gitignore', 'connector-launcher.mjs']);
     const resolved = { local: { command: process.execPath, args: [fixture, '--token', STDIO_SECRET], env: { KEY: STDIO_SECRET } }, ops: { type: 'http', url: upstreamUrl, headers: { Authorization: `Bearer ${SECRET}` } } };
     const { servers, grant } = agentFacingConnectors(agent({ workspace }), g, resolved, { container: launch });
     const config = path.join(workspace, 'mcp-config.json');
@@ -690,6 +790,60 @@ process.exit(r.status ?? 1);
     // Revoking closes the socket.
     expect(fs.existsSync(socketFile)).toBe(false);
   }, 60000);
+
+  it('ignores its directory for git and removes sockets a crashed gateway left behind', async () => {
+    const hostDir = path.join(workspace, '.gateway-connectors');
+    fs.mkdirSync(hostDir, { recursive: true });
+    fs.writeFileSync(path.join(hostDir, 'deadbeef0000.sock'), '');
+    const launch = await prepareContainerLaunch('app-container', workspace, launchedGateway().gateway.customConnectors);
+    expect(fs.readFileSync(path.join(launch!.hostDir, '.gitignore'), 'utf8')).toBe('*\n');
+    expect(fs.existsSync(path.join(hostDir, 'deadbeef0000.sock'))).toBe(false);
+    // A live session's socket survives the next session's preparation.
+    const { servers, grant } = agentFacingConnectors(agent({ workspace }), launchedGateway(), { local: { command: 'x', env: { KEY: STDIO_SECRET } } }, { container: launch });
+    const live = path.join(workspace, (servers.local as any).env.GATEWAY_CONNECTOR_SOCKET.slice('/workspace/'.length));
+    await new Promise(r => setTimeout(r, 50));
+    await prepareContainerLaunch('app-container', workspace, launchedGateway().gateway.customConnectors);
+    expect(fs.existsSync(live)).toBe(true);
+    revokeConnectorGrant(grant);
+  }, 60000);
+
+  it('reports the secrets of an agent whose container cannot launch as agent-readable, for that agent only', () => {
+    clearRuntimeExposure();
+    const g = launchedGateway();
+    const resolved = { local: { command: 'x', env: { KEY: STDIO_SECRET } }, ops: { type: 'http', url: upstreamUrl, headers: { Authorization: `Bearer ${SECRET}` } } };
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const { servers, grant } = agentFacingConnectors(agent({ id: 'boxed', workspace }), g, resolved, { containerUnavailable: true });
+      expect(servers).toEqual(resolved);
+      expect(grant).toBeUndefined();
+      const exposure = (): Record<string, unknown> => Object.fromEntries(listConnectorStatus(g.gateway.customConnectors!).map(s => [s.id, [s.secretExposure, s.exposedAgents]]));
+      expect(exposure()).toMatchObject({ local: ['agent-readable', ['boxed']], ops: ['agent-readable', ['boxed']], legacy: [undefined, undefined] });
+      // The agent's next spawn that does reach the gateway clears it.
+      revokeConnectorGrant(agentFacingConnectors(agent({ id: 'boxed', workspace }), g, resolved).grant);
+      expect(exposure()).toMatchObject({ local: [undefined, undefined], ops: [undefined, undefined] });
+    } finally {
+      warn.mockRestore();
+      clearRuntimeExposure();
+    }
+  });
+
+  it('reports the secrets as agent-readable when the socket path is too long to bind', async () => {
+    clearRuntimeExposure();
+    const deep = path.join(workspace, 'd'.repeat(120));
+    const launch = { container: 'app-container', hostDir: deep, containerDir: '/workspace/x', bridgeCode: '' };
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const resolved = { local: { command: 'x', env: { KEY: STDIO_SECRET } } };
+      const { servers, grant } = agentFacingConnectors(agent({ id: 'deep', workspace }), launchedGateway(), resolved, { container: launch });
+      expect(servers).toEqual(resolved);
+      expect(grant).toBeUndefined();
+      const local = listConnectorStatus(launchedGateway().gateway.customConnectors!).find(s => s.id === 'local');
+      expect(local).toMatchObject({ secretExposure: 'agent-readable', exposedAgents: ['deep'] });
+    } finally {
+      warn.mockRestore();
+      clearRuntimeExposure();
+    }
+  });
 
   it('keeps the resolved entries when the container cannot run the launcher', async () => {
     const fake = mockDocker;

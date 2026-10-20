@@ -9,7 +9,8 @@
 import type { AgentConfig, CustomConnectorEntry } from '../types';
 import { type ConnectorStatus } from './types';
 import { parseCounter, readTokenEnv } from './token-env';
-import { customSecretKey, exposesSecretToAgent, substitutePlaceholders } from './custom';
+import { customSecretKey, substitutePlaceholders } from './custom';
+import { secretExposureFields } from './exposure';
 import {
   refreshTransientCountSecretKey,
   refreshFailCountSecretKey,
@@ -195,7 +196,7 @@ export function listConnectorStatus(
         ...(entry.defaultEnabled !== undefined ? { defaultEnabled: entry.defaultEnabled } : {}),
         ...(entry.paused === true ? { paused: true } : {}),
         ...(refresh ? { refresh } : {}),
-        ...(exposesSecretToAgent(entry) ? { secretExposure: 'agent-readable' } : {}),
+        ...secretExposureFields(id, entry),
       } as ConnectorStatus;
     } catch (err) {
       // Same per-entry isolation resolveEnabledConnectors uses above, and for a

@@ -37,6 +37,8 @@ import type { CustomConnectorEntry } from './types';
 import { resolveEnabledConnectors } from './resolve';
 import { agentFacingFields, connectorSecretRoute, isStreamableHttpType } from './custom';
 import { sanitizeJevChildEnv } from '../jev/child-env';
+import { recordRuntimeExposure } from './exposure';
+import { MAX_REDIRECTS, sameOriginRedirect } from './redirect';
 
 export const CONNECTOR_PROXY_PATH = '/internal/mcp/connectors';
 
@@ -56,6 +58,7 @@ export interface ContainerLaunch {
 const CONTAINER_BRIDGE_LOADER = "let b=Buffer.alloc(0);const on=c=>{b=Buffer.concat([b,c]);const i=b.indexOf(10);if(i<0)return;process.stdin.off('data',on);process.stdin.pause();const code=JSON.parse(b.subarray(0,i).toString('utf8'));process.stdin.unshift(b.subarray(i+1));const M=require('module');const m=new M('/gateway-connector-bridge.cjs');m.filename='/gateway-connector-bridge.cjs';m.paths=[];m._compile(code,m.filename);};process.stdin.on('data',on);";
 
 interface Grant {
+  agentId: string;
   routes: ReadonlyMap<string, 'proxy' | 'launch'>;
   resolve: (id: string) => unknown;
   container?: ContainerLaunch;
@@ -71,6 +74,8 @@ const LAUNCHER = path.resolve(__dirname, '../../mcp/connector-launcher.mjs');
 const BRIDGE = path.resolve(__dirname, '../../mcp/connector-bridge.ts');
 /** sun_path is 108 bytes on Linux, terminator included. */
 const MAX_SOCKET_PATH = 107;
+/** Request bodies kept for a same-origin 307/308 replay; MCP messages are far smaller. */
+const MAX_REPLAY_BYTES = 4 * 1024 * 1024;
 
 const grants = new Map<string, Grant>();
 
@@ -105,14 +110,16 @@ function proxyBaseUrl(): string {
  * that uses it ends.
  *
  * `container` is set for a legacy app-agent session whose container can run the
- * launcher (see prepareContainerLaunch); without it such a session keeps the resolved
- * entries, since nothing else in the container can reach the gateway.
+ * launcher (see prepareContainerLaunch). `containerUnavailable` marks one whose
+ * container cannot: it keeps the resolved entries, since nothing else in the container
+ * can reach the gateway. Either fallback is recorded for the status API, which then
+ * reports this agent's secrets as agent-readable (connectors/exposure.ts).
  */
 export function agentFacingConnectors(
-  agent: Pick<AgentConfig, 'connectors' | 'isolateMemory'>,
+  agent: Pick<AgentConfig, 'id' | 'connectors' | 'isolateMemory'>,
   gateway: GatewayConfig,
   resolved: Record<string, unknown>,
-  options: { container?: ContainerLaunch; sanitizeEnv?: boolean } = {},
+  options: { container?: ContainerLaunch; containerUnavailable?: boolean; sanitizeEnv?: boolean } = {},
 ): { servers: Record<string, unknown>; grant?: string } {
   const entries = gateway.gateway?.customConnectors ?? {};
   const entryOf = (id: string): CustomConnectorEntry | undefined =>
@@ -125,10 +132,20 @@ export function agentFacingConnectors(
     if (route === 'proxy') routes.set(id, options.container ? 'launch' : 'proxy');
     else if (route === 'launch') routes.set(id, 'launch');
   }
+  const fallBack = (): { servers: Record<string, unknown> } => {
+    recordRuntimeExposure(agent.id, routes.keys());
+    return { servers };
+  };
+  recordRuntimeExposure(agent.id, []);
   if (!routes.size) return { servers };
+  if (options.containerUnavailable && !options.container) {
+    console.warn(`connector-proxy: agent=${agent.id} container cannot launch connectors; ${[...routes.keys()].join(', ')} keep their resolved entries`);
+    return fallBack();
+  }
 
   const grant = randomBytes(32).toString('base64url');
   const record: Grant = {
+    agentId: agent.id,
     routes,
     // Re-resolved per request, so a disconnected connector (its secret deleted) or a
     // removed entry fails on the next call. Per-agent enablement is read from the
@@ -149,8 +166,8 @@ export function agentFacingConnectors(
     socketName = `${randomBytes(6).toString('hex')}.sock`;
     const file = path.join(options.container.hostDir, socketName);
     if (Buffer.byteLength(file) > MAX_SOCKET_PATH) {
-      console.warn(`connector-proxy: socket path ${file} is too long; container connectors keep their resolved entries`);
-      return { servers };
+      console.warn(`connector-proxy: agent=${agent.id} socket path ${file} is too long; ${[...routes.keys()].join(', ')} keep their resolved entries`);
+      return fallBack();
     }
     record.socket = { server: listenOnSocket(file), file };
   }
@@ -180,6 +197,19 @@ function listenOnSocket(file: string): http.Server {
   server.on('error', err => console.error(`connector-proxy: socket ${file} failed: ${err.message}`));
   server.listen(file, () => { try { fs.chmodSync(file, 0o600); } catch { /* removed already */ } });
   return server;
+}
+
+/** Remove launcher sockets in `dir` no live grant holds: a gateway that exited
+ * without revoking (crash, SIGKILL) leaves them in the agent's workspace. */
+export function sweepStaleSockets(dir: string): void {
+  const live = new Set([...grants.values()].map(g => g.socket?.file));
+  let names: string[];
+  try { names = fs.readdirSync(dir); } catch { return; }
+  for (const name of names) {
+    const file = path.join(dir, name);
+    if (!name.endsWith('.sock') || live.has(file)) continue;
+    try { fs.rmSync(file, { force: true }); } catch (err) { console.warn(`connector-proxy: cannot remove stale socket ${file}: ${(err as Error).message}`); }
+  }
 }
 
 export function revokeConnectorGrant(grant: string | undefined): void {
@@ -260,50 +290,79 @@ export function createConnectorProxyRouter(): Router {
     }
     Object.assign(headers, upstream.headers);
 
-    let outbound: http.ClientRequest;
-    let clientGone = false;
-    try {
-      // node:http rather than fetch: undici's default 300s headers/body timeouts
-      // would cut long tool calls and idle SSE streams the agent's client allows.
-      outbound = (upstream.url.protocol === 'https:' ? https : http).request(upstream.url, { method: req.method, headers }, incoming => {
-        const status = incoming.statusCode ?? 502;
-        // Same stance as manageResource's `redirect: 'error'`: the upstream is the
-        // configured URL, and the credential is never replayed somewhere else.
-        if (status >= 300 && status < 400 && incoming.headers.location !== undefined) {
-          incoming.resume();
-          res.status(502).json({ error: 'Upstream redirect refused' });
-          return;
-        }
-        res.status(status);
-        for (const name of FORWARDED_RESPONSE_HEADERS) {
-          const value = incoming.headers[name];
-          if (value !== undefined) res.setHeader(name, value);
-        }
-        res.flushHeaders();
-        // pipeline, not pipe: an upstream that drops mid-response must end the
-        // agent's stream too, or its call hangs on a response that never finishes.
-        pipeline(incoming, res, err => {
-          // `res.errored` tells an upstream failure from the agent cancelling the call.
-          if (err && res.errored) console.error(`connector-proxy: connector=${id} response stream failed: ${err.message}`);
-        });
-      });
-    } catch (err) {
-      // An invalid header value in the pasted config throws synchronously.
-      console.error(`connector-proxy: connector=${id} request rejected: ${(err as Error).message}`);
-      res.status(502).json({ error: 'Upstream request failed' });
-      return;
-    }
-    outbound.on('error', err => {
-      // Destroyed below because the agent cancelled first: nothing failed upstream.
-      if (clientGone) return;
-      console.error(`connector-proxy: connector=${id} upstream failed: ${err.message}`);
-      if (!res.headersSent) res.status(502).json({ error: 'Upstream request failed' });
-      else res.destroy();
+    // Kept for replaying the body to a same-origin 307/308 target; dropped past the cap.
+    let body: Buffer[] | undefined = [];
+    let bodyBytes = 0;
+    req.on('data', (chunk: Buffer) => {
+      if (!body) return;
+      bodyBytes += chunk.length;
+      if (bodyBytes > MAX_REPLAY_BYTES) body = undefined;
+      else body.push(chunk);
     });
+    const method = req.method;
+    let outbound: http.ClientRequest | undefined;
+    let clientGone = false;
+    const send = (target: URL, hops: number): http.ClientRequest | undefined => {
+      let request: http.ClientRequest;
+      try {
+        // node:http rather than fetch: undici's default 300s headers/body timeouts
+        // would cut long tool calls and idle SSE streams the agent's client allows.
+        request = (target.protocol === 'https:' ? https : http).request(target, { method, headers }, incoming => {
+          const status = incoming.statusCode ?? 502;
+          const location = incoming.headers.location;
+          if (status >= 300 && status < 400 && location !== undefined) {
+            incoming.resume();
+            // Same-origin only (see redirect.ts), and only where the request can be
+            // repeated unchanged: a bodyless method, or a 307/308 with its body kept.
+            const next = sameOriginRedirect(target, location);
+            const repeatable = method !== 'POST' || ((status === 307 || status === 308) && body !== undefined);
+            if (!next || hops >= MAX_REDIRECTS || !repeatable || clientGone) {
+              if (!next) console.error(`connector-proxy: connector=${id} refused a redirect to another origin`);
+              if (!res.headersSent) res.status(502).json({ error: 'Upstream redirect refused' });
+              return;
+            }
+            const follow = (): void => {
+              if (clientGone) return;
+              outbound = send(next, hops + 1);
+              outbound?.end(method === 'POST' ? Buffer.concat(body!) : undefined);
+            };
+            if (req.readableEnded) follow(); else req.once('end', follow);
+            return;
+          }
+          res.status(status);
+          for (const name of FORWARDED_RESPONSE_HEADERS) {
+            const value = incoming.headers[name];
+            if (value !== undefined) res.setHeader(name, value);
+          }
+          res.flushHeaders();
+          // pipeline, not pipe: an upstream that drops mid-response must end the
+          // agent's stream too, or its call hangs on a response that never finishes.
+          pipeline(incoming, res, err => {
+            // `res.errored` tells an upstream failure from the agent cancelling the call.
+            if (err && res.errored) console.error(`connector-proxy: connector=${id} response stream failed: ${err.message}`);
+          });
+        });
+      } catch (err) {
+        // An invalid header value in the pasted config throws synchronously.
+        console.error(`connector-proxy: connector=${id} request rejected: ${(err as Error).message}`);
+        if (!res.headersSent) res.status(502).json({ error: 'Upstream request failed' });
+        return undefined;
+      }
+      request.on('error', err => {
+        // Destroyed below because the agent cancelled first: nothing failed upstream.
+        if (clientGone) return;
+        console.error(`connector-proxy: connector=${id} upstream failed: ${err.message}`);
+        if (!res.headersSent) res.status(502).json({ error: 'Upstream request failed' });
+        else res.destroy();
+      });
+      return request;
+    };
+    outbound = send(upstream.url, 0);
+    if (!outbound) return;
     // The agent's client went away (cancelled call, closed SSE stream): stop upstream too.
     res.on('close', () => {
       clientGone = !res.writableFinished;
-      outbound.destroy();
+      outbound?.destroy();
     });
     pipeline(req, outbound, () => { /* outbound errors are reported by its 'error' listener */ });
   });
@@ -374,6 +433,34 @@ export function handleConnectorUpgrade(req: http.IncomingMessage, socket: Duplex
   return true;
 }
 
+/** Per-bridge cap on stderr copied to the gateway log; a server stuck in a log
+ * loop must not fill the disk. */
+const MAX_STDERR_LOG_BYTES = 256 * 1024;
+const MAX_STDERR_LINE = 4096;
+
+/**
+ * Copy a launched server's stderr (and the bridge's own) to the gateway log, line by
+ * line as it arrives. Claude Code used to keep it in its per-server MCP log; with the
+ * server running under the gateway, this log is where it now goes.
+ */
+function logBridgeStderr(bridge: ChildProcess, prefix: string): void {
+  let partial = '';
+  let logged = 0;
+  const emit = (line: string): void => {
+    if (!line.trim() || logged > MAX_STDERR_LOG_BYTES) return;
+    logged += line.length;
+    console.error(`${prefix} stderr: ${line.slice(0, MAX_STDERR_LINE)}`);
+    if (logged > MAX_STDERR_LOG_BYTES) console.error(`${prefix} stderr: further output suppressed`);
+  };
+  bridge.stderr!.on('data', (chunk: Buffer) => {
+    const lines = (partial + chunk.toString('utf8')).split('\n');
+    partial = lines.pop() ?? '';
+    if (partial.length > MAX_STDERR_LINE) { emit(partial); partial = ''; }
+    for (const line of lines) emit(line);
+  });
+  bridge.stderr!.on('end', () => { emit(partial); partial = ''; });
+}
+
 function startBridge(grant: Grant, id: string, server: Record<string, unknown>, preamble: { cwd?: unknown; env?: unknown }, rest: Buffer, socket: Duplex): void {
   if (grant.revoked) { socket.destroy(); return; }
   const clean = grant.cleanEnv;
@@ -388,8 +475,7 @@ function startBridge(grant: Grant, id: string, server: Record<string, unknown>, 
     // Its own environment carries nothing of the gateway's: the server's comes from the spec.
     : spawn('bun', [BRIDGE], { env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '' }, stdio: ['pipe', 'pipe', 'pipe'] });
   grant.bridges.add(bridge);
-  let stderr = '';
-  bridge.stderr!.on('data', (chunk: Buffer) => { stderr = (stderr + chunk.toString('utf8')).slice(-2048); });
+  logBridgeStderr(bridge, `connector-proxy: agent=${grant.agentId} connector=${id}`);
   bridge.stdin!.on('error', () => {});
   if (grant.container) bridge.stdin!.write(JSON.stringify(grant.container.bridgeCode) + '\n');
   bridge.stdin!.write(JSON.stringify(spec) + '\n');
@@ -400,7 +486,7 @@ function startBridge(grant: Grant, id: string, server: Record<string, unknown>, 
   bridge.on('error', err => { console.error(`connector-proxy: connector=${id} bridge failed: ${err.message}`); socket.destroy(); });
   bridge.on('exit', (code, signal) => {
     grant.bridges.delete(bridge);
-    if (code) console.error(`connector-proxy: connector=${id} exited code=${code}${stderr ? `: ${stderr.trim()}` : ''}`);
+    if (code) console.error(`connector-proxy: agent=${grant.agentId} connector=${id} exited code=${code}`);
     else if (signal && signal !== 'SIGTERM') console.error(`connector-proxy: connector=${id} killed by ${signal}`);
   });
   bridge.stdout!.on('end', () => socket.end());
