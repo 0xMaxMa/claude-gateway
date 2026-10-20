@@ -3,7 +3,8 @@
  * A same-origin redirect (a trailing-slash rewrite, a moved path) is followed with
  * the connector's headers, as Claude Code's own fetch-based transport did. A redirect
  * to any other origin is refused: the credential is never replayed somewhere the
- * connector config does not name. No imports: the bridge bundles this for Node.
+ * connector config does not name. No imports: mcp/connector-bridge.ts loads the
+ * compiled copy from dist/, and is bundled for Node inside app-agent containers.
  */
 export const MAX_REDIRECTS = 5;
 

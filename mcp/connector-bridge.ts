@@ -18,7 +18,7 @@ import { createInterface } from 'readline';
 import { PassThrough } from 'stream';
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { MAX_REDIRECTS, sameOriginRedirect } from '../src/connectors/redirect';
+import { MAX_REDIRECTS, sameOriginRedirect } from '../dist/connectors/redirect.js';
 
 const MAX_SPEC_BYTES = 4 * 1024 * 1024;
 let pending = Buffer.alloc(0);
