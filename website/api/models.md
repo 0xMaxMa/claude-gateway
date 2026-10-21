@@ -4,11 +4,13 @@
 
 List the models this gateway offers.
 
-The list is fetched **live** from `{ANTHROPIC_BASE_URL}/v1/models` when a catalog base URL is configured, so a model added, removed, or reordered upstream shows up here without touching `config.json`. `MODELS_BASE_URL` overrides the base URL when the catalog is served separately from the messages endpoint, and `MODELS_API_KEY` / `ANTHROPIC_AUTH_TOKEN` supplies the bearer token; both also resolve from the `env` block of `~/.claude/settings.json`. A successful fetch is cached for 60 seconds and shared between concurrent callers.
+The list starts with configured models and adds live models from `{ANTHROPIC_BASE_URL}/v1/models` when a catalog base URL is configured. Upstream additions appear without touching `config.json`; configured models remain listed until their config entries are removed. `MODELS_BASE_URL` overrides the base URL when the catalog is served separately from the messages endpoint, and `MODELS_API_KEY` / `ANTHROPIC_AUTH_TOKEN` supplies the bearer token; both also resolve from the `env` block of `~/.claude/settings.json`. A successful fetch is cached for 60 seconds and shared between concurrent callers.
 
-`gateway.models` from `config.json` is the fallback, used when no base URL is configured, when the URL is `http` to a non-local host (the bearer token is never sent in cleartext), or when the fetch fails, times out, or returns an empty or unparseable catalog. One exception: while fetches are failing, a catalog fetched within the last hour is served instead of the configured list — dropping to the provisioning-time list on a blip would make a model that exists only upstream vanish from its own picker. Past that hour the configured list takes over. A catalog response supplies `id` and the display name; `alias`, `contextWindow` and `multiplier` are carried over from the configured entry with the same id, and a model with no configured counterpart gets its id as its alias and a 200000 context window. A row that identifies itself as a non-chat model (`kind`/`type` of `image`, `audio`, `embedding`, …) is dropped — a proxy that fronts image generation alongside chat may serve one catalog for both, and an image model is not selectable as a chat model. A row that says nothing about its kind is kept.
+`gateway.models` from `config.json` supplies the configured portion of the list. When no base URL is configured, when the URL is `http` to a non-local host (the bearer token is never sent in cleartext), or when the fetch fails, times out, or returns an empty or unparseable catalog, the list contains only configured models. One exception: while fetches are failing, a catalog fetched within the last hour still supplies live-only entries. Past that hour, only configured models remain. A configured row retains its own metadata even when the catalog has the same id. A live-only row uses the catalog's id and display name; if it has no alias or context window, its id becomes its alias and its context window defaults to 200000. A row that identifies itself as a non-chat model (`kind`/`type` of `image`, `audio`, `embedding`, …) is dropped — a proxy that fronts image generation alongside chat may serve one catalog for both, and an image model is not selectable as a chat model. A row that says nothing about its kind is kept.
 
-The catalog **replaces** the configured list rather than merging with it, so a model withdrawn upstream disappears from the picker instead of lingering. A configured model the catalog omits stays *addressable* — `/model <id or alias>` still accepts it, and it keeps its configured context window — so switching to a live-only model is never a one-way door.
+The catalog keeps configured models first and adds upstream-only models afterward. A configured model omitted by the provider therefore remains visible and selectable until config migration or an explicit config edit removes it. A live-only model is also selectable while the catalog is available.
+
+Listing or selecting a configured model does not verify that the provider currently accepts inference for that ID.
 
 ```bash
 curl -H "X-Api-Key: my-secret-key-123" \
@@ -29,7 +31,8 @@ curl -H "X-Api-Key: my-secret-key-123" \
     { "id": "gpt-6-sol[1m]",       "name": "GPT 6 Sol",     "alias": "gpt6sol",   "contextWindow": 1050000, "multiplier": 1 },
     { "id": "gpt-6-astra[1m]",     "name": "GPT 6 Astra",   "alias": "gpt6astra", "contextWindow": 1050000, "multiplier": 1 },
     { "id": "gpt-6-luna[1m]",      "name": "GPT 6 Luna",    "alias": "gpt6luna",  "contextWindow": 1050000, "multiplier": 1 },
-    { "id": "gpt-5.6-sol[1m]",     "name": "GPT 5.6 Sol",   "alias": "gpt56sol",  "contextWindow": 1050000, "multiplier": 1 }
+    { "id": "gpt-5.6-terra[1m]",   "name": "GPT 5.6 Terra", "alias": "gpt56terra", "contextWindow": 1050000, "multiplier": 1 },
+    { "id": "gpt-6.1-sol[1m]",        "name": "GPT 6.1 Sol",   "alias": "gpt61sol",  "contextWindow": 1050000, "multiplier": 1 }
   ]
 }
 ```

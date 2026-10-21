@@ -384,24 +384,24 @@ describe('config migration — GPT models reach existing installs', () => {
     expect(compareSemver(templateVersion(), '1.0.29')).toBeGreaterThan(0);
   });
 
-  it('adds missing GPT models and corrects metadata for an existing GPT entry', () => {
+  it('adds current GPT models and preserves a customized retired GPT entry', () => {
     const configPath = writePreGptConfig();
 
     const result = runRealUpgrade(configPath);
 
     expect(result.needed).toBe(true);
-    expect(result.addedFields).toContain('gateway.models[gpt-5.6-sol[1m]]');
+    expect(result.addedFields).toContain('gateway.models[gpt-6.1-sol[1m]]');
     expect(result.addedFields).not.toContain('gateway.models[gpt-5.6-terra[1m]]');
-    expect(result.addedFields).toContain('gateway.models[gpt-5.6-luna[1m]]');
+    expect(result.addedFields).not.toContain('gateway.models[gpt-5.6-luna[1m]]');
     expect(result.addedFields).toContain('gateway.models[gpt-5.5[1m]]');
 
     const migrated = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
     expect(migrated.configVersion).toBe(templateVersion());
     expect(migrated.gateway.models).toContainEqual({
       id: 'gpt-5.6-terra[1m]',
-      label: 'GPT 5.6 Terra',
-      alias: 'gpt56terra',
-      contextWindow: 1050000,
+      label: 'Old GPT Terra',
+      alias: 'oldterra',
+      contextWindow: 1000000,
     });
     expect(migrated.gateway.models.some((model: { id: string }) => model.id === 'gpt-5.6-terra')).toBe(false);
     expect(migrated.agents[0].claude.model).toBe('gpt-5.6-terra[1m]');
@@ -726,6 +726,9 @@ describe('config migration — GPT 6 reaches existing installs', () => {
       expect(migrated.gateway.models).toContainEqual(model);
     }
     expect(result.addedFields).not.toContain('gateway.models[gpt-5.6-sol[1m]]');
+    expect(result.addedFields).toContain('gateway.models[gpt-5.6-terra[1m]]');
+    expect(result.addedFields).toContain('gateway.models[gpt-6.1-sol[1m]]');
+    expect(migrated.gateway.models.some((model: { id: string }) => model.id === 'gpt-5.6-sol[1m]')).toBe(false);
 
     const aliases = migrated.gateway.models.map((m: { alias: string }) => m.alias);
     expect(new Set(aliases).size).toBe(aliases.length);
