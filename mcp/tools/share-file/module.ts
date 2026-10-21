@@ -31,7 +31,7 @@ export class ShareFileModule implements ToolModule {
     if (process.env.GATEWAY_ORCHESTRATION_ROLE !== 'worker') return shareFileToolDefs;
     return shareFileToolDefs.map(tool => ({
       ...tool,
-      description: tool.name === LEGACY_TOOL_NAME ? tool.description : tool.description + ' In a task, pass the original absolute file path in the active task workspace, a supplied input attachment or this session’s media directory. The link points to the existing authorized file; no staging copy is made. Do not copy it to the agent-wide media root. Describe this as creating a link (Thai: สร้างลิงก์).',
+      description: tool.name === LEGACY_TOOL_NAME ? tool.description : tool.description + ' In a task, pass the original absolute file path in the active task workspace, a supplied input attachment or this session’s media directory. The gateway prepares the authorized file path automatically. Do not copy it to the agent-wide media root. Describe this as creating a link (Thai: สร้างลิงก์).',
       inputSchema: { ...(tool.name === LEGACY_TOOL_NAME ? shareImageInputSchema : shareFileInputSchema), properties: { ...(tool.name === LEGACY_TOOL_NAME ? shareImageInputSchema.properties : shareFileInputSchema.properties),
         path: { type: 'string', description: tool.name === LEGACY_TOOL_NAME ? 'Original absolute file path in this session’s media directory, or artifact:<id>.' : 'Original absolute file path in the active agent workspace or session media, or artifact:<id>.' },
         paths: { type: 'array', items: { type: 'string' }, description: tool.name === LEGACY_TOOL_NAME ? 'Up to 5 authorized session media paths or artifact refs.' : 'Up to 5 authorized workspace/media paths or artifact refs.' },
