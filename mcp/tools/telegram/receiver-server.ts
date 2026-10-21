@@ -51,7 +51,7 @@ import { formatTurnIncident, type TurnIncident } from '../../../dist/agent/turn-
 import { createIncidentStore } from '../../../dist/agent/incident-store.js'
 import type { RecoveryOutcome } from '../../../dist/agent/incident.js'
 import { initDedupDir, isDuplicate as _isDuplicate, pruneDedup as _pruneDedup } from './dedup'
-import { normalizeTelegramLineBreaks, resolveTelegramReplyFormat, migrateAccess, telegramDisplayName, groupCommandReply, isGroupCommand, stripCommandTarget } from './pure'
+import { normalizeTelegramLineBreaks, resolveTelegramReplyFormat, migrateAccess, telegramDisplayName, groupCommandReply, isGroupCommand, isGroupCommandAllowed, telegramGroupModelReply, stripCommandTarget, type GroupCommandInput } from './pure'
 import { MAX_ATTACHMENT_BYTES } from '../shared/limits'
 
 // Standalone fallback: default state dir to ~/.claude/channels/telegram
@@ -1217,11 +1217,32 @@ bot.command('status', async ctx => {
   await ctx.reply(`Not paired. Send me a message to get a pairing code.`)
 })
 
-// /model — show the current model (receiver mode only, needs AgentRunner callback).
+// /model — show the current model in a group or DM; setting is DM-only.
 bot.command('model', async ctx => {
-  if (ctx.chat?.type !== 'private') return
-  const access = loadAccess()
-  if (!access.allowFrom.includes(String(ctx.from!.id))) return
+  const isGroup = ctx.chat?.type === 'group' || ctx.chat?.type === 'supergroup'
+  const argument = ctx.match.trim()
+  let groupAccess: ReturnType<typeof loadAccess> | undefined
+  let groupInput: GroupCommandInput | undefined
+  if (isGroup) {
+    const chat = ctx.chat!
+    groupAccess = loadAccess()
+    groupInput = {
+      chatType: chat.type,
+      chatId: String(chat.id),
+      fromId: String(ctx.from!.id),
+      text: ctx.message.text,
+      botUsername,
+    }
+    if (!isGroupCommandAllowed(groupAccess, groupInput)) return
+    if (argument) {
+      await ctx.reply('Use /model <model-id> in a direct message with the bot to change the model.')
+      return
+    }
+  } else {
+    if (ctx.chat?.type !== 'private') return
+    const access = loadAccess()
+    if (!access.allowFrom.includes(String(ctx.from!.id))) return
+  }
   if (!CALLBACK_URL_BASE) return
 
   try {
@@ -1231,7 +1252,9 @@ bot.command('model', async ctx => {
       body: JSON.stringify({ command: 'get_model', chat_id: String(ctx.chat.id) }),
     })
     const data = (await res.json()) as { model?: string }
-    await ctx.reply(`Current model: ${data.model ?? 'unknown'}`)
+    await ctx.reply(groupAccess && groupInput
+      ? telegramGroupModelReply(groupAccess, groupInput, data.model ?? 'unknown') ?? 'Current model: unknown'
+      : `Current model: ${data.model ?? 'unknown'}`)
   } catch (err) {
     await ctx.reply('Failed to get model info.')
   }
