@@ -46,3 +46,10 @@ test.each(['session', 'media'])('rejects redirected %s directory', async kind =>
   await expect(prepareSharePath(source, media)).rejects.toThrow('ARTIFACT_PATH_DENIED');
   expect(readdirSync(external).filter(name => name.startsWith('share-'))).toEqual([]);
 });
+
+test('valid multibyte filenames remain shareable with their extension', async () => {
+  const named = join(root, `${'ก'.repeat(70)}.pdf`); writeFileSync(named, '%PDF-1.4 fixture');
+  const prepared = await prepareSharePath(named, media);
+  expect(prepared.endsWith('.pdf')).toBe(true);
+  expect(await fs.readFile(prepared, 'utf8')).toBe('%PDF-1.4 fixture');
+});

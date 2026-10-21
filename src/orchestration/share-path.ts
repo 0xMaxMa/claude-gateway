@@ -1,6 +1,6 @@
 import { constants } from 'fs';
 import { mkdir, realpath, link, open, lstat, unlink, rename } from 'fs/promises';
-import { basename, join, relative, isAbsolute } from 'path';
+import { basename, extname, join, relative, isAbsolute } from 'path';
 import { pipeline } from 'stream/promises';
 import { randomUUID, createHash } from 'crypto';
 import { OrchestrationError } from './types';
@@ -15,7 +15,8 @@ export async function prepareSharePath(source: string, mediaDir: string): Promis
   if (root !== join(agentRoot, 'media') || directory !== join(root, basename(mediaDir))) throw new OrchestrationError('ARTIFACT_PATH_DENIED');
   const ref = relative(directory, source);
   if (ref && !ref.startsWith('..') && !isAbsolute(ref)) return source;
-  const name = `share-${createHash('sha256').update(source).digest('hex')}-${basename(source).slice(-120)}`;
+  const suffix = extname(source).slice(0, 12).replace(/[^a-zA-Z0-9.]/g, '');
+  const name = `share-${createHash('sha256').update(source).digest('hex')}${suffix}`;
   const destination = join(directory, name);
   const temporary = join(directory, `.share-${randomUUID()}`);
   try {

@@ -285,6 +285,7 @@ test.each(['pdf', 'iso'])('worker %s sharing reports a wrong media scope, then s
     const staging = await fetch(ticket.url, { method: 'POST', headers: { Authorization: `Bearer ${ticket.token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ tool: 'task_stage_file', action_id: 'denied-pdf', args: { path: copied } }) });
     expect(await staging.json()).toMatchObject({ error: 'ARTIFACT_PATH_DENIED', message: expect.stringContaining('original file'), retryable: true });
     const created = await tool.handleTool('share_file', { path: original });
+    if (created.isError) throw new Error(created.content[0].text);
     expect(created.isError).toBeUndefined();
     const item = JSON.parse(created.content[0].text!).items[0];
     const repeated = await tool.handleTool('share_file', { path: original });
