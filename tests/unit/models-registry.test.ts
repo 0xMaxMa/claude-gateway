@@ -167,14 +167,18 @@ describe('model registry — Fable 5.1 is a first-class model', () => {
 });
 
 describe('model registry — DEFAULT_MODELS and template stay in sync', () => {
-  it('uses OpenAI-documented 1,050,000-token windows for all GPT models', () => {
+  it('uses the configured windows for GPT defaults', () => {
     const gptIds = [
       'gpt-6-sol[1m]', 'gpt-6-astra[1m]', 'gpt-6-luna[1m]',
-      'gpt-5.6-sol[1m]', 'gpt-5.6-terra[1m]', 'gpt-5.6-luna[1m]', 'gpt-5.5[1m]',
+      'gpt-5.5[1m]',
     ];
     for (const id of gptIds) {
       expect(byId(DEFAULT_MODELS, id)?.contextWindow).toBe(1050000);
       expect(byId(templateModels(), id)?.contextWindow).toBe(1050000);
+    }
+    for (const id of ['gpt-6-terra', 'gpt-6.1-sol']) {
+      expect(byId(DEFAULT_MODELS, id)?.contextWindow).toBe(200000);
+      expect(byId(templateModels(), id)?.contextWindow).toBe(200000);
     }
   });
 

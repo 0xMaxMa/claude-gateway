@@ -29,7 +29,8 @@ curl -H "X-Api-Key: my-secret-key-123" \
     { "id": "gpt-6-sol[1m]",       "name": "GPT 6 Sol",     "alias": "gpt6sol",   "contextWindow": 1050000, "multiplier": 1 },
     { "id": "gpt-6-astra[1m]",     "name": "GPT 6 Astra",   "alias": "gpt6astra", "contextWindow": 1050000, "multiplier": 1 },
     { "id": "gpt-6-luna[1m]",      "name": "GPT 6 Luna",    "alias": "gpt6luna",  "contextWindow": 1050000, "multiplier": 1 },
-    { "id": "gpt-5.6-sol[1m]",     "name": "GPT 5.6 Sol",   "alias": "gpt56sol",  "contextWindow": 1050000, "multiplier": 1 }
+    { "id": "gpt-6-terra",        "name": "GPT 6 Terra",  "alias": "gpt6terra", "contextWindow": 200000,  "multiplier": 1 },
+    { "id": "gpt-6.1-sol",        "name": "GPT 6.1 Sol",   "alias": "gpt61sol",  "contextWindow": 200000,  "multiplier": 1 }
   ]
 }
 ```

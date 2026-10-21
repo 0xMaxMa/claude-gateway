@@ -44,10 +44,10 @@ Existing model entries in `gateway.models` can declare worker routing and provid
 
 ```json
 {
-  "id": "gpt-5.6-luna[1m]",
+  "id": "gpt-6-luna[1m]",
   "alias": "fast-worker",
   "workerHarness": "codex",
-  "workerModel": "gpt-5.6-luna"
+  "workerModel": "gpt-6-luna"
 }
 ```
 
@@ -277,8 +277,8 @@ The repository includes a small billable benchmark of the two native CLIs:
 
 ```bash
 node scripts/orchestration/benchmark-worker-harnesses.cjs --run \
-  --claude-model 'gpt-5.6-luna[1m]' \
-  --codex-model gpt-5.6-luna \
+  --claude-model 'gpt-6-luna[1m]' \
+  --codex-model gpt-6-luna \
   --output /tmp/worker-benchmark.json
 ```
 

@@ -513,7 +513,9 @@ export function detectMigration(
   deepMerge(configClone, templateWithoutAgents, '', added, ignorePaths);
 
   // Migrate models array by ID
-  migrateModels(configClone, template, added);
+  const retiringDefaults = compareSemver(configVersion, '1.0.38') < 0
+    && compareSemver(templateVersion, '1.0.38') >= 0;
+  const retiredModels = migrateModels(configClone, template, added, retiringDefaults);
 
   // Merge agent arrays
   if (Array.isArray(configClone.agents) && Array.isArray(template.agents)) {
@@ -526,7 +528,7 @@ export function detectMigration(
   }
 
   // Prune removed paths from agent entries
-  const removed: string[] = [];
+  const removed: string[] = [...retiredModels];
   if (removePaths.length > 0 && Array.isArray(configClone.agents)) {
     removed.push(
       ...pruneAgentPaths(configClone.agents as Array<Record<string, unknown>>, removePaths),
@@ -577,6 +579,8 @@ export function applyMigration(
 ): MigrationResult {
   const added: string[] = [];
   const warnings: string[] = [];
+  const retiringDefaults = compareSemver(String(config.configVersion ?? '0.0.0'), '1.0.38') < 0
+    && compareSemver(templateVersion, '1.0.38') >= 0;
 
   added.push(...migrateOrchestrationSettings(config));
 
@@ -612,7 +616,7 @@ export function applyMigration(
   deepMerge(config, templateWithoutAgents, '', added, ignorePaths);
 
   // Migrate models array by ID
-  migrateModels(config, template, added);
+  const retiredModels = migrateModels(config, template, added, retiringDefaults);
 
   // Merge agent arrays
   if (Array.isArray(config.agents) && Array.isArray(template.agents)) {
@@ -625,7 +629,7 @@ export function applyMigration(
   }
 
   // Prune removed paths from agent entries
-  const removed: string[] = [];
+  const removed: string[] = [...retiredModels];
   if (removePaths && removePaths.length > 0 && Array.isArray(config.agents)) {
     removed.push(
       ...pruneAgentPaths(config.agents as Array<Record<string, unknown>>, removePaths),
@@ -719,6 +723,29 @@ const LEGACY_MODEL_ID_RENAMES: Readonly<Record<string, string>> = {
   'gpt-5.5': 'gpt-5.5[1m]',
 };
 
+// Match the complete rows shipped by 1.0.37. Customized entries with these
+// IDs remain user-owned and must survive the 1.0.38 migration.
+const RETIRED_MODEL_DEFAULTS: Readonly<Record<string, { label: string; alias: string; contextWindow: number }>> = {
+  'gpt-5.6-sol[1m]': { label: 'GPT 5.6 Sol', alias: 'gpt56sol', contextWindow: 1050000 },
+  'gpt-5.6-terra[1m]': { label: 'GPT 5.6 Terra', alias: 'gpt56terra', contextWindow: 1050000 },
+  'gpt-5.6-luna[1m]': { label: 'GPT 5.6 Luna', alias: 'gpt56luna', contextWindow: 1050000 },
+};
+
+const RETIRED_AGENT_REPLACEMENTS: Readonly<Record<string, string>> = {
+  'gpt-5.6-sol[1m]': 'gpt-6.1-sol',
+  'gpt-5.6-terra[1m]': 'gpt-6-terra',
+  'gpt-5.6-luna[1m]': 'gpt-6-luna[1m]',
+};
+
+const NEW_MODEL_IDS = new Set(['gpt-6-terra', 'gpt-6.1-sol']);
+
+function isRetiredDefault(model: Record<string, unknown>): boolean {
+  const expected = RETIRED_MODEL_DEFAULTS[String(model.id)];
+  return !!expected && model.label === expected.label && model.alias === expected.alias
+    && model.contextWindow === expected.contextWindow
+    && Object.keys(model).every(key => ['id', 'label', 'alias', 'contextWindow'].includes(key));
+}
+
 /**
  * Merge models from template into user config by ID.
  * Adds new models, updates alias/label/contextWindow of existing ones.
@@ -728,28 +755,38 @@ function migrateModels(
   config: Record<string, unknown>,
   template: Record<string, unknown>,
   added: string[],
-): void {
+  retireShippedDefaults = false,
+): string[] {
   const gw = config.gateway as Record<string, unknown> | undefined;
   const tgw = template.gateway as Record<string, unknown> | undefined;
-  if (!gw || !tgw) return;
+  if (!gw || !tgw) return [];
 
   const templateModels = tgw.models as Array<Record<string, unknown>> | undefined;
-  if (!templateModels || templateModels.length === 0) return;
+  if (!templateModels || templateModels.length === 0) return [];
 
   const userModels = (gw.models ?? []) as Array<Record<string, unknown>>;
   for (const model of userModels) {
     const renamedId = LEGACY_MODEL_ID_RENAMES[String(model.id)];
     if (renamedId) model.id = renamedId;
   }
-  const userMap = new Map(userModels.map((m) => [m.id as string, m]));
+  const templateIds = new Set(templateModels.map(model => String(model.id)));
+  const retiredIds = new Set<string>();
+  const keptModels = userModels.filter(model => {
+    if (!retireShippedDefaults || templateIds.has(String(model.id)) || !isRetiredDefault(model)) return true;
+    retiredIds.add(String(model.id));
+    return false;
+  });
+  const userMap = new Map(keptModels.map((m) => [m.id as string, m]));
   const merged: Array<Record<string, unknown>> = [];
 
   for (const tm of templateModels) {
     const existing = userMap.get(tm.id as string);
     if (existing) {
-      existing.alias = tm.alias;
-      existing.label = tm.label;
-      existing.contextWindow = tm.contextWindow;
+      if (!retireShippedDefaults || !NEW_MODEL_IDS.has(String(tm.id))) {
+        existing.alias = tm.alias;
+        existing.label = tm.label;
+        existing.contextWindow = tm.contextWindow;
+      }
       merged.push(existing);
     } else {
       merged.push(structuredClone(tm));
@@ -757,13 +794,14 @@ function migrateModels(
     }
   }
 
-  for (const um of userModels) {
+  for (const um of keptModels) {
     if (!templateModels.some((tm) => tm.id === um.id)) {
       merged.push(um);
     }
   }
 
   gw.models = merged;
+  const remainingIds = new Set(merged.map(model => String(model.id)));
 
   if (Array.isArray(config.agents)) {
     for (const agent of config.agents as Array<Record<string, unknown>>) {
@@ -772,8 +810,13 @@ function migrateModels(
       const model = (claude as Record<string, unknown>).model;
       const renamedId = LEGACY_MODEL_ID_RENAMES[String(model)];
       if (renamedId) (claude as Record<string, unknown>).model = renamedId;
+      const effectiveId = String((claude as Record<string, unknown>).model);
+      if (retiredIds.has(effectiveId) && !remainingIds.has(effectiveId)) {
+        (claude as Record<string, unknown>).model = RETIRED_AGENT_REPLACEMENTS[effectiveId];
+      }
     }
   }
+  return [...retiredIds].filter(id => !remainingIds.has(id)).map(id => `gateway.models[${id}]`);
 }
 
 // Exported for testing
