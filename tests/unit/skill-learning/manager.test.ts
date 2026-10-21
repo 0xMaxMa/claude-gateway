@@ -471,9 +471,9 @@ describe('installed skills vs workspace skills', () => {
 describe('skillCatalogUsage — the menu enforces the cap when the curator cannot archive', () => {
   const resolved = (over: SkillLearningConfig = {}) => resolveSkillLearningConfig({ maxAutoSkills: 3, ...over });
 
-  it('sets the menu cap only when skills/.archive is unusable and learning is enabled', () => {
+  it('sets the menu cap whenever learning is enabled, including before archival', () => {
     const { db, ws, dir } = setup();
-    expect(skillCatalogUsage(db, NOW, { workspaceDir: ws, cfg: resolved() }).maxListedAutoSkills).toBeUndefined();
+    expect(skillCatalogUsage(db, NOW, { workspaceDir: ws, cfg: resolved() }).maxListedAutoSkills).toBe(3);
     fs.writeFileSync(path.join(ws, 'skills', '.archive'), 'not a dir');
     expect(skillCatalogUsage(db, NOW, { workspaceDir: ws, cfg: resolved() }).maxListedAutoSkills).toBe(3);
     expect(skillCatalogUsage(db, NOW, { workspaceDir: ws, cfg: resolved({ enabled: false }) }).maxListedAutoSkills).toBeUndefined();

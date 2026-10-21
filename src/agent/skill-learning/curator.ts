@@ -21,7 +21,7 @@ import * as path from 'path';
 import { msUntilNextHour } from '../../history/cleanup';
 import { isValidTimezone } from './config';
 import { ownedAutoSkillFrontmatter } from './writer';
-import { lastActivity } from '../../skills/loader';
+import { lastActivity, loadSkills } from '../../skills/loader';
 import { computeRollup } from './metrics';
 import type { HistoryDB } from '../../history/db';
 import type { ResolvedSkillLearningCfg } from './types';
@@ -42,6 +42,8 @@ export interface CuratorDeps {
   cfg: ResolvedSkillLearningCfg;
   now: number;
   logger?: { info: (msg: string) => void; warn?: (msg: string) => void };
+  /** Refresh time-dependent catalog visibility even when no skill files changed. */
+  onSweepComplete?: () => void | Promise<void>;
 }
 
 export interface CuratorResult {
@@ -55,6 +57,19 @@ export interface CuratorResult {
  * when disabled. Pure w.r.t. time (`now` injected) and fs (remover injectable).
  */
 export function curateOnce(deps: CuratorDeps): CuratorResult {
+  try {
+    return runSweep(deps);
+  } finally {
+    // Includes disabled learning and failed archives: menu age still advances.
+    try {
+      Promise.resolve(deps.onSweepComplete?.()).catch((err) => warn(deps, `catalog refresh failed: ${String(err)}`));
+    } catch (err) {
+      warn(deps, `catalog refresh failed: ${String(err)}`);
+    }
+  }
+}
+
+function runSweep(deps: CuratorDeps): CuratorResult {
   const { db, workspaceDir, cfg, now } = deps;
   const result: CuratorResult = { pruned: [], evicted: [], telemetryRowsRemoved: 0 };
 
@@ -67,7 +82,7 @@ export function curateOnce(deps: CuratorDeps): CuratorResult {
     return result;
   }
 
-  trackUntrackedAutoSkills(deps);
+  const directories = trackUntrackedAutoSkills(deps);
   const auto = db.listSkillStats().filter((s) => s.origin === 'auto' && s.pinned !== 1);
   // Nothing can be archived into an unusable archive: say so once, keep every skill.
   // The skills menu enforces the cap meanwhile (skillCatalogUsage → maxListedAutoSkills).
@@ -88,7 +103,7 @@ export function curateOnce(deps: CuratorDeps): CuratorResult {
     const ageMs = s.createdAt != null ? now - s.createdAt : 0;
     const unused = s.timesLoaded < cfg.minUsesToKeep;
     const stale = cfg.maxAgeDays > 0 && ageMs > cfg.maxAgeDays * DAY_MS;
-    const outcome = unused && stale ? archiveSkill(s.name, deps) : 'kept';
+    const outcome = unused && stale ? archiveSkill(s.name, directories.get(s.name)!, deps) : 'kept';
     if (outcome === 'archived') result.pruned.push(s.name);
     // A failed archive is still an auto skill on disk: it counts against the cap.
     else if (outcome !== 'untracked') survivors.push(s);
@@ -106,7 +121,7 @@ export function curateOnce(deps: CuratorDeps): CuratorResult {
     // A failed archive moves on to the next candidate, so the cap still holds.
     for (const s of lru) {
       if (overflow <= 0) break;
-      const outcome = archiveSkill(s.name, deps);
+      const outcome = archiveSkill(s.name, directories.get(s.name)!, deps);
       if (outcome === 'archived') result.evicted.push(s.name);
       if (outcome !== 'failed') overflow--;
     }
@@ -122,32 +137,31 @@ export function curateOnce(deps: CuratorDeps): CuratorResult {
  * origin:user), which would take it out of the cap for good. The row's age clock
  * starts now, so a restored skill gets a fresh grace window.
  */
-function trackUntrackedAutoSkills(deps: CuratorDeps): void {
-  const skillsDir = path.join(deps.workspaceDir, 'skills');
-  let entries: string[];
-  try {
-    entries = fs.readdirSync(skillsDir);
-  } catch {
-    return;
-  }
-  for (const name of entries) {
-    const fm = name.startsWith('.') ? undefined : ownedAutoSkillFrontmatter(path.join(skillsDir, name));
+function trackUntrackedAutoSkills(deps: CuratorDeps): Map<string, string> {
+  const directories = new Map<string, string>();
+  const registry = loadSkills({ workspaceDir: deps.workspaceDir });
+  for (const [name, skill] of registry.skills) {
+    if (skill.source !== 'workspace') continue;
+    const dir = path.dirname(skill.filePath);
+    const fm = ownedAutoSkillFrontmatter(dir);
     if (!fm) continue;
+    directories.set(name, dir);
     const row = deps.db.getSkillStat(name);
-    const pinned = fm['pinned'] === true ? 1 : (row?.pinned ?? 0);
+    const pinned = fm['pinned'] === true ? 1 : 0;
     if (row?.origin === 'auto') {
-      // Pinned by hand in SKILL.md: kept out of prune and the cap from now on.
-      if (pinned && !row.pinned) deps.db.setSkillPinned(name, true);
+      if (pinned !== row.pinned) deps.db.setSkillPinned(name, pinned === 1);
       continue;
     }
     deps.db.recordSkillCreated({
-      name,
-      origin: 'auto',
-      createdAt: row?.createdAt ?? deps.now,
-      createdFromSession: row?.createdFromSession ?? null,
-      pinned,
+      name, origin: 'auto', createdAt: row?.createdAt ?? deps.now,
+      createdFromSession: row?.createdFromSession ?? null, pinned,
     });
   }
+  // Reconcile provenance before calculating overflow, not during eviction.
+  for (const row of deps.db.listSkillStats()) {
+    if (row.origin === 'auto' && !directories.has(row.name)) deps.db.deleteSkillStat(row.name);
+  }
+  return directories;
 }
 
 type ArchiveOutcome = 'archived' | 'untracked' | 'failed';
@@ -162,21 +176,23 @@ type ArchiveOutcome = 'archived' | 'untracked' | 'failed';
  * being tracked as auto (`untracked`). A failed move keeps the row so the next
  * sweep retries (`failed`).
  */
-function archiveSkill(name: string, deps: CuratorDeps): ArchiveOutcome {
+function archiveSkill(name: string, skillDir: string, deps: CuratorDeps): ArchiveOutcome {
   const skillsDir = path.join(deps.workspaceDir, 'skills');
-  const skillDir = path.join(skillsDir, name);
   // A stat-row name is not a trusted path segment: never follow one out of skills/.
-  const fm = path.basename(name) !== name || name.startsWith('.') ? undefined : ownedAutoSkillFrontmatter(skillDir);
+  const fm = !skillDir || path.dirname(skillDir) !== skillsDir ? undefined : ownedAutoSkillFrontmatter(skillDir);
   if (!fm || fm['pinned'] === true) {
     deps.db.deleteSkillStat(name);
     return 'untracked';
   }
   const archiveDir = path.join(skillsDir, ARCHIVE_DIRNAME);
   const dayDir = path.join(archiveDir, new Date(deps.now).toISOString().slice(0, 10));
-  let dest = path.join(dayDir, name);
+  let dest = path.join(dayDir, path.basename(skillDir));
   if (fs.existsSync(dest)) dest = `${dest}-${deps.now}`;
   try {
     fs.mkdirSync(dayDir, { recursive: true });
+    if (!fs.lstatSync(dayDir).isDirectory()) {
+      throw new Error('archive day is not a real directory');
+    }
     fs.renameSync(skillDir, dest);
   } catch (err) {
     warn(deps, `archive of ${name} failed: ${(err as Error).message}`);

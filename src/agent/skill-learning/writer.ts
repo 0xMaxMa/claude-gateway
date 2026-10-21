@@ -15,6 +15,7 @@
  */
 
 import * as fs from 'fs';
+import { randomUUID } from 'crypto';
 import * as path from 'path';
 import { extractFrontmatter } from '../../skills/parser';
 import type { ReviewProposal, WriteOutcome, SkillOrigin, SkillLearningMode } from './types';
@@ -142,9 +143,16 @@ function buildSkillMd(opts: {
 
 function atomicWrite(filePath: string, content: string): void {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  const tmp = filePath + '.tmp';
-  fs.writeFileSync(tmp, content, 'utf-8');
-  fs.renameSync(tmp, filePath);
+  const tmp = `${filePath}.${randomUUID()}.tmp`;
+  // Exclusive creation never follows a pre-existing symlink or overwrites a file.
+  const fd = fs.openSync(tmp, 'wx', 0o600);
+  try {
+    fs.writeFileSync(fd, content, 'utf-8');
+    fs.renameSync(tmp, filePath);
+  } finally {
+    fs.closeSync(fd);
+    fs.rmSync(tmp, { force: true });
+  }
 }
 
 /** Directory a skill (or its pending queue entry) is written to. */

@@ -55,4 +55,29 @@ describe('workspaceRecomposer', () => {
     expect(applied).toEqual([]);
     expect(fs.readFileSync(path.join(ws, 'CLAUDE.md'), 'utf8')).toBe('new-runner');
   });
+  it('R2 replacement runner waits for an already-started old write', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(r => { release = r; });
+    const original = fs.promises.writeFile;
+    let started!: () => void;
+    const entered = new Promise<void>(r => { started = r; });
+    const spy = jest.spyOn(fs.promises, 'writeFile').mockImplementation(async (...args) => {
+      if (args[1] === 'old') { started(); await gate; }
+      return original(...args);
+    });
+    let current = true;
+    const applied = jest.fn();
+    try {
+      const old = workspaceRecomposer(ws, async () => loaded('old'), applied, () => current)();
+      await entered;
+      current = false;
+      const fresh = workspaceRecomposer(ws, async () => loaded('fresh'), () => {})();
+      await new Promise(r => setTimeout(r, 20));
+      release();
+      await Promise.all([old, fresh]);
+      expect(fs.readFileSync(path.join(ws, 'CLAUDE.md'), 'utf8')).toBe('fresh');
+      expect(applied).not.toHaveBeenCalled();
+    } finally { release(); spy.mockRestore(); }
+  });
+
 });

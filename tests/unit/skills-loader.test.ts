@@ -360,13 +360,14 @@ describe('Skill Loader', () => {
           ]),
         };
         const hidden = hiddenAutoSkills(registry, capped);
-        // auto-unused: never used; auto-used (used 2 days ago) is older than auto-young (created yesterday).
-        expect([...hidden].sort()).toEqual(['auto-unused', 'auto-used']);
+        // The untracked, undated import gets a fresh activity timestamp and counts toward the cap.
+        expect([...hidden].sort()).toEqual(['auto-unused', 'auto-used', 'auto-young']);
         const section = renderSkillsSection({ ...registry, hiddenUntilUsed: hidden });
-        expect(section).toContain('/auto-young:');
+        expect(section).not.toContain('/auto-young:');
+        expect(section).toContain('/auto-no-date:');
         expect(section).toContain('/auto-pinned:');
         expect(section).toContain('/user-unused:');
-        expect(section).toContain('2 auto-learned skills are hidden until used');
+        expect(section).toContain('3 auto-learned skills are hidden until used');
       });
 
       it('honors the registry hidden set and shows everything without one', () => {

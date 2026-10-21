@@ -16,7 +16,7 @@ import { intentHash, startOfDayMs } from './telemetry';
 import { shouldReview } from './trigger';
 import { runReviewer, type ClaudeSpawnFn } from './reviewer';
 import { applyProposal, readSkillOrigin, type ExistingSkill } from './writer';
-import { startCurator, curateOnce, archiveDirUsable, type CuratorResult } from './curator';
+import { startCurator, curateOnce, type CuratorResult } from './curator';
 import { computeRollup } from './metrics';
 import { SkillNotifier, type SkillNotifierOpts, type ChannelTokens } from './notifier';
 import type { SessionSignals, SkillLearningConfig, ResolvedSkillLearningCfg, SkillMetricsRollup } from './types';
@@ -50,7 +50,7 @@ interface Accum {
 
 /**
  * Per-skill usage for the skills menu (hide-until-used). With `cap`, a curator that cannot
- * archive (unusable skills/.archive) hands its `maxAutoSkills` cap to the menu.
+ * archive still has its cap enforced by the menu, including before the next sweep.
  */
 export function skillCatalogUsage(
   db: HistoryDB,
@@ -58,7 +58,7 @@ export function skillCatalogUsage(
   cap?: { workspaceDir: string; cfg: ResolvedSkillLearningCfg },
 ): SkillCatalogUsage {
   const stats = new Map(db.listSkillStats().map((s) => [s.name, { timesLoaded: s.timesLoaded, createdAt: s.createdAt, lastUsedAt: s.lastUsedAt }]));
-  const menuCap = cap && cap.cfg.enabled && cap.cfg.maxAutoSkills > 0 && !archiveDirUsable(cap.workspaceDir);
+  const menuCap = cap && cap.cfg.enabled && cap.cfg.maxAutoSkills > 0;
   return menuCap ? { now, stats, maxListedAutoSkills: cap.cfg.maxAutoSkills } : { now, stats };
 }
 
@@ -118,6 +118,8 @@ export interface SkillLearningManagerOpts {
   notifier?: SkillNotifier;
   /** Skills a finished turn loaded (after their counts were bumped). */
   onSkillsLoaded?: (names: string[]) => void;
+  /** Re-evaluate catalog age after each daily or manual sweep. */
+  onSweepComplete?: () => void | Promise<void>;
 }
 
 /** What `skillLearningHostHooks` needs from the running agent (src/index.ts). */
@@ -137,19 +139,33 @@ export interface SkillLearningHost {
  * catalog at once, and the menu is recomposed for future spawns — once per skill that
  * flips to visible, never per turn.
  */
-export function skillLearningHostHooks(host: SkillLearningHost): Required<Pick<SkillLearningManagerOpts, 'installedSkills' | 'onSkillsLoaded'>> {
+export function skillLearningHostHooks(host: SkillLearningHost): Required<Pick<SkillLearningManagerOpts, 'installedSkills' | 'onSkillsLoaded' | 'onSweepComplete'>> {
   let refresh = Promise.resolve();
+  const inFlight = new Set<string>();
+  const refreshMenu = () => {
+    const run = refresh.then(() => host.refreshMenu()).catch((err) => {
+      host.logger?.warn?.(`skills menu refresh failed: ${(err as Error).message}`);
+      throw err;
+    });
+    refresh = run.catch(() => {});
+    return run;
+  };
   return {
+    onSweepComplete: refreshMenu,
     installedSkills: async () => {
       const registry = host.registry();
       return registry.cliSkills && !registry.cliDiscoveryError ? registry.cliSkills : host.discoverInstalled();
     },
     onSkillsLoaded: (names) => {
       const hidden = host.registry().hiddenUntilUsed;
-      if (!hidden || !names.filter((name) => hidden.delete(name)).length) return;
-      refresh = refresh
-        .then(host.refreshMenu)
-        .catch((err) => host.logger?.warn?.(`skills menu refresh failed: ${(err as Error).message}`));
+      const pending = names.filter(name => hidden?.has(name) && !inFlight.has(name));
+      if (!pending.length) return;
+      pending.forEach(name => inFlight.add(name));
+      void refreshMenu().then(() => {
+        pending.forEach(name => hidden?.delete(name));
+      }).catch(() => {
+        // Keep hidden membership on failure so the next use retries.
+      }).finally(() => pending.forEach(name => inFlight.delete(name)));
     },
   };
 }
@@ -167,6 +183,7 @@ export class SkillLearningManager {
   private readonly now: () => number;
   private readonly notifier: SkillNotifier;
   private readonly onSkillsLoaded?: (names: string[]) => void;
+  private readonly onSweepComplete?: () => void | Promise<void>;
 
   private readonly accum = new Map<string, Accum>();
   private readonly reviewInFlight = new Set<string>();
@@ -183,6 +200,7 @@ export class SkillLearningManager {
     this.reviewSpawn = opts.reviewSpawn;
     this.now = opts.now ?? Date.now;
     this.onSkillsLoaded = opts.onSkillsLoaded;
+    this.onSweepComplete = opts.onSweepComplete;
     this.cfg = resolveSkillLearningConfig(opts.agentCfg, opts.globalCfg, opts.gatewayTimezone);
     this.notifier =
       opts.notifier ??
@@ -440,6 +458,7 @@ export class SkillLearningManager {
         agentId: this.agentId,
         cfg: this.cfg,
         logger: this.logger,
+        onSweepComplete: this.onSweepComplete,
       }),
       this.cfg,
     );
@@ -455,6 +474,7 @@ export class SkillLearningManager {
       cfg: this.cfg,
       now: this.now(),
       logger: this.logger,
+      onSweepComplete: this.onSweepComplete,
     });
   }
 

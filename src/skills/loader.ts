@@ -318,7 +318,10 @@ export function hiddenAutoSkills(registry: SkillRegistry, usage: SkillCatalogUsa
     if (!skill.userInvocable || !fm) continue;
     const stat = usage.stats.get(key);
     if (hiddenUntilUsed(key, fm, usage)) hidden.add(key);
-    else if (stat && fm['pinned'] !== true) listed.push([key, stat]);
+    else if (fm['pinned'] !== true) listed.push([key, stat ?? {
+      timesLoaded: 0, lastUsedAt: null,
+      createdAt: typeof fm['createdAt'] === 'number' && Number.isFinite(fm['createdAt']) ? fm['createdAt'] : usage.now,
+    }]);
   }
   const overflow = usage.maxListedAutoSkills === undefined ? 0 : listed.length - usage.maxListedAutoSkills;
   if (overflow > 0) {

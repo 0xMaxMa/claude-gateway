@@ -327,22 +327,28 @@ export interface LoadWorkspaceOptions {
  * read) can never land last and re-hide a skill that was just used. Once `isCurrent` says
  * false (the runner was replaced), a run neither writes CLAUDE.md nor applies the load.
  */
+const workspaceWriteTails = new Map<string, Promise<unknown>>();
+
 export function workspaceRecomposer(
   workspaceDir: string,
   load: () => Promise<LoadedWorkspace>,
   apply: (updated: LoadedWorkspace) => void,
   isCurrent: () => boolean = () => true,
 ): () => Promise<LoadedWorkspace> {
-  let tail: Promise<unknown> = Promise.resolve();
+  const key = fs.realpathSync(workspaceDir);
   return () => {
-    const run = tail.then(async () => {
+    const run = (workspaceWriteTails.get(key) ?? Promise.resolve()).then(async () => {
       const updated = await load();
       if (!isCurrent()) return updated;
       await fs.promises.writeFile(path.join(workspaceDir, 'CLAUDE.md'), updated.systemPrompt, 'utf8');
-      apply(updated);
+      if (isCurrent()) apply(updated);
       return updated;
     });
-    tail = run.catch(() => {});
+    const tail = run.catch(() => {});
+    workspaceWriteTails.set(key, tail);
+    void tail.then(() => {
+      if (workspaceWriteTails.get(key) === tail) workspaceWriteTails.delete(key);
+    });
     return run;
   };
 }

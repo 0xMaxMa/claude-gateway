@@ -17,7 +17,7 @@ function setup(): { db: HistoryDB; ws: string; dir: string } {
 
 function seedSkill(db: HistoryDB, ws: string, name: string, opts: { origin: 'auto' | 'user'; createdAt: number; timesLoaded: number; lastUsedAt?: number; pinned?: boolean }): void {
   fs.mkdirSync(path.join(ws, 'skills', name), { recursive: true });
-  fs.writeFileSync(path.join(ws, 'skills', name, 'SKILL.md'), `---\nname: ${name}\ndescription: "x"\norigin: ${opts.origin}\n---\nbody\n`, 'utf-8');
+  fs.writeFileSync(path.join(ws, 'skills', name, 'SKILL.md'), `---\nname: ${name}\ndescription: "x"\norigin: ${opts.origin}\npinned: ${opts.pinned ?? false}\n---\nbody\n`, 'utf-8');
   db.recordSkillCreated({ name, origin: opts.origin, createdAt: opts.createdAt, createdFromSession: 's', pinned: opts.pinned ? 1 : 0 });
   for (let i = 0; i < opts.timesLoaded; i++) db.bumpSkillLoaded(name, opts.lastUsedAt ?? opts.createdAt);
 }
