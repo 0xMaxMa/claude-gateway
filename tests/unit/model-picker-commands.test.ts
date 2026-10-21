@@ -189,8 +189,21 @@ describe('AgentRunner — /models and /model on Discord and LINE (issue #409)', 
     expect(forwardText()).toContain('Current model: claude-sonnet-4-6');
   }, 15000);
 
-  it.each(['/model', '/model opus', '/models'])(
-    'does not disclose model details for Discord group command %s', async command => {
+  it('returns only the current model for bare /model in a Discord group', async () => {
+    const port = await startRunner();
+
+    await postChannelMessage(port, chatId, '/model', 'discord', { chat_type: 'group' });
+    await waitForForward();
+
+    const text = forwardText();
+    expect(text).toBe('Current model: claude-sonnet-4-6');
+    expect(text).not.toContain('Sonnet 4.6');
+    expect(text).not.toContain('Opus 5');
+    expect(persistedModel()).toBe('claude-sonnet-4-6');
+  }, 15000);
+
+  it.each(['/model opus', '/models'])(
+    'keeps Discord group command %s DM-only without disclosing models or changing config', async command => {
       const port = await startRunner();
 
       await postChannelMessage(port, chatId, command, 'discord', { chat_type: 'group' });
@@ -568,9 +581,28 @@ describe('AgentRunner — /models and /model on Discord and LINE (issue #409)', 
   }, 15000);
 
   it.each([
-    ['group', '/model'], ['group', '/model opus'], ['group', '/models'],
-    ['room', '/model'], ['room', '/model opus'], ['room', '/models'],
-  ])('does not disclose model details for LINE %s command %s', async (kind, command) => {
+    ['group', '/model'],
+    ['room', '/model'],
+  ])('returns only the current model for bare /model in a LINE %s', async (kind, command) => {
+    const port = await startRunner();
+    const answers: string[] = [];
+    (runner as unknown as { lineReply: unknown }).lineReply = {
+      onInbound: jest.fn(),
+      onAnswer: (_id: string, text: string) => { answers.push(text); },
+      disposeAll: jest.fn(),
+    };
+
+    await postChannelMessage(port, chatId, command, 'line', { line_chat_type: kind });
+    await waitFor(() => answers.length > 0, 8000);
+
+    expect(answers[0]).toBe('Current model: claude-sonnet-4-6');
+    expect(persistedModel()).toBe('claude-sonnet-4-6');
+  }, 15000);
+
+  it.each([
+    ['group', '/model opus'], ['group', '/models'],
+    ['room', '/model opus'], ['room', '/models'],
+  ])('keeps LINE %s command %s DM-only without disclosing models or changing config', async (kind, command) => {
     const port = await startRunner();
     const answers: string[] = [];
     (runner as unknown as { lineReply: unknown }).lineReply = {

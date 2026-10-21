@@ -3076,9 +3076,8 @@ export class AgentRunner extends EventEmitter {
    * exactly that state before this.
    */
   private async handleCommandModels(chatId: string, meta: Record<string, string> = {}): Promise<void> {
-    const channel = this.channelFor(chatId);
-    if ((channel === 'discord' || channel === 'line') && !this.isDirectChat(meta)) {
-      this.writeAutoForward(chatId, 'Use /models in a direct message with the bot to view available models or change the model.');
+    if (!this.isDirectChat(meta)) {
+      this.writeAutoForward(chatId, 'Use /models in a direct message with the bot to view available models.');
       return;
     }
     this.writeAutoForward(chatId, (await this.modelList('Switch with /model <id or alias>')).text);
@@ -3206,13 +3205,15 @@ export class AgentRunner extends EventEmitter {
     arg: string,
     meta: Record<string, string> = {},
   ): Promise<void> {
-    if (!this.isDirectChat(meta)) {
-      this.writeAutoForward(chatId, 'Use /model in a direct message with the bot to view or change the model.');
-      return;
-    }
     const current = this.agentConfig.claude.model;
     if (!arg) {
-      this.writeAutoForward(chatId, `Current model: ${current}\n\nUse /models to see the list.`);
+      this.writeAutoForward(chatId, this.isDirectChat(meta)
+        ? `Current model: ${current}\n\nUse /models to see the list.`
+        : `Current model: ${current}`);
+      return;
+    }
+    if (!this.isDirectChat(meta)) {
+      this.writeAutoForward(chatId, 'Use /model <model-id> in a direct message with the bot to change the model.');
       return;
     }
     const match = findModel(await this.selectableModels(), arg);
@@ -5816,12 +5817,12 @@ export class AgentRunner extends EventEmitter {
    * (`allowFrom` in mcp/tools/discord/access.ts is DM-only), so without this
    * any member of an allowlisted channel could switch the model out from under
    * everyone else and kill their in-flight turns. LINE forwards group and room
-   * messages the same way. Telegram's receiver answers `/model` itself behind
-   * a private-chat + allowlist check and does not forward it here.
+   * messages the same way. Telegram's receiver handles `/model` itself, using
+   * its existing group access policy for bare queries.
    *
    * Fails closed: a channel that does not report a chat type cannot switch.
-   * Listing models (`/models`, bare `/model`) is unaffected — it reads nothing
-   * and changes nothing.
+   * The bare `/model` query remains read-only in groups; `/models` is separately
+   * restricted because its catalog exposes model IDs and aliases.
    */
   private isDirectChat(meta: Record<string, string>): boolean {
     const kind = meta['chat_type'] ?? meta['line_chat_type'] ?? meta['slack_chat_type'];

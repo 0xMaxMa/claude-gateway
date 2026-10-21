@@ -37,9 +37,9 @@ test('API /tasks is listed only for an orchestration agent; the agent-free catal
   expect(commandCatalog('api').find(c => c.name === '/tasks')!.description).toContain('orchestration mode');
 });
 
-test('Telegram help describes /model as view-only and points at /models', () => {
+test('Telegram help describes /model as a current-model query and points to the private model picker', () => {
   const line = commandHelp('telegram').split('\n').find(l => l.startsWith('/model —'))!;
-  expect(line).toBe('/model — Show the current model; switch with /models');
+  expect(line).toBe('/model — Show the current model; view or select models in a direct message with /models');
   expect(commandHelp('discord')).toContain('/model — Show the model; change it in a private chat: /model [model ID]');
 });
 
