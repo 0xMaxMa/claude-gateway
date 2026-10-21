@@ -31,7 +31,7 @@ describe('a direct-message-only command in a group', () => {
   // Third review of #591 (L14): the reply follows the gate itself, not a copy of its rules.
   it('mints no pairing code and saves nothing for a group the gate would pair', () => {
     const access = allowed({ groupAllowlist: [], pairing: true })
-    expect(groupCommandReply(access, { chatType: 'group', chatId: '-100', fromId: '7', text: '/model', botUsername: 'agent_bot' })).toBeUndefined()
+    expect(groupCommandReply(access, { chatType: 'group', chatId: '-100', fromId: '7', text: '/models', botUsername: 'agent_bot' })).toBeUndefined()
     expect(access.pending).toEqual({})
   })
 
@@ -41,14 +41,15 @@ describe('a direct-message-only command in a group', () => {
   })
 
   it('stays silent where the gate drops the group, without minting a pairing code', () => {
-    expect(group('/model', { groupAllowlist: [] })).toBeUndefined()
-    expect(group('/model', { groupPolicy: 'disabled' })).toBeUndefined()
-    expect(group('/model', { legacyGroupAllowFrom: { '-100': ['8'] } })).toBeUndefined()
-    expect(group('/model', { groupPolicy: 'open', groupAllowlist: [] })).toBeDefined()
+    expect(group('/models', { groupAllowlist: [] })).toBeUndefined()
+    expect(group('/models', { groupPolicy: 'disabled' })).toBeUndefined()
+    expect(group('/models', { legacyGroupAllowFrom: { '-100': ['8'] } })).toBeUndefined()
+    expect(group('/models', { groupPolicy: 'open', groupAllowlist: [] })).toBeDefined()
   })
 
   it('leaves text, other commands, private chats and the commands the gateway answers in groups alone', () => {
     for (const text of ['hello', '/pstack:how', '/stop', '/new x', '/rename y', '/pstack_setup']) expect(group(text)).toBeUndefined()
+    expect(group('/model opus')).toBe('/model is only available in a direct message with the bot.')
     expect(groupCommandReply(allowed(), { chatType: 'private', chatId: '7', fromId: '7', text: '/model', botUsername: 'agent_bot' })).toBeUndefined()
   })
 })

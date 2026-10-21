@@ -37,7 +37,6 @@ test('API /tasks is listed only for an orchestration agent; the agent-free catal
   expect(commandCatalog('api').find(c => c.name === '/tasks')!.description).toContain('orchestration mode');
 });
 
-// PR #591: Telegram's receiver answers /model itself and ignores an argument; its /models buttons switch.
 test('Telegram help describes /model as view-only and points at /models', () => {
   const line = commandHelp('telegram').split('\n').find(l => l.startsWith('/model —'))!;
   expect(line).toBe('/model — Show the current model; switch with /models');

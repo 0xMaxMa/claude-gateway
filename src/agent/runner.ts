@@ -3054,7 +3054,7 @@ export class AgentRunner extends EventEmitter {
     } else if (/^\/pstack[-_]setup\b/.test(content)) {
       await this.handleCommandPstackSetup(chatId, content.replace(/^\/pstack[-_]setup(?:@\w+)?/, '').trim(), meta);
     } else if (content.startsWith('/models')) {
-      await this.handleCommandModels(chatId);
+      await this.handleCommandModels(chatId, meta);
     } else if (content.startsWith('/model')) {
       await this.handleCommandModel(chatId, content.replace('/model', '').trim(), meta);
     } else if (content.startsWith('/stop')) {
@@ -3067,15 +3067,20 @@ export class AgentRunner extends EventEmitter {
    *
    * Telegram never reaches this: its receiver answers `/models` itself with a
    * button keyboard and does not forward the message. Discord and LINE have no
-   * picker of their own, so they get the list as text plus the command that
-   * selects from it (issue #409).
+   * picker of their own, so direct messages get the list as text plus the
+   * command that selects from it (issue #409); groups get a DM instruction.
    *
    * A channel listed in BUILTIN_COMMANDS but missing a branch here is worse
    * than one not listed at all — the gate swallows the message and the user
    * gets silence instead of the agent's reply. `/model` on Discord was in
    * exactly that state before this.
    */
-  private async handleCommandModels(chatId: string): Promise<void> {
+  private async handleCommandModels(chatId: string, meta: Record<string, string> = {}): Promise<void> {
+    const channel = this.channelFor(chatId);
+    if ((channel === 'discord' || channel === 'line') && !this.isDirectChat(meta)) {
+      this.writeAutoForward(chatId, 'Use /models in a direct message with the bot to view available models or change the model.');
+      return;
+    }
     this.writeAutoForward(chatId, (await this.modelList('Switch with /model <id or alias>')).text);
   }
 
@@ -3201,18 +3206,13 @@ export class AgentRunner extends EventEmitter {
     arg: string,
     meta: Record<string, string> = {},
   ): Promise<void> {
+    if (!this.isDirectChat(meta)) {
+      this.writeAutoForward(chatId, 'Use /model in a direct message with the bot to view or change the model.');
+      return;
+    }
     const current = this.agentConfig.claude.model;
     if (!arg) {
       this.writeAutoForward(chatId, `Current model: ${current}\n\nUse /models to see the list.`);
-      return;
-    }
-    if (!this.isDirectChat(meta)) {
-      this.writeAutoForward(
-        chatId,
-        'Switching models is only available in a direct message with the bot — '
-        + 'it changes the model for every chat of this agent. '
-        + 'Use /models here to see the list.',
-      );
       return;
     }
     const match = findModel(await this.selectableModels(), arg);

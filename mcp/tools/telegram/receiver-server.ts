@@ -1217,7 +1217,7 @@ bot.command('status', async ctx => {
   await ctx.reply(`Not paired. Send me a message to get a pairing code.`)
 })
 
-// /model — show current AI model (receiver mode only, needs AgentRunner callback)
+// /model — show the current model (receiver mode only, needs AgentRunner callback).
 bot.command('model', async ctx => {
   if (ctx.chat?.type !== 'private') return
   const access = loadAccess()
