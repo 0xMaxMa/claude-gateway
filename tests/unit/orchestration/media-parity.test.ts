@@ -1,4 +1,5 @@
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, truncateSync } from 'fs';
+import fsPromises from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { OrchestrationStore } from '../../../src/orchestration/store';
@@ -272,6 +273,8 @@ test.each(['pdf', 'iso'])('worker %s sharing reports a wrong media scope, then s
     const bytes = Buffer.from(extension === 'iso' ? 'ISO fixture header' : '%PDF-1.4\nfixture worksheet');
     const original = join(f.path, '..', `worksheet.${extension}`); writeFileSync(original, bytes);
     if (extension === 'iso') truncateSync(original, 1_970_044_928);
+    // Simulate Linux protected_hardlinks for a readable root-owned source.
+    if (extension === 'iso') jest.spyOn(fsPromises, 'link').mockRejectedValue(Object.assign(new Error('protected hardlink'), { code: 'EPERM' }));
     const copied = join(f.root, 'agent', 'media', 'worksheet.pdf');
     mkdirSync(join(copied, '..'), { recursive: true }); writeFileSync(copied, bytes);
     const tool = new ShareFileModule();
@@ -301,6 +304,7 @@ test.each(['pdf', 'iso'])('worker %s sharing reports a wrong media scope, then s
     expect(stale.isError).toBe(true);
     expect(stale.content[0].text).toContain('ACCESS_DENIED');
   } finally {
+    jest.restoreAllMocks();
     for (const name of names) if (previous[name] === undefined) delete process.env[name]; else process.env[name] = previous[name];
     await bridge.close(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); shares.close(); f.close();
   }
