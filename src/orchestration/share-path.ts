@@ -15,12 +15,14 @@ export async function prepareSharePath(source: string, mediaDir: string): Promis
 }
 
 async function prepareSharePathInternal(source: string, mediaDir: string): Promise<string> {
-  await mkdir(mediaDir, { recursive: true, mode: 0o700 });
-  // Do not follow a redirected session directory outside the agent media root.
-  const root = await realpath(join(mediaDir, '..'));
   const agentRoot = await realpath(join(mediaDir, '..', '..'));
+  // Validate the media parent before creating the session directory.
+  await mkdir(join(mediaDir, '..'), { recursive: true, mode: 0o700 });
+  const root = await realpath(join(mediaDir, '..'));
+  if (root !== join(agentRoot, 'media')) throw new OrchestrationError('ARTIFACT_PATH_DENIED');
+  await mkdir(mediaDir, { recursive: true, mode: 0o700 });
   const directory = await realpath(mediaDir);
-  if (root !== join(agentRoot, 'media') || directory !== join(root, basename(mediaDir))) throw new OrchestrationError('ARTIFACT_PATH_DENIED');
+  if (directory !== join(root, basename(mediaDir))) throw new OrchestrationError('ARTIFACT_PATH_DENIED');
   const ref = relative(directory, source);
   let input;
   try { input = await open(source, constants.O_RDONLY | constants.O_NOFOLLOW); }

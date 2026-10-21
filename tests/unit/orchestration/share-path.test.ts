@@ -58,7 +58,7 @@ test.each(['session', 'media'])('rejects redirected %s directory', async kind =>
   rmSync(target, { recursive: true });
   const external = join(root, 'external'); mkdirSync(external); symlinkSync(external, target);
   await expect(prepareSharePath(source, media)).rejects.toThrow('ARTIFACT_PATH_DENIED');
-  expect(readdirSync(external).filter(name => name.startsWith('share-'))).toEqual([]);
+  expect(readdirSync(external)).toEqual([]);
 });
 
 test('valid multibyte filenames remain shareable with their extension', async () => {
