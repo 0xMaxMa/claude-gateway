@@ -10,6 +10,10 @@ describe('resolveSkillLearningConfig — precedence (agent > global > default)',
     expect(resolveSkillLearningConfig()).toEqual(SKILL_LEARNING_DEFAULTS);
   });
 
+  it('caps auto-learned skills at 20 by default', () => {
+    expect(resolveSkillLearningConfig().maxAutoSkills).toBe(20);
+  });
+
   it('global overrides defaults', () => {
     const r = resolveSkillLearningConfig(undefined, { enabled: false, minToolCalls: 8 });
     expect(r.enabled).toBe(false);

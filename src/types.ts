@@ -592,7 +592,7 @@ export interface GatewayConfig {
       mode?: 'propose' | 'auto'; // propose = review queue, auto = live write. default "auto"
       minToolCalls?: number;     // gating threshold, default 5
       reviewModel?: string;      // cheap model for the reviewer, default claude-haiku-4-5-20251001
-      maxAutoSkills?: number;    // curator cap per agent, default 50 (0 = unbounded)
+      maxAutoSkills?: number;    // curator cap per agent, default 20 (0 = unbounded)
       maxAgeDays?: number;       // prune auto-skills unused this long, default 30 (0 = disabled)
       minUsesToKeep?: number;    // an auto-skill must load >= N times or it's pruned, default 2
       maxReviewsPerDay?: number; // reviewer spawns per agent per day (cost cap), default 20 (0 = disabled)

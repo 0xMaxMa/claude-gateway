@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { loadWorkspace } from '../../src/agent/workspace-loader';
+import { skillCatalog, resolveNamedSkill } from '../../src/orchestration/skills';
 
 function makeTmpWorkspace(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'skills-integration-'));
@@ -34,6 +35,29 @@ describe('Skills integration with workspace-loader', () => {
     expect(result.systemPrompt).toContain('--- AVAILABLE SKILLS ---');
     expect(result.systemPrompt).toContain('/github: GitHub operations [🐙]');
     expect(result.systemPrompt).toContain('**Workspace Skills**');
+  });
+
+  it('SI-1b: skillUsage keeps a never-used old auto skill out of the prompt but in the registry', async () => {
+    const skillsDir = path.join(tmpDir, 'skills');
+    writeSkill(skillsDir, 'learned', 'name: learned\ndescription: "learned flow"\norigin: auto\ncreatedAt: 0');
+    writeSkill(skillsDir, 'handmade', 'name: handmade\ndescription: Handmade flow');
+
+    const result = await loadWorkspace(tmpDir, { skillUsage: { now: 30 * 24 * 60 * 60 * 1000, stats: new Map([['learned', { timesLoaded: 0, createdAt: 0, lastUsedAt: null }]]) } });
+    expect(result.systemPrompt).not.toContain('/learned:');
+    expect(result.systemPrompt).toContain('/handmade: Handmade flow');
+    expect(result.skillRegistry?.skills.has('learned')).toBe(true); // still invocable by /learned
+  });
+
+  it('SI-1c: the orchestration skill catalog leaves out the same hidden auto skills', async () => {
+    const skillsDir = path.join(tmpDir, 'skills');
+    writeSkill(skillsDir, 'learned', 'name: learned\ndescription: "learned flow"\norigin: auto\ncreatedAt: 0');
+    writeSkill(skillsDir, 'handmade', 'name: handmade\ndescription: Handmade flow');
+
+    const result = await loadWorkspace(tmpDir, { skillUsage: { now: 30 * 24 * 60 * 60 * 1000, stats: new Map([['learned', { timesLoaded: 0, createdAt: 0, lastUsedAt: null }]]) } });
+    const catalog = skillCatalog(result.skillRegistry);
+    expect(catalog).not.toContain('"learned"');
+    expect(catalog).toContain('"handmade"');
+    expect(resolveNamedSkill('learned', '', result.skillRegistry)?.name).toBe('learned'); // still spawnable by name
   });
 
   it('SI-2: workspace without skills does not inject AVAILABLE SKILLS section', async () => {

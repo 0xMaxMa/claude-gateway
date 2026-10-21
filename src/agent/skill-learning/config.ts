@@ -14,7 +14,7 @@ export const SKILL_LEARNING_DEFAULTS: ResolvedSkillLearningCfg = {
   mode: 'auto',
   minToolCalls: 5,
   reviewModel: 'claude-haiku-4-5-20251001',
-  maxAutoSkills: 50,
+  maxAutoSkills: 20,
   maxAgeDays: 30,
   minUsesToKeep: 2,
   pruneHour: 3,

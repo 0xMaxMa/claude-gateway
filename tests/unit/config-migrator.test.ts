@@ -15,6 +15,7 @@ import {
   BIND_PRESERVED_WARNING,
   MEMORY_MODE_AUTO_WARNING,
   FAST_ACK_DEFAULT_WARNING,
+  MAX_AUTO_SKILLS_DEFAULT_WARNING,
 } from '../../src/config/migrator';
 
 describe('config-migrator', () => {
@@ -1302,6 +1303,57 @@ describe('config-migrator', () => {
       });
       expect(migrateConfig(configPath, template(), '1.0.37').migrated).toBe(false);
       expect(JSON.parse(fs.readFileSync(configPath, 'utf-8')).agents[0].voice.live.fastAck).toBe(false);
+    });
+  });
+  // skillLearning.maxAutoSkills default 50 -> 20. The template wrote 50 into
+  // every config, so only a migration from before 1.0.38 can lower it.
+  describe('skillLearning maxAutoSkills retired-default upgrade (50 -> 20)', () => {
+    const template = (): string =>
+      writeJson('template.json', { configVersion: '1.0.38', gateway: { bind: '127.0.0.1', skillLearning: { maxAutoSkills: 20 } } });
+
+    it('lowers a persisted global 50 when migrating a pre-1.0.38 config, and keeps per-agent values', () => {
+      const configPath = writeJson('config.json', {
+        configVersion: '1.0.37',
+        gateway: { bind: '127.0.0.1', skillLearning: { enabled: true, maxAutoSkills: 50 } },
+        agents: [{ id: 'a', skillLearning: { maxAutoSkills: 50 } }],
+      });
+      expect(detectMigration(configPath, template(), '1.0.38').addedFields).toContain('gateway.skillLearning.maxAutoSkills');
+      const result = migrateConfig(configPath, template(), '1.0.38');
+
+      expect(result.warnings).toContain(MAX_AUTO_SKILLS_DEFAULT_WARNING);
+      const updated = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      expect(updated.gateway.skillLearning).toEqual({ enabled: true, maxAutoSkills: 20 });
+      expect(updated.agents[0].skillLearning.maxAutoSkills).toBe(50);
+    });
+
+    it('keeps a non-default cap, and a 50 set at 1.0.38 or later', () => {
+      const custom = writeJson('config.json', { configVersion: '1.0.37', gateway: { bind: '127.0.0.1', skillLearning: { maxAutoSkills: 35 } } });
+      migrateConfig(custom, template(), '1.0.38');
+      expect(JSON.parse(fs.readFileSync(custom, 'utf-8')).gateway.skillLearning.maxAutoSkills).toBe(35);
+
+      const current = writeJson('config.json', { configVersion: '1.0.38', gateway: { bind: '127.0.0.1', skillLearning: { maxAutoSkills: 50 } } });
+      expect(migrateConfig(current, template(), '1.0.38').migrated).toBe(false);
+      expect(JSON.parse(fs.readFileSync(current, 'utf-8')).gateway.skillLearning.maxAutoSkills).toBe(50);
+    });
+
+    it('the 1.0.38 bump keeps retired-default choices made after their own upgrade (fastAck, memory mode)', () => {
+      const configPath = writeJson('config.json', {
+        configVersion: '1.0.37',
+        gateway: { bind: '127.0.0.1', dreaming: { mode: 'propose' } },
+        agents: [{ id: 'a', voice: { enabled: true, live: { fastAck: false } } }],
+      });
+      migrateConfig(configPath, template(), '1.0.38');
+      const updated = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      expect(updated.agents[0].voice.live.fastAck).toBe(false);
+      expect(updated.gateway.dreaming.mode).toBe('propose');
+    });
+
+    it('a later template bump does not re-lower a 50 chosen at 1.0.38', () => {
+      const next = writeJson('template.json', { configVersion: '1.0.39', gateway: { bind: '127.0.0.1', skillLearning: { maxAutoSkills: 20 } } });
+      const chosen = writeJson('config.json', { configVersion: '1.0.38', gateway: { bind: '127.0.0.1', skillLearning: { maxAutoSkills: 50 } } });
+      expect(detectMigration(chosen, next, '1.0.39').addedFields).not.toContain('gateway.skillLearning.maxAutoSkills');
+      migrateConfig(chosen, next, '1.0.39');
+      expect(JSON.parse(fs.readFileSync(chosen, 'utf-8')).gateway.skillLearning.maxAutoSkills).toBe(50);
     });
   });
 });

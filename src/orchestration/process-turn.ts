@@ -31,7 +31,7 @@ export interface ProcessTurn {
 }
 /** Reuses the existing process/history lifecycle; a turn ends on a terminal
  * event or confirmed process exit. The owner decides task recovery policy. */
-export interface ManagedTurnMetrics { contextWindow?: CodexContextMeasurement; toolIds: string[]; inputTokens: number; totalTokens: number; startedAt: number; endedAt?: number; usage?: TokenUsage | null; requests?: RequestUsage[]; loadedTools?: string[] | null; usedTools?: string[]; usedSkills?: string[]; extensions?: TurnExtensions; contextTools?: string[] | null; schemaCoverage?: {measured:number;total:number}; model?: string; }
+export interface ManagedTurnMetrics { contextWindow?: CodexContextMeasurement; toolIds: string[]; inputTokens: number; totalTokens: number; startedAt: number; endedAt?: number; usage?: TokenUsage | null; requests?: RequestUsage[]; loadedTools?: string[] | null; usedTools?: string[]; usedSkills?: string[]; usedSkillFiles?: string[]; extensions?: TurnExtensions; contextTools?: string[] | null; schemaCoverage?: {measured:number;total:number}; model?: string; }
 function providerErrorText(value: unknown, codes: string[], depth = 0, budget = { nodes: 256 }): string {
   if (depth >= 8 || --budget.nodes < 0) return '';
   if (typeof value === 'string') return value.slice(0, 4096);

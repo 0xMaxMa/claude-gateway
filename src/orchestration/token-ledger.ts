@@ -105,7 +105,9 @@ export function taskTurnDetails(turn: Pick<TokenTurn, 'usedSkills'>, snapshot: a
 function metricsProjection(turn: TokenTurn): TokenTurn {
   return {...turn, requests: undefined, inputTexts: undefined, responseText: undefined, extensions: undefined, usedSkills: undefined};
 }
-export function recordTokenTurn(store: OrchestrationStore, turn: TokenTurn): void {
+export function recordTokenTurn(store: OrchestrationStore, measured: TokenTurn): void {
+  // The SKILL.md paths a turn read are skill-learning input, not ledger data.
+  const turn: TokenTurn = {...measured, usedSkillFiles: undefined};
   ensure(store);
   store.compose(() => {
   store.run(`INSERT INTO token_turns VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET payload_json=excluded.payload_json`,

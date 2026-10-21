@@ -21,11 +21,11 @@ export function skillCommand(text: string, source: ConversationScope['source']):
   return { name: match[1], args: match[3]?.trim() ?? '' };
 }
 
-/** Only installed, user-invocable skills are advertised; never expose bodies or paths.
+/** Only installed, user-invocable skills are advertised (minus never-used auto skills); never expose bodies or paths.
  * A catalog over `budgetBytes` keeps every name and shortens the free-text selection
  * hints (description, readWhen, keywords, argumentHint) to one shared byte cap. */
 export function skillCatalog(registry?: SkillRegistry, budgetBytes = SKILL_CATALOG_BUDGET_BYTES): string {
-  const entries = [...(registry?.skills.entries() ?? [])].filter(([, skill]) => skill.userInvocable)
+  const entries = [...(registry?.skills.entries() ?? [])].filter(([name, skill]) => skill.userInvocable && !registry?.hiddenUntilUsed?.has(name))
     .map(([name, skill]) => ({ name, description: skill.description, readWhen: skill.readWhen, keywords: skill.keywords, source: skill.source, declaredTools: skill.allowedTools }))
     .sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
   const cli = [...(registry?.cliSkills ?? [])].map(({name,description,argumentHint,aliases,source,filePath}) => ({name,description,argumentHint,aliases,source,portable:Boolean(filePath)})).sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);

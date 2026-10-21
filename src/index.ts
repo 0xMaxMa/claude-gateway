@@ -20,13 +20,16 @@ import { agentsDirForConfig, loadAgentEnvFiles } from './config/agent-env';
 import { detectMigration, applyMigration, loadCleanTemplate } from './config/migrator';
 import { ensureConfigExists, firstRunNotice } from './config/bootstrap';
 import { upgradeWhatsAppAccountsFile } from './config/whatsapp-accounts';
-import { loadWorkspace, watchWorkspace, migrateWorkspaceFiles, classifyWorkspaceRestart } from './agent/workspace-loader';
+import { loadWorkspace, watchWorkspace, migrateWorkspaceFiles, classifyWorkspaceRestart, workspaceRecomposer } from './agent/workspace-loader';
 import { resolveArchiveConfig, makeSharedPromoter, resolveSharedConfig, resolveReflectionConfig, sharedVaultDir, SharedReflectionManager } from './agent/knowledge';
 import { watchSkills } from './skills';
 import { syncSharedSkills, syncModuleSkills } from './skills/sync';
 import { createWatcher } from './watch/factory';
 import { AgentRunner } from './agent/runner';
-import { SkillLearningManager } from './agent/skill-learning';
+import { SkillLearningManager, skillCatalogUsage, skillLearningHostHooks } from './agent/skill-learning';
+import { resolveSkillLearningConfig } from './agent/skill-learning/config';
+import { HistoryDB } from './history/db';
+import { discoverWorkerExtensions } from './session/worker-extensions';
 import { DreamingManager } from './agent/dreaming';
 import { makeRouteOut } from './agent/dreaming/migrate';
 import { resolveDreamingConfig } from './agent/dreaming/config';
@@ -179,6 +182,20 @@ async function startAgent(
   const disableArchive = agentConfig.disableArchive === true;
   // Background learners read every conversation into shared state, so they stay off.
   const offWhenIsolated = <T extends { enabled?: boolean }>(cfg: T | undefined): T | undefined => isolateMemory ? Object.assign({}, cfg, { enabled: false }) : cfg;
+  // Skills-menu usage, read from the runner's history DB (<workspace>/../history.db), plus the
+  // curator's cap when it cannot archive. Undefined if the DB cannot be opened: the menu then
+  // lists every skill, as before.
+  const agentSkillUsage = () => {
+    try {
+      return skillCatalogUsage(HistoryDB.forDir(path.resolve(agentConfig.workspace, '..'), agentConfig.id), Date.now(), {
+        workspaceDir: agentConfig.workspace,
+        cfg: resolveSkillLearningConfig(offWhenIsolated(agentConfig.skillLearning), gatewayConfig.gateway.skillLearning, gatewayConfig.gateway.timezone),
+      });
+    } catch (err) {
+      logger.warn('Skill usage unavailable; the skills menu lists every skill', { error: (err as Error).message });
+      return undefined;
+    }
+  };
 
   // Ensure workspace directory exists (may be absent for newly created agents)
   try {
@@ -231,6 +248,7 @@ async function startAgent(
   let workspace;
   try {
     workspace = await loadWorkspace(agentConfig.workspace, {
+      skillUsage: agentSkillUsage(),
       coreShrink,
       isolateMemory,
       disableArchive,
@@ -282,6 +300,16 @@ async function startAgent(
 
   agentRunners.set(agentConfig.id, runner);
   agentConfigs.set(agentConfig.id, agentConfig);
+  // Every later CLAUDE.md rewrite for this agent goes through this one queue (the skills API
+  // and an app reinstall reach it via runner.recomposeWorkspace). Once a replacement runner
+  // takes over (an update toggling isolate mode, #601), this one never writes CLAUDE.md again.
+  const recompose = workspaceRecomposer(
+    agentConfig.workspace,
+    () => loadWorkspace(agentConfig.workspace, { skillUsage: agentSkillUsage(), mcpToolsDir, sharedSkillsDir, logger, memoryBudget, coreShrink, isolateMemory, disableArchive }),
+    (updated) => { if (updated.skillRegistry) runner.setSkillRegistry(updated.skillRegistry); },
+    () => agentRunners.get(agentConfig.id) === runner,
+  );
+  runner.setWorkspaceRecomposer(recompose);
   runner.onConfigReload(() => {
     agentConfig=agentConfigs.get(agentConfig.id) ?? agentConfig;
     memoryBudget={...gatewayConfig.gateway.memory,...agentConfig.memory};
@@ -299,6 +327,14 @@ async function startAgent(
       workspaceDir: agentConfig.workspace,
       mcpToolsDir,
       sharedSkillsDir,
+      ...skillLearningHostHooks({
+        registry: () => runner.getSkillRegistry(),
+        discoverInstalled: async () => (await discoverWorkerExtensions(agentConfig, gatewayConfig)).skills,
+        // A used skill is back on the menu for future spawns. CLAUDE.md is frozen-at-spawn
+        // and the session that used it already has it, so no session restarts.
+        refreshMenu: async () => { await recompose(); },
+        logger,
+      }),
       globalCfg: gatewayConfig.gateway.skillLearning,
       // Isolate mode (#601): a skill learned from one conversation is offered to
       // every other one, so the reviewer stays off (as dreaming does below).
@@ -393,9 +429,7 @@ async function startAgent(
     const next=JSON.stringify([memoryBudget,agentConfig.knowledge,gatewayConfig.gateway.knowledge]);
     if(next===composePolicy)return;composePolicy=next;
     composeReload=composeReload.then(async()=>{
-      const updated=await loadWorkspace(agentConfig.workspace,{mcpToolsDir,sharedSkillsDir,logger,memoryBudget,coreShrink,isolateMemory,disableArchive});
-      await fs.promises.writeFile(path.join(agentConfig.workspace,'CLAUDE.md'),updated.systemPrompt,'utf8');
-      if(updated.skillRegistry)runner.setSkillRegistry(updated.skillRegistry);
+      await recompose();
       await runner.restartOrDefer({skipBusy:true,deferIdle:true});
     }).catch(error=>logger.error('Context configuration refresh failed',{error:String(error)}));
   });
@@ -415,24 +449,8 @@ async function startAgent(
   const workspaceWatcher = watchWorkspace(agentConfig.workspace, async (changedFiles) => {
     logger.info('Workspace changed, reloading', { files: changedFiles });
     try {
-      const updated = await loadWorkspace(agentConfig.workspace, {
-        mcpToolsDir,
-        sharedSkillsDir,
-        logger,
-        memoryBudget,
-        coreShrink,
-        isolateMemory,
-        disableArchive,
-      });
       // Always rewrite CLAUDE.md so the next spawn picks up the new content.
-      await fs.promises.writeFile(
-        path.join(agentConfig.workspace, 'CLAUDE.md'),
-        updated.systemPrompt,
-        'utf8',
-      );
-      if (updated.skillRegistry) {
-        runner.setSkillRegistry(updated.skillRegistry);
-      }
+      const updated = await recompose();
       // CLAUDE.md is always recomposed on disk (above) and is frozen-at-spawn —
       // a live process never re-reads it; every future spawn picks up the new
       // content regardless. So the restart decision is purely about how urgently
@@ -476,24 +494,8 @@ async function startAgent(
     onChange: async () => {
       logger.info('Skills changed, reloading registry');
       try {
-        const updated = await loadWorkspace(agentConfig.workspace, {
-          mcpToolsDir,
-          sharedSkillsDir,
-          logger,
-          memoryBudget,
-          coreShrink,
-          isolateMemory,
-          disableArchive,
-        });
-        if (updated.skillRegistry) {
-          runner.setSkillRegistry(updated.skillRegistry);
-        }
         // Rewrite CLAUDE.md with updated skills section
-        await fs.promises.writeFile(
-          path.join(agentConfig.workspace, 'CLAUDE.md'),
-          updated.systemPrompt,
-          'utf8',
-        );
+        const updated = await recompose();
         // Refresh the skills registry for future spawns without dropping any
         // live session. Busy sessions are left running (skipBusy) — a session
         // that triggers a SKILL.md change mid-turn would otherwise stop itself
@@ -842,27 +844,9 @@ async function main(): Promise<void> {
       if (!runner || !agentConfig) return; // first install — agent.added will call startAgent
       const logger = createLogger(agentName, ctx.logDir);
       try {
-        const updated = await loadWorkspace(agentConfig.workspace, {
-          mcpToolsDir: ctx.mcpToolsDir,
-          sharedSkillsDir: ctx.sharedSkillsDir,
-          logger,
-          memoryBudget: { ...config.gateway.memory, ...agentConfig.memory },
-          coreShrink: resolveArchiveConfig(
-            agentConfig.knowledge?.archive,
-            config.gateway.knowledge?.archive,
-          ).enabled,
-          isolateMemory: agentConfig.isolateMemory === true,
-          disableArchive: agentConfig.disableArchive === true,
-        });
-        // A runner replaced meanwhile (an update toggling isolate mode, #601)
-        // composed its own CLAUDE.md; this one has the old mode's sections.
-        if (ctx.agentRunners.get(agentName) !== runner) return;
-        const claudeMdPath = path.join(agentConfig.workspace, 'CLAUDE.md');
-        await fs.promises.writeFile(claudeMdPath, updated.systemPrompt, 'utf8');
-        logger.info('Rewrote CLAUDE.md after reinstall', { chars: updated.systemPrompt.length });
-        if (updated.skillRegistry) {
-          runner.setSkillRegistry(updated.skillRegistry);
-        }
+        // The runner's own recompose queue; it skips the write once a replacement runner
+        // (an update toggling isolate mode, #601) has composed its own CLAUDE.md.
+        if (await runner.recomposeWorkspace()) logger.info('Rewrote CLAUDE.md after reinstall');
       } catch (err) {
         logger.error('Failed to reinitialize agent workspace after reinstall', { error: (err as Error).message });
       }
