@@ -10,6 +10,8 @@ The list starts with configured models and adds live models from `{ANTHROPIC_BAS
 
 The catalog keeps configured models first and adds upstream-only models afterward. A configured model omitted by the provider therefore remains visible and selectable until config migration or an explicit config edit removes it. A live-only model is also selectable while the catalog is available.
 
+Listing or selecting a configured model does not verify that the provider currently accepts inference for that ID.
+
 ```bash
 curl -H "X-Api-Key: my-secret-key-123" \
   http://localhost:10850/api/v1/models | jq
@@ -29,6 +31,7 @@ curl -H "X-Api-Key: my-secret-key-123" \
     { "id": "gpt-6-sol[1m]",       "name": "GPT 6 Sol",     "alias": "gpt6sol",   "contextWindow": 1050000, "multiplier": 1 },
     { "id": "gpt-6-astra[1m]",     "name": "GPT 6 Astra",   "alias": "gpt6astra", "contextWindow": 1050000, "multiplier": 1 },
     { "id": "gpt-6-luna[1m]",      "name": "GPT 6 Luna",    "alias": "gpt6luna",  "contextWindow": 1050000, "multiplier": 1 },
+    { "id": "gpt-5.6-terra[1m]",   "name": "GPT 5.6 Terra", "alias": "gpt56terra", "contextWindow": 1050000, "multiplier": 1 },
     { "id": "gpt-6.1-sol[1m]",        "name": "GPT 6.1 Sol",   "alias": "gpt61sol",  "contextWindow": 1050000, "multiplier": 1 }
   ]
 }

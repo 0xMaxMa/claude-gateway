@@ -61,6 +61,7 @@ export const DEFAULT_MODELS: ModelConfig[] = [
   { id: 'gpt-6-sol[1m]',             label: 'GPT 6 Sol',        alias: 'gpt6sol',     contextWindow: 1050000 },
   { id: 'gpt-6-astra[1m]',           label: 'GPT 6 Astra',      alias: 'gpt6astra',   contextWindow: 1050000 },
   { id: 'gpt-6-luna[1m]',            label: 'GPT 6 Luna',       alias: 'gpt6luna',    contextWindow: 1050000 },
+  { id: 'gpt-5.6-terra[1m]',         label: 'GPT 5.6 Terra',    alias: 'gpt56terra',  contextWindow: 1050000 },
   { id: 'gpt-6.1-sol[1m]',          label: 'GPT 6.1 Sol',      alias: 'gpt61sol',    contextWindow: 1050000 },
   { id: 'gpt-5.5[1m]',               label: 'GPT 5.5',          alias: 'gpt55',       contextWindow: 1050000 },
 ];

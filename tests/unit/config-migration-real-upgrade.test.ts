@@ -726,6 +726,7 @@ describe('config migration — GPT 6 reaches existing installs', () => {
       expect(migrated.gateway.models).toContainEqual(model);
     }
     expect(result.addedFields).not.toContain('gateway.models[gpt-5.6-sol[1m]]');
+    expect(result.addedFields).toContain('gateway.models[gpt-5.6-terra[1m]]');
     expect(result.addedFields).toContain('gateway.models[gpt-6.1-sol[1m]]');
     expect(migrated.gateway.models.some((model: { id: string }) => model.id === 'gpt-5.6-sol[1m]')).toBe(false);
 

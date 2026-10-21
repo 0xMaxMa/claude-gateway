@@ -170,7 +170,7 @@ describe('model registry — DEFAULT_MODELS and template stay in sync', () => {
   it('uses the configured windows for GPT defaults', () => {
     const gptIds = [
       'gpt-6-sol[1m]', 'gpt-6-astra[1m]', 'gpt-6-luna[1m]',
-      'gpt-5.5[1m]',
+      'gpt-5.6-terra[1m]', 'gpt-5.5[1m]',
     ];
     for (const id of gptIds) {
       expect(byId(DEFAULT_MODELS, id)?.contextWindow).toBe(1050000);

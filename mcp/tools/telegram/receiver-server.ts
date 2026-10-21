@@ -931,6 +931,7 @@ const AVAILABLE_MODELS = [
   { id: 'gpt-6-sol[1m]',             label: 'GPT 6 Sol',        alias: 'gpt6sol' },
   { id: 'gpt-6-astra[1m]',           label: 'GPT 6 Astra',      alias: 'gpt6astra' },
   { id: 'gpt-6-luna[1m]',            label: 'GPT 6 Luna',       alias: 'gpt6luna' },
+  { id: 'gpt-5.6-terra[1m]',         label: 'GPT 5.6 Terra',    alias: 'gpt56terra' },
   { id: 'gpt-6.1-sol[1m]',          label: 'GPT 6.1 Sol',      alias: 'gpt61sol' },
   { id: 'gpt-5.5[1m]',               label: 'GPT 5.5',          alias: 'gpt55' },
 ]

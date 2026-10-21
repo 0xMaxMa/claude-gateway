@@ -723,21 +723,19 @@ const LEGACY_MODEL_ID_RENAMES: Readonly<Record<string, string>> = {
   'gpt-5.5': 'gpt-5.5[1m]',
 };
 
-// Match the complete rows shipped by 1.0.37. Customized entries with these
-// IDs remain user-owned and must survive the 1.0.38 migration.
+// Match the Sol and Luna rows shipped by 1.0.37. Customized entries with these
+// IDs remain user-owned and must survive the 1.0.38 migration. Terra stays shipped.
 const RETIRED_MODEL_DEFAULTS: Readonly<Record<string, { label: string; alias: string; contextWindow: number }>> = {
   'gpt-5.6-sol[1m]': { label: 'GPT 5.6 Sol', alias: 'gpt56sol', contextWindow: 1050000 },
-  'gpt-5.6-terra[1m]': { label: 'GPT 5.6 Terra', alias: 'gpt56terra', contextWindow: 1050000 },
   'gpt-5.6-luna[1m]': { label: 'GPT 5.6 Luna', alias: 'gpt56luna', contextWindow: 1050000 },
 };
 
 const RETIRED_AGENT_REPLACEMENTS: Readonly<Record<string, string>> = {
   'gpt-5.6-sol[1m]': 'gpt-6.1-sol[1m]',
-  'gpt-5.6-terra[1m]': 'gpt-6.1-sol[1m]',
   'gpt-5.6-luna[1m]': 'gpt-6-luna[1m]',
 };
 
-const NEW_MODEL_IDS = new Set(['gpt-6.1-sol[1m]']);
+const PRESERVE_MODEL_METADATA_IDS = new Set(['gpt-5.6-terra[1m]', 'gpt-6.1-sol[1m]']);
 
 function isRetiredDefault(model: Record<string, unknown>): boolean {
   const expected = RETIRED_MODEL_DEFAULTS[String(model.id)];
@@ -782,7 +780,7 @@ function migrateModels(
   for (const tm of templateModels) {
     const existing = userMap.get(tm.id as string);
     if (existing) {
-      if (!NEW_MODEL_IDS.has(String(tm.id))) {
+      if (!PRESERVE_MODEL_METADATA_IDS.has(String(tm.id))) {
         existing.alias = tm.alias;
         existing.label = tm.label;
         existing.contextWindow = tm.contextWindow;
