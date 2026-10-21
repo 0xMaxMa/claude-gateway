@@ -40,10 +40,12 @@ hosts such as `http://host.docker.internal:10850/gateway`.
 
 In orchestration tasks, pass the original absolute file path from the active task
 workspace, an input attachment, or the current session’s media directory to
-`share_file` or `task_stage_file`. The gateway copies authorized files into session
-media automatically. The old workflow of copying to the agent-wide `media/` root
-is outside worker scope. `ARTIFACT_PATH_DENIED` identifies a path outside that
-scope; use the authorized original path rather than retrying the same path.
+`share_file`; it links the existing authorized file without copying or uploading
+its bytes. Use `task_stage_file` when the file should be delivered to the user;
+the gateway stages authorized task outputs into session media. The old workflow
+of copying to the agent-wide `media/` root is outside worker scope.
+`ARTIFACT_PATH_DENIED` identifies a path outside the task staging scope; use the
+authorized original path rather than retrying the same path.
 
 ## `gateway.oauthReturnUrl` (optional)
 
