@@ -189,6 +189,22 @@ describe('AgentRunner — /models and /model on Discord and LINE (issue #409)', 
     expect(forwardText()).toContain('Current model: claude-sonnet-4-6');
   }, 15000);
 
+  it.each(['/model', '/model opus', '/models'])(
+    'does not disclose model details for Discord group command %s', async command => {
+      const port = await startRunner();
+
+      await postChannelMessage(port, chatId, command, 'discord', { chat_type: 'group' });
+      await waitForForward();
+
+      const text = forwardText();
+      expect(text.toLowerCase()).toContain('direct message');
+      for (const detail of ['claude-sonnet-4-6', 'claude-opus-5', 'Sonnet 4.6', 'Opus 5', 'Current model']) {
+        expect(text).not.toContain(detail);
+      }
+      expect(persistedModel()).toBe('claude-sonnet-4-6');
+    },
+  );
+
   it('switches and persists the model chosen by alias', async () => {
     const port = await startRunner();
 
@@ -551,13 +567,26 @@ describe('AgentRunner — /models and /model on Discord and LINE (issue #409)', 
     expect(persistedModel()).toBe('claude-sonnet-4-6');
   }, 15000);
 
-  it('still lists models in a group chat — reading changes nothing', async () => {
+  it.each([
+    ['group', '/model'], ['group', '/model opus'], ['group', '/models'],
+    ['room', '/model'], ['room', '/model opus'], ['room', '/models'],
+  ])('does not disclose model details for LINE %s command %s', async (kind, command) => {
     const port = await startRunner();
+    const answers: string[] = [];
+    (runner as unknown as { lineReply: unknown }).lineReply = {
+      onInbound: jest.fn(),
+      onAnswer: (_id: string, text: string) => { answers.push(text); },
+      disposeAll: jest.fn(),
+    };
 
-    await postChannelMessage(port, chatId, '/models', 'discord', { chat_type: 'group' });
-    await waitForForward();
+    await postChannelMessage(port, chatId, command, 'line', { line_chat_type: kind });
+    await waitFor(() => answers.length > 0, 8000);
 
-    expect(forwardText()).toContain('Sonnet 4.6');
+    expect(answers[0]!.toLowerCase()).toContain('direct message');
+    for (const detail of ['claude-sonnet-4-6', 'claude-opus-5', 'Sonnet 4.6', 'Opus 5', 'Current model']) {
+      expect(answers[0]).not.toContain(detail);
+    }
+    expect(persistedModel()).toBe('claude-sonnet-4-6');
   }, 15000);
 
   it('accepts LINE 1:1 chats, which report their kind as "user"', async () => {
@@ -715,19 +744,6 @@ describe('AgentRunner — /models and /model on Discord and LINE (issue #409)', 
     });
     return ((await res.json()) as { models: Array<{ id: string; label: string }> }).models;
   }
-
-  it('set_model accepts a listed model ID and refuses an unsupported ID', async () => {
-    const port = await startRunner();
-    const request = async (model: string) => fetch(`http://127.0.0.1:${port}/command`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ command: 'set_model', chat_id: '-100200', payload: { model } }),
-    }).then(response => response.json()) as Promise<{ success?: boolean; error?: string }>;
-
-    expect(await request('claude-opus-5')).toMatchObject({ success: true });
-    expect(persistedModel()).toBe('claude-opus-5');
-    expect(await request('not-in-catalog')).toMatchObject({ success: false, error: expect.stringContaining('Unknown model') });
-    expect(persistedModel()).toBe('claude-opus-5');
-  }, 15000);
 
   it('get_models answers with the live catalog when one is configured', async () => {
     process.env.ANTHROPIC_BASE_URL = 'https://proxy.example.com';

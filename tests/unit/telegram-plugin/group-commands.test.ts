@@ -10,7 +10,7 @@ const group = (text: string, patch: Partial<Access> = {}, fromId = '7') =>
   groupCommandReply(allowed(patch), { chatType: 'supergroup', chatId: '-100', fromId, text, botUsername: 'agent_bot' })
 
 describe('a direct-message-only command in a group', () => {
-  it.each(['/models', '/help', '/status', '/clear', '/compact', '/restart', '/sessions', '/session', '/tasks', '/voice on', '/voices', '/call', '/start'])(
+  it.each(['/model', '/models', '/help', '/status', '/clear', '/compact', '/restart', '/sessions', '/session', '/tasks', '/voice on', '/voices', '/call', '/start'])(
     '%s in an allowed group gets a pointer to the direct message', text => {
       expect(group(text)).toBe(`${text.split(' ')[0]} is only available in a direct message with the bot.`)
     })
@@ -36,7 +36,7 @@ describe('a direct-message-only command in a group', () => {
   })
 
   it('answers the command addressed to this bot, and not one addressed to another bot', () => {
-    expect(group('/model@Agent_Bot')).toBeUndefined()
+    expect(group('/model@Agent_Bot')).toBe('/model is only available in a direct message with the bot.')
     expect(group('/model@other_bot')).toBeUndefined()
   })
 
@@ -48,7 +48,8 @@ describe('a direct-message-only command in a group', () => {
   })
 
   it('leaves text, other commands, private chats and the commands the gateway answers in groups alone', () => {
-    for (const text of ['hello', '/pstack:how', '/stop', '/new x', '/rename y', '/pstack_setup', '/model opus']) expect(group(text)).toBeUndefined()
+    for (const text of ['hello', '/pstack:how', '/stop', '/new x', '/rename y', '/pstack_setup']) expect(group(text)).toBeUndefined()
+    expect(group('/model opus')).toBe('/model is only available in a direct message with the bot.')
     expect(groupCommandReply(allowed(), { chatType: 'private', chatId: '7', fromId: '7', text: '/model', botUsername: 'agent_bot' })).toBeUndefined()
   })
 })
@@ -58,7 +59,7 @@ describe('a command the gateway answers in a group', () => {
     { fromId: '7', chatType: 'group', chatId: '-100', botUsername: 'agent_bot', messageText: text, messageEntities: [{ type: 'bot_command', offset: 0, length: text.split(' ')[0]!.length }] },
     () => allowed(), () => {}, () => 'code')
 
-  it.each(['/stop', '/stop@agent_bot', '/new Design', '/rename Design review', '/pstack_setup', '/pstack-setup', '/model opus', '/model@agent_bot opus'])('%s is addressed to the bot, like a mention', text => {
+  it.each(['/stop', '/stop@agent_bot', '/new Design', '/rename Design review', '/pstack_setup', '/pstack-setup'])('%s is addressed to the bot, like a mention', text => {
     expect(gate(text).action).toBe('deliver')
   })
 
