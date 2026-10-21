@@ -426,6 +426,34 @@ test.each([true, false])('Codex receives enabled custom connectors only in host 
   await expect(access(file)).rejects.toMatchObject({ code: 'ENOENT' });
 });
 
+// #635: a secret-bearing HTTP connector reaches Codex as a loopback proxy handle,
+// and the handle stops working with the worker's connector files.
+test('Codex connector files hold a proxy handle, never the secret, revoked at cleanup', async () => {
+  const tokenEnv = join(directory, 'mcp-token.env');
+  await writeFile(tokenEnv, 'CUSTOM__ops__api_key=sk-codex-635\n', { mode: 0o600 });
+  process.env.GATEWAY_MCP_TOKEN_ENV_PATH = tokenEnv;
+  try {
+    options.profile.hostExecution = true;
+    options.gateway = { gateway: { customConnectors: {
+      ops: { label: 'Ops', config: { type: 'http', url: 'https://ops.invalid/mcp', headers: { Authorization: 'Bearer {api_key}' } }, secretNames: ['api_key'], credentialOwner: 'static' },
+    } } } as any;
+    await adapter.start();
+    const file = join(directory, 'connector-0.json');
+    const raw = await readFile(file, 'utf8');
+    expect(raw).not.toContain('sk-codex-635');
+    const entry = JSON.parse(raw);
+    expect(entry.url).toMatch(/\/internal\/mcp\/connectors\/ops$/);
+    const request = require('supertest');
+    const app = require('express')().use(require('../../../src/connectors/proxy').createConnectorProxyRouter());
+    const probe = () => request(app).post('/internal/mcp/connectors/unlisted').set('authorization', entry.headers.Authorization);
+    expect((await probe()).status).toBe(403);
+    await adapter.stop();
+    expect((await probe()).status).toBe(401);
+  } finally {
+    delete process.env.GATEWAY_MCP_TOKEN_ENV_PATH;
+  }
+});
+
 test('failed Codex preparation removes already written connector secrets', async () => {
   options.profile.hostExecution = true;
   options.gateway = { gateway: { customConnectors: { fixture: {

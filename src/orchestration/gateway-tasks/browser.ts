@@ -34,6 +34,8 @@ export class BrowserTaskAdapter implements GatewayTaskAdapter {
     onProgress?:(task:TaskSnapshot,progress:BrowserProgress)=>void;
     allowedTask?:(task:TaskSnapshot)=>boolean;
     allowedEvidence?:(task:TaskSnapshot)=>boolean;
+    /** gateway.jev.images.enabled, read before each capture (live reload): decisions carry the tab screenshot. */
+    images?:()=>boolean;
     /** gateway.jev.features.browserSteps.enabled, read per submission (live reload). */
     stepMode?:()=>boolean;
     /** The user's own initiating message for the first round, if any. */
@@ -117,7 +119,7 @@ export class BrowserTaskAdapter implements GatewayTaskAdapter {
     const authorized=()=>{try{return this.options.allowedTask?.(task)!==false && this.binding(binding.id,task.ownerPrincipalId,task.conversationId)===binding;}catch{return false;}};
     // The installed browser package owns execution; gateway owns the request lifetime.
     let providerFailure:BrowserExecutionResult['providerFailure'];
-    const execution = boundedExecution(controller,authorized,()=> Promise.resolve().then(() => binding.run({requestConsent,interruptSignal:interrupt.signal,goal:instructions,...(command?{command:true}:{}),...(agentHandoff?{agentCommand:true}:{}),...(confirmation&&!steps?{confirmation}:{}),...(command&&task.revision===1&&task.executionControl?.revision!==1&&!steps?{sessionStart:true}:{}),...(interactionContext?{interactionContext}:{}),...(steps?{steps}:{}),startUrl:startUrl ?? (answers?.some(a=>!a.questionId.startsWith('prepared:')) || task.appliedRevision>0 ?undefined:task.gatewayTarget?.startUrl),fields,signal:controller.signal,authorized,
+    const execution = boundedExecution(controller,authorized,()=> Promise.resolve().then(() => binding.run({requestConsent,interruptSignal:interrupt.signal,goal:instructions,...(command?{command:true}:{}),...(agentHandoff?{agentCommand:true}:{}),...(confirmation&&!steps?{confirmation}:{}),...(command&&task.revision===1&&task.executionControl?.revision!==1&&!steps?{sessionStart:true}:{}),...(interactionContext?{interactionContext}:{}),...(steps?{steps}:{}),...(this.options.images?{images:this.options.images}:{}),startUrl:startUrl ?? (answers?.some(a=>!a.questionId.startsWith('prepared:')) || task.appliedRevision>0 ?undefined:task.gatewayTarget?.startUrl),fields,signal:controller.signal,authorized,
       evaluate:async(request,signal)=>{if(!authorized())throw new OrchestrationError('BROWSER_NOT_ALLOWED');try{return await this.options.evaluate(task,request,signal,authorized);}catch(e){if(e instanceof JevError)providerFailure={code:e.code,...e.metadata};throw e;}},
       trace:event=>{
         if(!authorized())return;

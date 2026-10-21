@@ -5,12 +5,6 @@
  */
 import { PCM16 } from '../voice/types';
 
-/** Client acoustic tuning for endpointing. These are microphone-level heuristics,
- * not protocol timing: the server then waits `voice.turns.silenceCommitMs`
- * (0 commits at once) after `speech.ended` before it commits an utterance. Levels are RMS of
- * float samples in [-1, 1]. */
-export const VOICE_CALL_VAD = { startMs: 120, endMs: 350, ratio: 3, minLevel: 0.012, initialNoise: 0.004, noiseAdapt: 0.05, bargeInRatio: 2, bargeInMs: 250 };
-
 /** Reply playback: the gateway's 16 kHz stream, a jitter buffer before each start, and the fade at its edges. */
 export const VOICE_CALL_PLAYBACK = { inputRate: PCM16.sampleRate, prebufferMs: 200, fadeMs: 4 };
 

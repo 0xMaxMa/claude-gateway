@@ -131,7 +131,7 @@ async function callGateway(
 /** Mint short-lived share URLs for local/artifact refs — order preserved. */
 export async function createShares(
   refs: ShareRef[],
-  opts: { purpose?: string; ttlSeconds?: number; allowDocuments?: boolean } = {},
+  opts: { purpose?: string; ttlSeconds?: number; allowDocuments?: boolean; allowAllFiles?: boolean } = {},
 ): Promise<ShareItem[]> {
   // Isolate mode: a path ref must sit in this conversation's own media dir. An
   // artifact ref is already resolved per (agent, session) by the gateway.
@@ -153,6 +153,7 @@ export async function createShares(
   // Opt-in only: image callers (line_image, generate_image refs) must keep
   // getting a hard rejection for a non-image ref.
   if (opts.allowDocuments) body.allow_documents = true;
+  if (opts.allowAllFiles) body.allow_all_files = true;
   const { status, json } = await callGateway('POST', '/api/v1/shares', body);
   if (status !== 201) {
     const code = typeof json.code === 'string' ? json.code : 'share_failed';

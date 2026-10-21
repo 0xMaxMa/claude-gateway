@@ -2,8 +2,8 @@ import { ORCHESTRATION_DEFAULTS, resolveOrchestrationConfig } from '../../../src
 
 const voice = (turns: Record<string, unknown>) => ({ ...ORCHESTRATION_DEFAULTS.voice, turns: { ...ORCHESTRATION_DEFAULTS.voice.turns, ...turns } });
 
-test('voice.turns.mergeWindowMs defaults to the former fixed 1200 ms, accepts 0 and rejects invalid values', () => {
-  expect(resolveOrchestrationConfig(undefined, { ...ORCHESTRATION_DEFAULTS.voice, turns: { silenceCommitMs: 650 } }).voice.turns.mergeWindowMs).toBe(1200);
+test('voice.turns.mergeWindowMs defaults to 2000 ms so a short hesitation stays one turn (issue #624), accepts 0 and rejects invalid values', () => {
+  expect(resolveOrchestrationConfig(undefined, { ...ORCHESTRATION_DEFAULTS.voice, turns: { silenceCommitMs: 650 } }).voice.turns.mergeWindowMs).toBe(2000);
   expect(resolveOrchestrationConfig(undefined, voice({ mergeWindowMs: 400 })).voice.turns.mergeWindowMs).toBe(400);
   expect(resolveOrchestrationConfig(undefined, voice({ mergeWindowMs: 0 })).voice.turns.mergeWindowMs).toBe(0);
   expect(() => resolveOrchestrationConfig(undefined, voice({ mergeWindowMs: -1 }))).toThrow('voice.turns.mergeWindowMs');

@@ -175,12 +175,12 @@ Runs of symbols with nothing to pronounce (for example a line of `=` characters)
 | `turns.silenceCommitMs` | 650 ms | Pause after the client's `speech.ended` before committing a microphone segment; `0` commits at once (the `/call` page already waits 350 ms of silence before it sends `speech.ended`) |
 | `turns.finalizationTimeoutMs` | 5000 ms | Base finalization budget; batch providers may require a longer provider-specific budget |
 | `turns.maxUtteranceMs` | 60000 ms | Bound a single utterance |
-| `turns.mergeWindowMs` | 1200 ms | After a segment is committed, wait this long for a continuation before submitting the combined turn; `0` submits each segment at once |
+| `turns.mergeWindowMs` | 2000 ms | After a segment is committed, wait this long for a continuation before submitting the combined turn; `0` submits each segment at once |
 | `playback.maxBufferedAudioMs` | 1500 ms | Bound unacknowledged playback audio |
 | `playback.bargeIn` | true | Allow speech interruption behavior |
 | `maxActiveSessionsPerConversation` | 1 | Limit concurrent live voice connections for a conversation |
 
-A shorter pause commits sooner and may cut a natural pause into separate segments; a longer pause waits for more speech but delays submission. The merge window is the larger of the two waits: every turn waits the full `mergeWindowMs` after its transcript before the agent starts. Lowering it to 600 ms answers about 600 ms sooner, but a pause longer than that in the middle of a thought becomes its own turn (the earlier part is answered, then interrupted by the continuation). The default stays 1200 ms; set `voice.turns.mergeWindowMs` per agent to trade one for the other, and remove the setting to go back. This is separate from orchestration's `intakeWaitMs`, which combines already received incomplete inputs. The setting is not a promise of end-to-end reply latency.
+A shorter pause commits sooner and may cut a natural pause into separate segments; a longer pause waits for more speech but delays submission. The merge window is the larger of the two waits: every turn waits the full `mergeWindowMs` after its transcript before the agent starts. The default is 2000 ms, so a hesitation of up to about two seconds in the middle of a thought stays in the same turn. Lowering it, for example to 1200 ms (the previous default), answers about 800 ms sooner, but a pause longer than the window becomes its own turn: the earlier part is answered, then interrupted by the continuation. When that happens, the next turn receives the interrupted parts from the last minute as context, and the agent answers the latest part first. Set `voice.turns.mergeWindowMs` per agent to trade one for the other, and remove the setting to go back. The spoken reply answers the latest question first and, within its length budget, covers each question the chat reply answers. This is separate from orchestration's `intakeWaitMs`, which combines already received incomplete inputs. The setting is not a promise of end-to-end reply latency.
 
 ## Live call latency settings
 
@@ -190,10 +190,32 @@ These settings under `voice.live` change only live voice turns (`/call` and brow
 
 | Setting under `voice.live` | Default | Effect |
 | --- | --- | --- |
-| `fastAck` | `true` | When the reply has not started speaking `fastAckAfterMs` after the turn is admitted, speak one short acknowledgement (for example "รับทราบค่ะ กำลังเช็คให้นะคะ") written by `fastAckModel` from the caller's words and the voice's gender. The model is asked for at most 8 words and never to answer; a phrase longer than 80 characters or with a line break, a number, a link or markup is dropped, and greetings or small talk get none. The request starts as each turn is admitted, so every live turn sends one `fastAckModel` request; it is cancelled, or its acknowledgement discarded, when the reply starts speaking first. It is audio only; it is not added to the chat, the history or memory. The call uses the agent's own model endpoint and credential (the `ANTHROPIC_BASE_URL` group the Claude CLI uses); a subscription token is only sent through a proxy, never straight to Anthropic. Each call is logged as `Voice fast ack` with its outcome, elapsed time and token counts, never the text. |
+| `fastAck` | `true` | When the reply has not started speaking `fastAckAfterMs` after the turn is admitted, speak one short acknowledgement that names the request (for example "เดี๋ยวเปิด PR 623 ดูให้นะคะ"), written by `fastAckModel` from the caller's words, their previous two turns, the acknowledgements already spoken in this call and the voice style. The model is asked for at most 8 words, never to answer, and to stay silent when the request is unclear or unfinished; a phrase longer than 80 characters or with a line break, a link, markup or a number the caller did not say is dropped, and greetings or small talk get none. Acknowledgements are kept sparse: a transcript with fewer than three letters or digits ("um") and a turn that follows an acknowledged turn get none and make no request, hesitation or restart fragments ("เอ่อ เอาใหม่", "wait") are left to the model, which replies "-" for them, and a phrase that matches or nearly matches one already spoken in this call is dropped. The agent's own spoken response for the turn, such as a task acknowledgement, replaces one that has not started playing, and a turn that may be acknowledged is told not to open its reply with another receipt. It is cancelled, or its acknowledgement discarded, when the reply starts speaking first. It is audio only; it is not added to the chat, the history or memory. The call uses the agent's own model endpoint and credential (the `ANTHROPIC_BASE_URL` group the Claude CLI uses); a subscription token is only sent through a proxy, never straight to Anthropic. Each call is logged as `Voice fast ack` with its outcome, elapsed time and token counts, and each skip as `fast_ack_skipped` with its reason (`too_short`, `cooldown`, `duplicate`, `no_fit`, `superseded`), never the text. |
 | `fastAckModel` | `claude-haiku-5-5` | Model for the acknowledgement, called with thinking disabled |
 | `fastAckAfterMs` | `1500` | How long after admission the reply may take to start speaking before the acknowledgement plays |
 | `fastAckTimeoutMs` | `3000` | Give up on an acknowledgement that takes longer |
+| `vad` | see below | Overrides for the `/call` page's browser speech detection, merged field by field over the defaults |
+
+## Background speech and noise
+
+The browser removes echo and steady noise, but not other people talking nearby. Realtime STT transcribes whatever the microphone hears, so nearby speech can arrive as if the caller said it. Three settings reduce this:
+
+- **ElevenLabs background-audio filter.** Set `voice.stt.filterBackgroundAudio` to `true` to send `filter_background_audio=true` to ElevenLabs realtime STT (`elevenlabs`, `upstream:elevenlabs` and `managed:elevenlabs`). It is off by default and other providers ignore it. Caveats: the filter can also drop the caller's quiet speech; its Thai quality is unverified; it is reported to conflict with `include_timestamps=true` (the gateway sends `false`); and for `upstream:` and `managed:` the gateway forwards the parameter in the relay URL, but whether the relay passes it on to ElevenLabs depends on the provider service.
+- **Less sensitive browser speech detection.** `voice.live.vad` overrides the `/call` page's energy detector. Raise `minLevel`, `ratio` or `startMs` so quieter or shorter sounds do not open a turn. Too high a value can miss the caller's own soft speech.
+- **Agent caveat.** Every live voice turn tells the agent that its input is a speech-to-text transcript that can include other voices, and to confirm an off-topic or implausible fragment before acting on it. Voice messages and typed turns do not get this note.
+
+| Setting under `voice.live.vad` | Default | Effect |
+| --- | --- | --- |
+| `startMs` | `120` | Milliseconds above the threshold before speech starts |
+| `endMs` | `350` | Milliseconds below the threshold before speech ends |
+| `minLevel` | `0.012` | Lowest speech threshold, as RMS level (0.001–0.5) |
+| `ratio` | `3` | The threshold is at least this many times the adaptive noise floor (1–100) |
+| `initialNoise` | `0.004` | Starting noise floor, as RMS level (0–0.5) |
+| `noiseAdapt` | `0.05` | How fast the noise floor follows quiet input (0–1) |
+| `bargeInRatio` | `2` | While the reply is audible, speech must be this many times the threshold (1–100) |
+| `bargeInMs` | `250` | While the reply is audible, milliseconds above that level before speech interrupts it |
+
+Millisecond values are positive integers. For example, `{ "voice": { "stt": { "provider": "elevenlabs", "model": "scribe_v2_realtime", "filterBackgroundAudio": true }, "live": { "vad": { "minLevel": 0.03, "startMs": 200 } } } }` turns on the filter and ignores quieter, shorter sounds.
 
 ## Diagnose missing or delayed audio
 
@@ -225,7 +247,7 @@ With orchestration serving Telegram, voice enabled and an HTTPS `gateway.publicU
 
 Select `managed:elevenlabs` or `managed:paxalabs` with a model from the authenticated provider service’s managed catalog. These routes use its daily voice wallet; direct providers and `upstream:<provider>` BYOK routes keep their own billing. There is no automatic switch between payers.
 
-When managed credits run out, channels quietly skip voice transcription and synthesis while text chat remains available. Saved voice preferences stay unchanged; a subsequent request checks the wallet again after reset. Browser clients should pause voice on `MANAGED_VOICE_QUOTA_EXHAUSTED` until credits become available. A wallet check that cannot finish is retried briefly and then does not block the request, because only a definite empty wallet stops voice work. See the [Voice API](../api/voice.md#managed-voice-wallet-and-startup-recovery).
+When managed credits run out, text chat remains available and the channel says why voice stopped. The notices are fixed English text on every channel (Telegram, Discord, LINE and Slack), whatever the chat, agent or voice language. The gateway sends them directly; the agent never writes or translates them. A voice note gets `Voice credit is used up, so this voice message could not be transcribed. Please type your message instead. Reference: <inputId>`. A voice reply is replaced by its text, followed by `Voice reply unavailable: voice credit is used up. Text replies continue until the credit resets or is topped up, or use /voice off.` Each chat gets at most one notice of each kind per hour, also across new sessions. The notice is recorded in the agent state, so a restart does not repeat it. When managed voice works again anywhere on the agent (a voice note is transcribed or a voice reply is delivered), every chat's notices reset, because they share one wallet. A notice that could not be sent does not count. Later voice notes in that hour end without a reply. Saved voice preferences stay unchanged; a subsequent request checks the wallet again after reset. Browser clients should pause voice on `MANAGED_VOICE_QUOTA_EXHAUSTED` until credits become available. A wallet check that cannot finish is retried briefly and then does not block the request, because only a definite empty wallet stops voice work. See the [Voice API](../api/voice.md#managed-voice-wallet-and-startup-recovery).
 
 ## Voice-message failures and retry
 

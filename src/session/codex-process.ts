@@ -9,6 +9,7 @@ import { codexPolicyArgs, DISABLED_CODEX_FEATURES } from './codex-policy';
 import { resolveCodexRuntime } from './codex-runtime';
 import { inspectSelectedCodexRuntime, CODEX_RUNTIME_MAINTENANCE } from './codex-container-runtime';
 import { prepareManagedConnectors } from './managed-connectors';
+import { revokeConnectorGrant } from '../connectors/proxy';
 import { discoverWorkerExtensions } from './worker-extensions';
 import { prepareContainerConnectors } from './container-connectors';
 import { EventEmitter } from 'events';
@@ -151,6 +152,8 @@ export class CodexProcess extends EventEmitter {
   private homePersisted = false;
   private leaseOwned = false;
   private readonly connectorPaths = new Set<string>();
+  /** Loopback proxy grant for this worker's connector files; revoked with them. */
+  private connectorGrant?: string;
   private approvedMcp: Record<string, any> = {};
   private readonly root: string;
   constructor(private readonly options: CodexProcessOptions) {
@@ -235,7 +238,8 @@ export class CodexProcess extends EventEmitter {
         ...extensions.skills.map(skill => JSON.stringify({ name: skill.name, aliases: skill.aliases, description: skill.description, path: skill.filePath, pluginRoot: skill.resourceRoot, source: skill.source })),
         ...extensions.notices,
       ].join('\n') : '';
-      const { servers } = prepareManagedConnectors(agent, this.options.gateway, profile, this.connectorPaths, extensions.servers);
+      const { servers, grant } = prepareManagedConnectors(agent, this.options.gateway, profile, this.connectorPaths, extensions.servers);
+      this.connectorGrant = grant;
       mcp.mcpServers = { ...servers, ...mcp.mcpServers };
     }
     for (const server of Object.values(mcp.mcpServers ?? {}) as any[]) if (server?.env) server.env = sanitizeJevChildEnv(server.env, this.options.gateway.gateway?.jev);
@@ -652,6 +656,8 @@ export class CodexProcess extends EventEmitter {
   private async cleanupHomes(): Promise<void> {
     for (const filename of this.connectorPaths) await rm(filename, { force: true });
     this.connectorPaths.clear();
+    revokeConnectorGrant(this.connectorGrant);
+    this.connectorGrant = undefined;
     if (!this.leaseOwned) return;
     // Only the most recent transcript home is needed after its replacement is durable.
     if (this.saved && this.homePersisted && this.home !== this.saved.home) {

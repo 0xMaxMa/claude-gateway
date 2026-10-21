@@ -48,7 +48,7 @@ Source: [skill loader](https://github.com/0xMaxMa/claude-gateway/blob/b917843/sr
 
 ## Learning controls and review flow
 
-Learning is enabled in `auto` mode by default. A completed session qualifies for review when it reaches the tool-call threshold, fires recovery, or contains a detected user correction, subject to the daily review budget. A qualifying session does not guarantee a useful skill will be written: the reviewer and writer still evaluate the proposal.
+Learning is enabled in `auto` mode by default. A completed session qualifies for review when it reaches the tool-call threshold or fires recovery, subject to the daily review budget. A qualifying session does not guarantee a useful skill will be written: the reviewer and writer still evaluate the proposal.
 
 | Setting | Built-in default | Effect |
 | --- | --- | --- |

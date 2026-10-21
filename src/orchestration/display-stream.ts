@@ -1,6 +1,8 @@
+import { PAYLOAD_OPENING, RESPONSE_FIELDS } from './response-schema';
+
 /** Extract only the display string from an incomplete flat response JSON object.
  * Incomplete escapes/surrogate pairs are held until the next provider chunk.
- * Other fields of the union response schema (spoken_text, notify_user) are skipped
+ * Other fields of the union response schema (spoken_text, notify_user, follow_up) are skipped
  * without ever being published, whatever order the model emits them in. */
 export function partialDisplay(raw: string): string {
   return partialField(raw, 'display_text')?.text ?? '';
@@ -56,12 +58,6 @@ export function partialField(raw: string, field: 'display_text' | 'spoken_text')
   }
 }
 
-/** An object opening with one of the union response schema's own field names. Ordinary
- * replies contain braces and fenced code blocks legitimately, so only this shape counts
- * as our payload; anything looser would hold back or mangle real answers. */
-const UNION_KEYS = ['display_text', 'spoken_text', 'notify_user'];
-const PAYLOAD_OBJECT = /\{\s*"(?:display_text|spoken_text|notify_user)"\s*:/;
-
 /** `index` moved back over the opening fence that announces the object there, if any: a
  * fenced payload is announced by its fence, so the fence belongs to the payload rather than
  * being left behind as stray markdown. */
@@ -70,10 +66,14 @@ export function fenceAdjusted(raw: string, index: number): number {
   return fence ? fence.index : index;
 }
 
-/** Index at which the first union-schema payload starts inside otherwise plain text, or -1. */
+/** Index at which the first union-schema payload starts inside otherwise plain text, or -1.
+ * Only an object opening with one of the union response schema's own field names counts:
+ * ordinary replies contain braces and fenced code blocks legitimately, and anything looser
+ * would hold back or mangle real answers. */
 export function payloadStart(raw: string): number {
-  const match = PAYLOAD_OBJECT.exec(raw);
-  return match ? fenceAdjusted(raw, match.index) : -1;
+  // search() always starts at 0 and leaves the shared global regex's lastIndex as it was.
+  const index = raw.search(PAYLOAD_OPENING);
+  return index >= 0 ? fenceAdjusted(raw, index) : -1;
 }
 
 /** The incremental text safe to publish for a partial agent turn.
@@ -96,5 +96,5 @@ export function displayPrefix(raw: string): string {
   // JSON a user actually asked for) keep streaming.
   const opening = /\{\s*(?:"([a-z_]*)"?\s*:?)?$/.exec(raw);
   const typed = opening?.[1] ?? '';
-  return opening && UNION_KEYS.some(key => key.startsWith(typed)) ? raw.slice(0, opening.index) : raw;
+  return opening && RESPONSE_FIELDS.some(key => key.startsWith(typed)) ? raw.slice(0, opening.index) : raw;
 }

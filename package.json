@@ -1,6 +1,6 @@
 {
   "name": "@0xmaxma/claude-gateway",
-  "version": "2.1.2",
+  "version": "2.1.6",
   "description": "Multi-agent gateway for Claude",
   "repository": {
     "type": "git",
@@ -35,6 +35,7 @@
     "pretest:unit": "npm run build && npm run typecheck:tests",
     "test": "NODE_OPTIONS=--max-old-space-size=1536 jest",
     "test:unit": "jest --testPathPattern=unit",
+    "lint:semantic-regex": "jest tests/unit/no-semantic-regex.test.ts",
     "test:e2e": "jest --testPathPattern=tests/e2e --forceExit",
     "integration": "jest --testPathPattern=integration --testTimeout=15000",
     "integration:ma": "jest --testPathPattern=multi-agent --testTimeout=15000",

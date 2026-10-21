@@ -6,6 +6,7 @@ import { mkdtemp, writeFile, rm } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join, resolve } from 'path';
 import { resolveEnabledConnectors } from '../connectors/resolve';
+import { agentFacingConnectors, revokeConnectorGrant } from '../connectors/proxy';
 import { isReservedConnectorId } from '../connectors/custom';
 import { claudeCommand, pathWithNativeBin } from '../session/claude-bin';
 import { DEFAULT_WORKER_TOOLS } from '../session/runtime-profile';
@@ -405,9 +406,13 @@ export class CapabilityCatalog {
     connectors: Record<string, unknown>
   ): Promise<CapabilitySnapshot> {
     const sanitizeServers = (values: Record<string, any>): Record<string, unknown> => Object.fromEntries(Object.entries(values).map(([name, server]) => [name, server && typeof server === 'object' && server.env ? { ...server, env: sanitizeJevChildEnv(server.env, this.gateway.gateway.jev) } : server]));
-    connectors = sanitizeServers(connectors);
     const directory = await mkdtemp(join(tmpdir(), 'gateway-capabilities-'));
+    let facing: ReturnType<typeof agentFacingConnectors> | undefined;
     try {
+      // Discovery reaches connectors through the gateway too, so the probe config
+      // below never holds their secrets (#635).
+      facing = agentFacingConnectors(this.agent, this.gateway, connectors, { sanitizeEnv: true });
+      connectors = sanitizeServers(facing.servers);
       let servers = connectors;
       let cliFailed = false;
       let observed: ObservedMcpServer[] = [];
@@ -520,6 +525,7 @@ export class CapabilityCatalog {
       });
       return snapshot;
     } finally {
+      revokeConnectorGrant(facing?.grant);
       await rm(directory, { recursive: true, force: true });
     }
   }

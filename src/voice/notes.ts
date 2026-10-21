@@ -101,6 +101,7 @@ export function voiceNoteFailureMessage(code: string): string {
     VOICE_NOTE_ATTACHMENT_MISSING: 'The voice note attachment is missing. Please resend it or type your message.',
     VOICE_NOTE_PROVIDER_UNSUPPORTED: 'The selected provider does not support voice message transcription. Check the voice message STT settings.',
     VOICE_NOTE_INTERRUPTED: 'Voice note transcription was interrupted. Please resend it or type your message.',
+    MANAGED_VOICE_QUOTA_EXHAUSTED: 'Voice credit is used up, so this voice message could not be transcribed. Please type your message instead.',
   };
   if (Object.prototype.hasOwnProperty.call(local, code)) return local[code];
   return `Voice note could not be transcribed. ${describeVoiceError(code).message}`;

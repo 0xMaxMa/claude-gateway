@@ -75,3 +75,43 @@ test('a pending grant still reports the consent wait',async()=>{
  await executeBrowserModule(runner([]),binding,c,connection);
  expect(c.progress.mock.calls.filter((x:any[])=>x[0].phase==='waiting_consent').length).toBeGreaterThan(0);
 });
+
+/** A runner that captures the tab twice and records what each capture returned. */
+function capturing(features:string[]){
+ const file=join(dir,`runner-${++runners}.cjs`);
+ writeFileSync(file,`exports.BROWSER_USE_CONTRACT_VERSION=1;exports.BROWSER_USE_FEATURES=${JSON.stringify(features)};
+exports.mcpBrowserTransport=invoke=>async(name,args,signal)=>{const r=await invoke(name,args,signal);return JSON.parse(r.content[0].text);};
+exports.runBrowserUse=async(input,deps)=>{const seen=[typeof deps.screenshot];if(deps.screenshot)for(const scope of [input.scope,input.scope,{...input.scope,tab_id:'other'}]){try{seen.push((await deps.screenshot({...scope,lease_token:'L'},new AbortController().signal)).slice(0,11));}catch(e){seen.push(e.message);}}globalThis.__captures=seen;return {status:'needs_verification',reason:'COMMAND_WAITING_INPUT',steps:0,evaluations:0};};`);
+ return file;
+}
+test('images switched off after a capture: the decision is sent without the image',async()=>{
+ mockCall.mockImplementation(async()=>reply({state:'completed',result:{}}));
+ const file=join(dir,`runner-${++runners}.cjs`);
+ writeFileSync(file,`exports.BROWSER_USE_CONTRACT_VERSION=1;exports.BROWSER_USE_FEATURES=["images"];
+exports.mcpBrowserTransport=invoke=>async(name,args,signal)=>{const r=await invoke(name,args,signal);return JSON.parse(r.content[0].text);};
+exports.runBrowserUse=async(input,deps)=>{await deps.evaluate({requestId:'r',state:{screen:'ref'},questions:{},assets:{ref:{type:'image',format:'jpg',data_base64:'AAAA'}}},new AbortController().signal);return {status:'needs_verification',reason:'COMMAND_WAITING_INPUT',steps:0,evaluations:1};};`);
+ const evaluate=jest.fn(async()=>({model:'m',answers:{}}));
+ await executeBrowserModule(file,binding,context({images:()=>false,evaluate}),connection);
+ expect((evaluate.mock.calls[0] as any[])[0]).toEqual({requestId:'r',state:{screen:'ref'},questions:{}});
+ await executeBrowserModule(file,binding,context({images:()=>true,evaluate}),connection);
+ expect((evaluate.mock.calls[1] as any[])[0].assets).toBeDefined();
+});
+test('page_screenshot is not a generic tool: a runner cannot capture around the images switch',async()=>{
+ mockCall.mockImplementation(async()=>reply({state:'completed',result:{}}));
+ await expect(executeBrowserModule(runner(['page_screenshot']),binding,context({images:()=>false}),connection)).rejects.toThrow('BROWSER_SCOPE_DENIED');
+ expect(mockCall).not.toHaveBeenCalled();
+});
+test('jev.images: page_screenshot is a leased read for a runner that advertises images, checked live before each capture',async()=>{
+ const png='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+ mockCall.mockImplementation(async({name})=>name==='page_screenshot'?{content:[{type:'image',mimeType:'image/png',data:png}]}:reply({state:'completed',result:{}}));
+ const images=jest.fn().mockReturnValueOnce(true).mockReturnValue(false);
+ // The other-tab capture is refused on scope first, whatever the switch says.
+ const c=context({images});
+ await executeBrowserModule(capturing(['images']),binding,c,connection);
+ // Enabled: the image; switched off mid-run: no capture; another tab: refused before any call.
+ expect((globalThis as any).__captures).toEqual(['function',png.slice(0,11),'BROWSER_SCREENSHOT_DISABLED','BROWSER_SCOPE_DENIED']);
+ expect(mockCall.mock.calls.filter(x=>x[0].name==='page_screenshot')).toHaveLength(1);
+ expect(c.beforeMutation).not.toHaveBeenCalled();
+ await executeBrowserModule(capturing([]),binding,context({images:()=>true}),connection);
+ expect((globalThis as any).__captures).toEqual(['undefined']);
+});

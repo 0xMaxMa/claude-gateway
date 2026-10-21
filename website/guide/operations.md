@@ -35,6 +35,25 @@ claude-gateway update check
 
 Review release changes and back up configuration, agent workspaces/session data, and relevant app data before upgrading. Store backups securely because configuration contains credentials. Stop or coordinate active work before restarting. Worker tasks interrupted by the restart resume automatically afterward (see [orchestration](orchestration.md)).
 
+### Release channels
+
+The package uses two npm [dist-tags](https://docs.npmjs.com/cli/v10/commands/npm-dist-tag). `latest` is every release, as soon as its tests pass. `stable` is a release the maintainer promoted after testing it. `claude-gateway update check`, `claude-gateway update` and the dashboard's Update button follow `stable`. If no version has been promoted yet, they fall back to `latest`.
+
+Pass `--latest` to skip `stable` and take the newest release:
+
+```bash
+claude-gateway update check --latest
+claude-gateway update --latest
+```
+
+An update never downgrades. If `stable` is rolled back to an older version, gateways already on a newer one stay where they are.
+
+A fresh `npm install -g @0xmaxma/claude-gateway` without a tag installs `latest`. Install `@stable` to start on the stable channel:
+
+```bash
+npm install -g @0xmaxma/claude-gateway@stable
+```
+
 ```bash
 claude-gateway update
 claude-gateway gateway restart

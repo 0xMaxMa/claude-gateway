@@ -24,9 +24,6 @@ import type { SessionSignals, SkillLearningConfig, ResolvedSkillLearningCfg, Ski
 /** Debounce: fire the review this long after the last turn ends (session-idle proxy). */
 export const REVIEW_IDLE_DEBOUNCE_MS = 20_000;
 
-/** Heuristic: a user message that reads like a correction of the agent's last action. */
-const CORRECTION_RE = /^\s*(no\b|not\b|wrong\b|that'?s not|nope\b|ไม่ใช่|ผิด|บ่ใช่)/i;
-
 interface Accum {
   sessionId: string;
   turnIdx: number;
@@ -43,7 +40,6 @@ interface Accum {
   // session-level signals (persist across turns until a review consumes them)
   sigMaxToolCalls: number;
   sigRecovery: boolean;
-  sigCorrection: boolean;
   /** Exact reviewed content only: never infer equivalence from an intent or topic. */
   reviewedTranscriptHash?: string;
 }
@@ -254,7 +250,6 @@ export class SkillLearningManager {
       a.recoveryFired = false;
       a.skillsLoaded = new Set(invokedSkills.filter(Boolean));
       a.firstUserMsg = firstUserMessage ?? '';
-      if (CORRECTION_RE.test(a.firstUserMsg)) a.sigCorrection = true;
       this.accum.set(mapKey, a);
     } catch {
       /* never break the turn */
@@ -353,7 +348,6 @@ export class SkillLearningManager {
     const signals: SessionSignals = {
       toolCalls: a.sigMaxToolCalls,
       recoveryFired: a.sigRecovery,
-      userCorrection: a.sigCorrection,
     };
     const dayStart = startOfDayMs(this.now(), this.cfg.pruneTimezone);
     const spent = this.db.countReviewRunsSince(dayStart);
@@ -365,12 +359,11 @@ export class SkillLearningManager {
     // the reviewer runs and must not have its evidence erased in finally.
     a.sigMaxToolCalls = 0;
     a.sigRecovery = false;
-    a.sigCorrection = false;
     try {
       const transcript = this.gatherTranscript(sessionId);
       if (!transcript.trim()) return;
       const transcriptHash = createHash('sha256').update(transcript).digest('hex');
-      if (a.reviewedTranscriptHash === transcriptHash && !signals.recoveryFired && !signals.userCorrection) return;
+      if (a.reviewedTranscriptHash === transcriptHash && !signals.recoveryFired) return;
       const existing = await this.loadExistingSkills();
 
       const { proposal, tokensSpent, reviewed } = await runReviewer(
@@ -439,7 +432,7 @@ export class SkillLearningManager {
       this.reviewInFlight.delete(sessionId);
       if(this.pendingConfig&&!this.reviewInFlight.size)this.reconfigure(this.pendingConfig);
       // The newer batch's timer may have fired while this review was in flight.
-      if (!a.active && (a.sigMaxToolCalls > 0 || a.sigRecovery || a.sigCorrection) &&
+      if (!a.active && (a.sigMaxToolCalls > 0 || a.sigRecovery) &&
           this.accum.get(mapKey) === a && !this.idleTimers.has(mapKey)) {
         this.scheduleIdleReview(mapKey, sessionId);
       }
@@ -500,7 +493,6 @@ export class SkillLearningManager {
       firstUserMsg: '',
       sigMaxToolCalls: 0,
       sigRecovery: false,
-      sigCorrection: false,
     };
   }
 

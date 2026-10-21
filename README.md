@@ -42,7 +42,7 @@ Claude Gateway keeps conversations responsive while Claude Code workers execute 
 - 🔐 **Access control** — allowlist, open, or pairing-based Telegram access policies
 - 🌐 **HTTP API** — REST API with key-based auth for external integrations
 - 🛍️ **App Store** — install, update, and host Docker-compose apps on the gateway; apps get a reverse proxy at `/app/:name/:portName/*`, optional Unix socket bridge for host scripts, and optional AI agent injection
-- ⬆️ **Self-update** — check for newer versions of `claude-gateway` and `claude-code` and trigger an update via a single API call (no SSH or shell access needed), or from the terminal with `claude-gateway update` / `claude-gateway claude update`
+- ⬆️ **Self-update** — check for newer versions of `claude-gateway` and `claude-code` and trigger an update via a single API call (no SSH or shell access needed), or from the terminal with `claude-gateway update` / `claude-gateway claude update`; the gateway follows the npm `stable` dist-tag (`--latest` for the newest release)
 - 💾 **Session persistence** — conversation history saved and restored across restarts
 - 🖥️ **PTY shell (wrap-shell mode)** — optional interactive pseudo-terminal backend (`gateway.headless: false`) for tools that require a real TTY; includes a live browser viewer (xterm.js) and a `/api/v1/sessions/:sessionId/screen` endpoint that returns the visible screen as plain text — agents can poll it to detect hang states, menus, or unexpected output without parsing ANSI escape codes; a `/cli` chat command (Telegram/Discord/LINE) opens the same viewer for a single agent, agent-scoped and without an admin key; app-agents and orchestration always stay headless
 

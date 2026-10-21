@@ -3,6 +3,7 @@ import { FakeSttProvider } from '../../../src/voice/providers/fake';
 import { PCM16, TtsProvider } from '../../../src/voice/types';
 import { decodeVoiceFrame } from '../../../src/voice/protocol';
 import { BoundedQueue } from '../../../src/orchestration/bounded-queue';
+import { ORCHESTRATION_DEFAULTS } from '../../../src/orchestration/config';
 
 test('approved spoken text produces audio before the final answer and playback receipts bound long provider chunks', async () => {
   const stt = new FakeSttProvider(), controls: Record<string, any>[] = [], audio: Buffer[] = [], consumed: string[] = [], selectedVoices: string[] = [];
@@ -210,7 +211,7 @@ test('short speech segments merge once; resuming speech defers admission and man
     expect(submit).not.toHaveBeenCalled(); // Candidate speech is still being transcribed.
     await say('หมามีปีก', true);
     expect(submit).toHaveBeenCalledTimes(1);
-    expect(submit.mock.calls[0]).toEqual(['ช่วยสร้างรูป หมามีปีก', expect.any(String), expect.any(Function)]);
+    expect(submit.mock.calls[0]).toEqual(['ช่วยสร้างรูป หมามีปีก', expect.any(String), expect.any(Function), { fastAck: false }]);
     expect(controls.filter(c => c.type === 'stt.final').map(c => c.text)).toEqual(['ช่วยสร้างรูป หมามีปีก']);
     expect(controls.filter(c => c.type === 'utterance.accepted')).toHaveLength(1);
   } finally { await session.close(); }
@@ -635,9 +636,48 @@ test('mute right after speech answers it without the silence timer, and the repl
     stt.sessions.at(-1)!.emit({ type: 'commit_done', commitId: stt.sessions.at(-1)!.commitId! });
     await muting;
     expect(submit).toHaveBeenCalledTimes(1);
-    expect(submit).toHaveBeenCalledWith('สรุปให้หน่อย', listening.utterance_id, expect.any(Function));
+    expect(submit).toHaveBeenCalledWith('สรุปให้หน่อย', listening.utterance_id, expect.any(Function), { fastAck: false });
     expect(controls.at(-1)).toMatchObject({ type: 'voice.state', state: 'muted' });
     stream.push({ responseId: 'reply', text: 'ได้ครับ' });
     await waitFor(() => audio.length === 1);
   } finally { await session.close(); }
+});
+
+// Issue #624: a ~1.6 s hesitation mid-sentence used to start a second turn that barged in on the
+// first reply. Under the default merge window it joins the same turn; a longer pause does not.
+describe('default merge window', () => {
+  const { turns } = ORCHESTRATION_DEFAULTS.voice;
+  const pausedSpeech = async (pauseMs: number) => {
+    const stt = new FakeSttProvider(), controls: Record<string, any>[] = [], stop = jest.fn();
+    const submit = jest.fn(async (text: string) => ({ inputId: text, response: new Promise<string>(() => {}) }));
+    const session = new VoiceSession(stt, { id: 'fixture', capabilities: { textStreaming: true, wordAlignment: false, outputFormats: [PCM16] }, synthesize: async function* () {} }, 'v',
+      { control: c => controls.push(c), audio: jest.fn(), bufferedBytes: () => 0 }, submit, stop,
+      { ...turns, silenceCommitMs: 0, maxBufferedAudioMs: 1500 });
+    const say = async (text: string) => {
+      const listening = controls.filter(c => c.type === 'voice.state').at(-1)!, provider = stt.sessions.at(-1)!, previous = provider.commitId;
+      session.speechActivity();
+      await session.audio({ generation: listening.generation, epoch: 0, sequence: 1, segmentId: listening.utterance_id, audio: Buffer.alloc(320) });
+      const commit = session.commit(1);
+      while (!provider.commitId || provider.commitId === previous) await new Promise(r => setTimeout(r, 1));
+      provider.emit({ type: 'segment_final', segmentId: 's', text }); provider.emit({ type: 'commit_done', commitId: provider.commitId! }); await commit;
+    };
+    try {
+      await session.start();
+      await say('แล้วผมอยากรู้ว่า');
+      await new Promise(r => setTimeout(r, pauseMs));
+      await say('npm จะขึ้นยังไง');
+      await new Promise(r => setTimeout(r, turns.mergeWindowMs + 200));
+      return { submitted: submit.mock.calls.map(call => call[0]), stop };
+    } finally { await session.close(); }
+  };
+  test('a pause shorter than the window joins the same turn without interrupting a reply', async () => {
+    const { submitted, stop } = await pausedSpeech(1600);
+    expect(submitted).toEqual(['แล้วผมอยากรู้ว่า npm จะขึ้นยังไง']);
+    expect(stop).not.toHaveBeenCalled();
+  }, 15000);
+  test('a pause longer than the window keeps barge-in: the continuation interrupts the first reply', async () => {
+    const { submitted, stop } = await pausedSpeech(turns.mergeWindowMs + 400);
+    expect(submitted).toEqual(['แล้วผมอยากรู้ว่า', 'npm จะขึ้นยังไง']);
+    expect(stop).toHaveBeenCalled();
+  }, 15000);
 });

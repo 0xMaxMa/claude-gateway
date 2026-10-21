@@ -31,8 +31,8 @@ export function commandHelp(channel: CommandChannel, orchestration = false, inte
   const lines = commandCatalog(channel, orchestration).map(command => {
     const name = command.name.slice(1);
     let description = command.description;
-    // Telegram's receiver answers /model itself and only shows it; its /models buttons switch.
-    if (name === 'model' && channel === 'telegram') description = 'Show the current model; switch with /models';
+    // Telegram's receiver answers /model itself; /models shows the picker in DM.
+    if (name === 'model' && channel === 'telegram') description = 'Show the current model; view or select models in a direct message with /models';
     if (name === 'model' && ['discord', 'line'].includes(channel)) description = 'Show the model; change it in a private chat: /model [model ID]';
     if (name === 'new' && channel === 'api') description = 'Create a session: /new [name] (the reply carries its session ID)';
     if (name === 'stop' && orchestration) description = 'Stop the reply and choose a task to cancel';
