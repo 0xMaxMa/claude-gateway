@@ -33,6 +33,20 @@ test('cross-device files use a bounded-memory stream', async () => {
   const prepared = await prepareSharePath(source, media);
   expect(await fs.readFile(prepared, 'utf8')).toBe('fixture');
 });
+test('readable files denied a hard link by protected_hardlinks use a bounded-memory stream', async () => {
+  jest.spyOn(fs, 'link').mockRejectedValue(Object.assign(new Error('protected hardlink'), { code: 'EPERM' }));
+  const prepared = await prepareSharePath(source, media);
+  expect(await fs.readFile(prepared, 'utf8')).toBe('fixture');
+});
+test('an unreadable source is rejected even if hard-linking would be possible', async () => {
+  jest.spyOn(fs, 'open').mockRejectedValueOnce(Object.assign(new Error('unreadable'), { code: 'EACCES' }));
+  await expect(prepareSharePath(source, media)).rejects.toThrow('SHARE_SOURCE_UNREADABLE');
+  expect(readdirSync(media)).toEqual([]);
+});
+test('session preparation failures have a specific error instead of INVALID_REQUEST', async () => {
+  jest.spyOn(fs, 'mkdir').mockRejectedValueOnce(Object.assign(new Error('permission denied'), { code: 'EACCES' }));
+  await expect(prepareSharePath(source, media)).rejects.toThrow('SHARE_PREPARATION_FAILED');
+});
 test.each(['link', 'cross-device'])('rejects a source swapped to a symlink during %s preparation', async mode => {
   const ref = join(root, 'swapped.iso'); symlinkSync(source, ref);
   if (mode === 'cross-device') jest.spyOn(fs, 'link').mockRejectedValue(Object.assign(new Error('different device'), { code: 'EXDEV' }));
@@ -44,7 +58,7 @@ test.each(['session', 'media'])('rejects redirected %s directory', async kind =>
   rmSync(target, { recursive: true });
   const external = join(root, 'external'); mkdirSync(external); symlinkSync(external, target);
   await expect(prepareSharePath(source, media)).rejects.toThrow('ARTIFACT_PATH_DENIED');
-  expect(readdirSync(external).filter(name => name.startsWith('share-'))).toEqual([]);
+  expect(readdirSync(external)).toEqual([]);
 });
 
 test('valid multibyte filenames remain shareable with their extension', async () => {
