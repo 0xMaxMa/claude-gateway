@@ -340,9 +340,9 @@ export function normalizeTelegramLineBreaks(text: string): string {
 }
 
 /** Commands the receiver answers itself, in a direct message only (and `cli` where the terminal viewer is on). */
-const DM_ONLY_COMMANDS = ['start', 'help', 'status', 'model', 'models', 'clear', 'compact', 'restart', 'session', 'sessions', 'tasks', 'voice', 'voices', 'call']
+const DM_ONLY_COMMANDS = ['start', 'help', 'status', 'models', 'clear', 'compact', 'restart', 'session', 'sessions', 'tasks', 'voice', 'voices', 'call']
 /** Commands forwarded to the gateway, which answers them in a group as well. */
-const GROUP_COMMANDS = ['stop', 'new', 'rename', 'pstack_setup', 'pstack-setup']
+const GROUP_COMMANDS = ['stop', 'new', 'rename', 'pstack_setup', 'pstack-setup', 'model']
 
 /** The leading `/name` or `/name@<this bot>` of a message, lowercased; undefined when there is none or it names another bot. */
 export function leadingCommand(text: string, botUsername: string): string | undefined {

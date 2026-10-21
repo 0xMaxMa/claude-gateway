@@ -716,6 +716,19 @@ describe('AgentRunner — /models and /model on Discord and LINE (issue #409)', 
     return ((await res.json()) as { models: Array<{ id: string; label: string }> }).models;
   }
 
+  it('set_model accepts a listed model ID and refuses an unsupported ID', async () => {
+    const port = await startRunner();
+    const request = async (model: string) => fetch(`http://127.0.0.1:${port}/command`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command: 'set_model', chat_id: '-100200', payload: { model } }),
+    }).then(response => response.json()) as Promise<{ success?: boolean; error?: string }>;
+
+    expect(await request('claude-opus-5')).toMatchObject({ success: true });
+    expect(persistedModel()).toBe('claude-opus-5');
+    expect(await request('not-in-catalog')).toMatchObject({ success: false, error: expect.stringContaining('Unknown model') });
+    expect(persistedModel()).toBe('claude-opus-5');
+  }, 15000);
+
   it('get_models answers with the live catalog when one is configured', async () => {
     process.env.ANTHROPIC_BASE_URL = 'https://proxy.example.com';
     const catalogFetch = jest.fn(async (url: string, init?: unknown) => {

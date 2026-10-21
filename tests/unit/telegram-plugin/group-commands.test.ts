@@ -10,7 +10,7 @@ const group = (text: string, patch: Partial<Access> = {}, fromId = '7') =>
   groupCommandReply(allowed(patch), { chatType: 'supergroup', chatId: '-100', fromId, text, botUsername: 'agent_bot' })
 
 describe('a direct-message-only command in a group', () => {
-  it.each(['/model', '/models', '/help', '/status', '/clear', '/compact', '/restart', '/sessions', '/session', '/tasks', '/voice on', '/voices', '/call', '/start'])(
+  it.each(['/models', '/help', '/status', '/clear', '/compact', '/restart', '/sessions', '/session', '/tasks', '/voice on', '/voices', '/call', '/start'])(
     '%s in an allowed group gets a pointer to the direct message', text => {
       expect(group(text)).toBe(`${text.split(' ')[0]} is only available in a direct message with the bot.`)
     })
@@ -31,24 +31,24 @@ describe('a direct-message-only command in a group', () => {
   // Third review of #591 (L14): the reply follows the gate itself, not a copy of its rules.
   it('mints no pairing code and saves nothing for a group the gate would pair', () => {
     const access = allowed({ groupAllowlist: [], pairing: true })
-    expect(groupCommandReply(access, { chatType: 'group', chatId: '-100', fromId: '7', text: '/model', botUsername: 'agent_bot' })).toBeUndefined()
+    expect(groupCommandReply(access, { chatType: 'group', chatId: '-100', fromId: '7', text: '/models', botUsername: 'agent_bot' })).toBeUndefined()
     expect(access.pending).toEqual({})
   })
 
   it('answers the command addressed to this bot, and not one addressed to another bot', () => {
-    expect(group('/model@Agent_Bot')).toBe('/model is only available in a direct message with the bot.')
+    expect(group('/model@Agent_Bot')).toBeUndefined()
     expect(group('/model@other_bot')).toBeUndefined()
   })
 
   it('stays silent where the gate drops the group, without minting a pairing code', () => {
-    expect(group('/model', { groupAllowlist: [] })).toBeUndefined()
-    expect(group('/model', { groupPolicy: 'disabled' })).toBeUndefined()
-    expect(group('/model', { legacyGroupAllowFrom: { '-100': ['8'] } })).toBeUndefined()
-    expect(group('/model', { groupPolicy: 'open', groupAllowlist: [] })).toBeDefined()
+    expect(group('/models', { groupAllowlist: [] })).toBeUndefined()
+    expect(group('/models', { groupPolicy: 'disabled' })).toBeUndefined()
+    expect(group('/models', { legacyGroupAllowFrom: { '-100': ['8'] } })).toBeUndefined()
+    expect(group('/models', { groupPolicy: 'open', groupAllowlist: [] })).toBeDefined()
   })
 
   it('leaves text, other commands, private chats and the commands the gateway answers in groups alone', () => {
-    for (const text of ['hello', '/pstack:how', '/stop', '/new x', '/rename y', '/pstack_setup']) expect(group(text)).toBeUndefined()
+    for (const text of ['hello', '/pstack:how', '/stop', '/new x', '/rename y', '/pstack_setup', '/model opus']) expect(group(text)).toBeUndefined()
     expect(groupCommandReply(allowed(), { chatType: 'private', chatId: '7', fromId: '7', text: '/model', botUsername: 'agent_bot' })).toBeUndefined()
   })
 })
@@ -58,7 +58,7 @@ describe('a command the gateway answers in a group', () => {
     { fromId: '7', chatType: 'group', chatId: '-100', botUsername: 'agent_bot', messageText: text, messageEntities: [{ type: 'bot_command', offset: 0, length: text.split(' ')[0]!.length }] },
     () => allowed(), () => {}, () => 'code')
 
-  it.each(['/stop', '/stop@agent_bot', '/new Design', '/rename Design review', '/pstack_setup', '/pstack-setup'])('%s is addressed to the bot, like a mention', text => {
+  it.each(['/stop', '/stop@agent_bot', '/new Design', '/rename Design review', '/pstack_setup', '/pstack-setup', '/model opus', '/model@agent_bot opus'])('%s is addressed to the bot, like a mention', text => {
     expect(gate(text).action).toBe('deliver')
   })
 

@@ -1539,6 +1539,16 @@ export class AgentRunner extends EventEmitter {
     if (command === 'set_model') {
       const newModel = typeof body.payload?.model === 'string' ? body.payload.model : '';
 
+      // The Telegram receiver's picker and group `/model <id>` share this
+      // callback. Do not trust callback data as authorization to persist an
+      // arbitrary model string; accept only IDs from the current selectable
+      // catalog (including live provider models).
+      const selected = (await this.selectableModels()).find(model => model.id === newModel);
+      if (!selected) {
+        respond({ success: false, error: `Unknown model "${newModel}". Use /models to see the list.` });
+        return;
+      }
+
       try {
         await this.setModel(newModel);
       } catch (err) {
@@ -1548,7 +1558,7 @@ export class AgentRunner extends EventEmitter {
 
       const restarted = await this.restartChannelSessions();
 
-      respond({ success: true, model: newModel, restarted, appliesNextTurn: !restarted });
+      respond({ success: true, model: newModel, label: selected.label, restarted, appliesNextTurn: !restarted });
       return;
     }
 

@@ -1217,21 +1217,38 @@ bot.command('status', async ctx => {
   await ctx.reply(`Not paired. Send me a message to get a pairing code.`)
 })
 
-// /model — show current AI model (receiver mode only, needs AgentRunner callback)
+// /model — show or change the agent model (receiver mode only, needs AgentRunner callback).
+// A group change affects every chat for this agent, so only a Telegram user in
+// the primary allowlist can make it. The normal group policy/mention gate still
+// decides whether the command reaches this handler at all.
 bot.command('model', async ctx => {
-  if (ctx.chat?.type !== 'private') return
   const access = loadAccess()
   if (!access.allowFrom.includes(String(ctx.from!.id))) return
   if (!CALLBACK_URL_BASE) return
 
   try {
+    const arg = typeof ctx.match === 'string' ? ctx.match.trim() : ''
+    if (arg && ctx.chat?.type !== 'private') {
+      const res = await fetch(CALLBACK_URL_BASE + '/command', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command: 'set_model', chat_id: String(ctx.chat.id), payload: { model: arg } }),
+      })
+      const result = (await res.json()) as { success?: boolean; error?: string; label?: string; restarted?: boolean; appliesNextTurn?: boolean }
+      if (!result.success) {
+        await ctx.reply(result.error ?? 'Failed to change model.')
+        return
+      }
+      await ctx.reply(`Model set to ${result.label ?? arg} (${arg}).${result.appliesNextTurn ? ' Applies to the next response; current work continues.' : ' Restarting the session…'}`)
+      return
+    }
     const res = await fetch(CALLBACK_URL_BASE + '/command', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ command: 'get_model', chat_id: String(ctx.chat.id) }),
     })
     const data = (await res.json()) as { model?: string }
-    await ctx.reply(`Current model: ${data.model ?? 'unknown'}`)
+    await ctx.reply(`Current model: ${data.model ?? 'unknown'}${ctx.chat?.type === 'private' ? '' : '\nUse /model <model-id> here to change it for every chat of this agent.'}`)
   } catch (err) {
     await ctx.reply('Failed to get model info.')
   }

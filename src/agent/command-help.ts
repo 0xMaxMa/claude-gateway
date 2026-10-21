@@ -31,9 +31,9 @@ export function commandHelp(channel: CommandChannel, orchestration = false, inte
   const lines = commandCatalog(channel, orchestration).map(command => {
     const name = command.name.slice(1);
     let description = command.description;
-    // Telegram's receiver answers /model itself and only shows it; its /models buttons switch.
-    if (name === 'model' && channel === 'telegram') description = 'Show the current model; switch with /models';
-    if (name === 'model' && ['discord', 'line'].includes(channel)) description = 'Show the model; change it in a private chat: /model [model ID]';
+    // Telegram's receiver handles /model locally; a group change updates the whole agent.
+    if (name === 'model' && channel === 'telegram') description = 'Show the model; in groups, authorized users can set /model <model-id> for every chat of this agent';
+    if (name === 'model' && ['discord', 'line'].includes(channel)) description = 'Show the model; change it in a private chat: /model [model ID] (applies to every chat of this agent)';
     if (name === 'new' && channel === 'api') description = 'Create a session: /new [name] (the reply carries its session ID)';
     if (name === 'stop' && orchestration) description = 'Stop the reply and choose a task to cancel';
     // Every channel asks before /compact and /restart; only Telegram and the web ask before /clear.
