@@ -176,10 +176,8 @@ describe('model registry — DEFAULT_MODELS and template stay in sync', () => {
       expect(byId(DEFAULT_MODELS, id)?.contextWindow).toBe(1050000);
       expect(byId(templateModels(), id)?.contextWindow).toBe(1050000);
     }
-    for (const id of ['gpt-6-terra', 'gpt-6.1-sol']) {
-      expect(byId(DEFAULT_MODELS, id)?.contextWindow).toBe(200000);
-      expect(byId(templateModels(), id)?.contextWindow).toBe(200000);
-    }
+    expect(byId(DEFAULT_MODELS, 'gpt-6.1-sol[1m]')?.contextWindow).toBe(1050000);
+    expect(byId(templateModels(), 'gpt-6.1-sol[1m]')?.contextWindow).toBe(1050000);
   });
 
   it('both registries contain exactly the same set of model ids', () => {

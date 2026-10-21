@@ -2,7 +2,8 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { detectMigration, migrateConfig } from '../../src/config/migrator';
-import { DEFAULT_MODELS } from '../../src/agent/model-registry';
+import { DEFAULT_MODELS, findModel, resolveModelId } from '../../src/agent/model-registry';
+import { AgentRunner } from '../../src/agent/runner';
 
 const templatePath = path.join(__dirname, '..', '..', 'config.template.json');
 const oldDefaults = [
@@ -36,9 +37,11 @@ describe('retired GPT defaults in config migration', () => {
     const ids = template.gateway.models.map((m: { id: string }) => m.id);
     const fallbackIds = DEFAULT_MODELS.map(m => m.id);
     expect(template.configVersion).toBe('1.0.38');
-    for (const id of ['gpt-6-terra', 'gpt-6.1-sol']) {
-      expect(ids).toContain(id);
-      expect(fallbackIds).toContain(id);
+    expect(ids).toContain('gpt-6.1-sol[1m]');
+    expect(fallbackIds).toContain('gpt-6.1-sol[1m]');
+    for (const id of [...ids, ...fallbackIds]) {
+      expect(id).not.toMatch(/^gpt-6-terr?a(?:\[1m\])?$/);
+      expect(id).not.toBe('gpt-6.1-sol');
     }
     for (const { id } of oldDefaults) {
       expect(ids).not.toContain(id);
@@ -56,21 +59,72 @@ describe('retired GPT defaults in config migration', () => {
     expect(result.removedFields).toEqual(oldDefaults.map(m => `gateway.models[${m.id}]`));
     expect(JSON.parse(fs.readFileSync(configPath + '.bak', 'utf8'))).toEqual(original);
     expect(migrated.configVersion).toBe(version);
-    expect(migrated.gateway.models.map((m: { id: string }) => m.id)).toEqual(expect.arrayContaining(['gpt-6-terra', 'gpt-6.1-sol', 'openrouter/custom-model']));
+    expect(migrated.gateway.models.map((m: { id: string }) => m.id)).toEqual(expect.arrayContaining(['gpt-6.1-sol[1m]', 'openrouter/custom-model']));
     for (const { id } of oldDefaults) expect(migrated.gateway.models.some((m: { id: string }) => m.id === id)).toBe(false);
-    expect(migrated.agents[0].claude.model).toBe('gpt-6-terra');
+    expect(migrated.agents[0].claude.model).toBe('gpt-6.1-sol[1m]');
     expect(migrated.gateway.customSetting).toEqual({ keep: true });
     expect(migrateConfig(configPath, templatePath, version).migrated).toBe(false);
   });
 
+  it('migrates a selected retired model when gateway.models was absent', () => {
+    const configPath = path.join(dir, 'no-models.json');
+    fs.writeFileSync(configPath, JSON.stringify({
+      configVersion: '1.0.37', gateway: {},
+      agents: [{ id: 'test-agent', claude: { model: 'gpt-5.6-terra[1m]' } }],
+    }));
+    const version = JSON.parse(fs.readFileSync(templatePath, 'utf8')).configVersion as string;
+    migrateConfig(configPath, templatePath, version);
+    const migrated = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    expect(migrated.agents[0].claude.model).toBe('gpt-6.1-sol[1m]');
+    expect(migrated.gateway.models.some((m: { id: string }) => m.id === 'gpt-5.6-terra[1m]')).toBe(false);
+  });
+
+  it('lists and resolves the exact requested IDs after disposable migration', async () => {
+    const { migrated } = upgrade(oldDefaults);
+    const models = migrated.gateway.models;
+    const ids = ['gpt-6.1-sol[1m]'];
+    for (const id of ids) {
+      expect(resolveModelId(models, id).id).toBe(id);
+      expect(findModel(models, id)?.id).toBe(id);
+      expect(models.find((m: { id: string }) => m.id === id)?.contextWindow).toBe(1050000);
+    }
+    const runner = {
+      gatewayConfig: { gateway: { models } },
+      agentConfig: { claude: { model: migrated.agents[0].claude.model } },
+      availableModels: async () => models,
+    } as unknown as AgentRunner;
+    const listed = await (AgentRunner.prototype as unknown as {
+      modelList: (this: AgentRunner, hint: string) => Promise<{ text: string; models: Array<{ id: string }> }>;
+    }).modelList.call(runner, 'Switch with /model <id or alias>');
+    for (const id of ids) expect(listed.text).toContain('`' + id + '`');
+    for (const { id } of listed.models) {
+      expect(id).not.toMatch(/^gpt-6-terr?a(?:\[1m\])?$/);
+      expect(id).not.toBe('gpt-6.1-sol');
+    }
+    for (const { id } of oldDefaults) expect(listed.models.some(m => m.id === id)).toBe(false);
+  });
+
   it('keeps customized retired IDs and new-ID metadata, including agent selection', () => {
     const custom = { ...oldDefaults[1], label: 'My Terra', alias: 'my-terra', contextWindow: 64000 };
-    const newModel = { id: 'gpt-6-terra', label: 'My New Terra', alias: 'new-terra', contextWindow: 128000 };
+    const newModel = { id: 'gpt-6.1-sol[1m]', label: 'My New Sol', alias: 'new-sol', contextWindow: 128000 };
     const { result, migrated } = upgrade([custom, newModel]);
     expect(result.removedFields).not.toContain(`gateway.models[${custom.id}]`);
     expect(migrated.gateway.models).toContainEqual(custom);
     expect(migrated.gateway.models).toContainEqual(newModel);
     expect(migrated.agents[0].claude.model).toBe(custom.id);
+  });
+
+  it('preserves customized new-ID metadata on a later template upgrade', () => {
+    const customized = { id: 'gpt-6.1-sol[1m]', label: 'Private Sol', alias: 'private-sol', contextWindow: 1000000 };
+    const configPath = path.join(dir, 'later-config.json');
+    const laterTemplatePath = path.join(dir, 'later-template.json');
+    const laterTemplate = JSON.parse(fs.readFileSync(templatePath, 'utf8'));
+    laterTemplate.configVersion = '1.0.39';
+    fs.writeFileSync(laterTemplatePath, JSON.stringify(laterTemplate));
+    fs.writeFileSync(configPath, JSON.stringify({ configVersion: '1.0.38', gateway: { models: [customized] } }));
+    migrateConfig(configPath, laterTemplatePath, '1.0.39');
+    const migrated = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    expect(migrated.gateway.models.find((m: { id: string }) => m.id === customized.id)).toEqual(customized);
   });
 
   it('keeps a customized duplicate when a shipped row has the same retired ID', () => {
@@ -81,8 +135,8 @@ describe('retired GPT defaults in config migration', () => {
   });
 
   it.each([
-    ['gpt-5.6-sol[1m]', 'gpt-6.1-sol'],
-    ['gpt-5.6-terra[1m]', 'gpt-6-terra'],
+    ['gpt-5.6-sol[1m]', 'gpt-6.1-sol[1m]'],
+    ['gpt-5.6-terra[1m]', 'gpt-6.1-sol[1m]'],
     ['gpt-5.6-luna[1m]', 'gpt-6-luna[1m]'],
   ])('moves an agent from retired %s to %s', (from, to) => {
     const { migrated } = upgrade(oldDefaults, from);

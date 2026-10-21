@@ -732,12 +732,12 @@ const RETIRED_MODEL_DEFAULTS: Readonly<Record<string, { label: string; alias: st
 };
 
 const RETIRED_AGENT_REPLACEMENTS: Readonly<Record<string, string>> = {
-  'gpt-5.6-sol[1m]': 'gpt-6.1-sol',
-  'gpt-5.6-terra[1m]': 'gpt-6-terra',
+  'gpt-5.6-sol[1m]': 'gpt-6.1-sol[1m]',
+  'gpt-5.6-terra[1m]': 'gpt-6.1-sol[1m]',
   'gpt-5.6-luna[1m]': 'gpt-6-luna[1m]',
 };
 
-const NEW_MODEL_IDS = new Set(['gpt-6-terra', 'gpt-6.1-sol']);
+const NEW_MODEL_IDS = new Set(['gpt-6.1-sol[1m]']);
 
 function isRetiredDefault(model: Record<string, unknown>): boolean {
   const expected = RETIRED_MODEL_DEFAULTS[String(model.id)];
@@ -782,7 +782,7 @@ function migrateModels(
   for (const tm of templateModels) {
     const existing = userMap.get(tm.id as string);
     if (existing) {
-      if (!retireShippedDefaults || !NEW_MODEL_IDS.has(String(tm.id))) {
+      if (!NEW_MODEL_IDS.has(String(tm.id))) {
         existing.alias = tm.alias;
         existing.label = tm.label;
         existing.contextWindow = tm.contextWindow;
@@ -811,7 +811,8 @@ function migrateModels(
       const renamedId = LEGACY_MODEL_ID_RENAMES[String(model)];
       if (renamedId) (claude as Record<string, unknown>).model = renamedId;
       const effectiveId = String((claude as Record<string, unknown>).model);
-      if (retiredIds.has(effectiveId) && !remainingIds.has(effectiveId)) {
+      if (retireShippedDefaults && effectiveId in RETIRED_AGENT_REPLACEMENTS
+        && !remainingIds.has(effectiveId)) {
         (claude as Record<string, unknown>).model = RETIRED_AGENT_REPLACEMENTS[effectiveId];
       }
     }
