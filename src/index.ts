@@ -663,6 +663,7 @@ async function main(): Promise<void> {
   // Connector sidecars run beside the config file, in a directory the gateway owns.
   const sidecars = connectorSidecars.configure({ runtimeRoot: path.join(path.dirname(CONFIG_PATH), 'runtimes') });
   process.on('exit', () => sidecars.killAllNow());
+  await sidecars.reclaimOrphans();
   sidecars.reconcile(config.gateway.customConnectors);
 
   // Must precede the first createLogger() call: the level gate and the rotation

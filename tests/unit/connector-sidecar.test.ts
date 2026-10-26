@@ -202,6 +202,62 @@ describe('SidecarSupervisor', () => {
     }
   });
 
+  it('reclaims the sidecars of a gateway that was SIGKILLed, and only those', async () => {
+    const root = fs.mkdtempSync(path.join(tmpDir, 'killed-gateway-'));
+    // uvx re-execs itself as `uv tool uvx <args>`, so the leader's command line keeps only the args.
+    const reexec = path.join(root, 'reexec.sh');
+    fs.writeFileSync(reexec, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(fixture)} "$@"\n`, { mode: 0o755 });
+    const gateway = path.join(root, 'gateway.js');
+    fs.writeFileSync(gateway, `
+      require(${JSON.stringify(require.resolve('ts-node/register/transpile-only'))});
+      const { SidecarSupervisor } = require(${JSON.stringify(path.resolve(__dirname, '../../src/connectors/sidecar'))});
+      const entry = { label: 'x', secretNames: [], config: { type: 'http', sidecar: { command: ${JSON.stringify(reexec)}, args: ['--sidecar-arg'] } } };
+      new SidecarSupervisor({ runtimeRoot: ${JSON.stringify(root)}, log: line => console.log(line) }).reconcile({ a: entry, b: entry });
+      setInterval(() => {}, 1000);
+    `);
+    const { spawn } = require('child_process') as typeof import('child_process');
+    const killed = spawn(process.execPath, [gateway], { stdio: ['ignore', 'pipe', 'inherit'] });
+    let output = '';
+    killed.stdout!.on('data', (chunk: Buffer) => { output += chunk; });
+    const old = await until(() => {
+      const pids = [...output.matchAll(/connector=(a|b) started pid=(\d+)/g)].map(m => Number(m[2]));
+      return (output.match(/ ready on /g) ?? []).length === 2 && pids;
+    }, 20_000);
+    killed.kill('SIGKILL');
+    await new Promise(r => killed.once('exit', r));
+    try {
+      expect(old.map(alive)).toEqual([true, true]);
+      const next = new SidecarSupervisor({ runtimeRoot: root, stopGraceMs: 500, log: line => logs.push(line) });
+      await next.reclaimOrphans();
+      next.reconcile({ a: sidecarEntry(fixtureSpec()) });
+      await until(() => next.urlOf('a'));
+      expect({ oldAlive: old.filter(alive).length, newPid: old.includes(next.statusOf('a')!.pid!) }).toEqual({ oldAlive: 0, newPid: false });
+      next.reconcile({});
+      await until(() => !next.statusOf('a'));
+      await new Promise(r => setTimeout(r, 600));
+      expect(fs.readdirSync(path.join(root, 'sidecars'))).toEqual([]);
+      await next.close();
+    } finally {
+      for (const pid of old) if (alive(pid)) process.kill(-pid, 'SIGKILL');
+    }
+  });
+
+  it('leaves alone a recorded process group whose leader is now another program', async () => {
+    const { spawn } = require('child_process') as typeof import('child_process');
+    const stranger = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' });
+    try {
+      const root = fs.mkdtempSync(path.join(tmpDir, 'reused-pid-'));
+      fs.mkdirSync(path.join(root, 'sidecars', 'fx'), { recursive: true });
+      fs.writeFileSync(path.join(root, 'sidecars', 'fx', 'pgid'), JSON.stringify({ pgid: stranger.pid, command: 'uvx', args: '--from workspace-mcp workspace-mcp' }));
+      await new SidecarSupervisor({ runtimeRoot: root, log: () => {} }).reclaimOrphans();
+      // A killed child of this process stays a zombie until reaped, so watch for its exit instead of probing the pid.
+      await new Promise(r => setTimeout(r, 300));
+      expect({ exited: stranger.exitCode !== null || stranger.signalCode !== null }).toEqual({ exited: false });
+    } finally {
+      stranger.kill('SIGKILL');
+    }
+  });
+
   it('stops on pause and on delete', async () => {
     supervisor.reconcile({ fx: sidecarEntry(fixtureSpec()) });
     const pid = (await getJson(await readyUrl('fx'))).pid as number;

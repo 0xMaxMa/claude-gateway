@@ -18,7 +18,7 @@
  * it is told.
  */
 
-import { spawn, type ChildProcess } from 'child_process';
+import { execFile, spawn, type ChildProcess } from 'child_process';
 import * as fs from 'fs';
 import * as net from 'net';
 import * as os from 'os';
@@ -125,6 +125,8 @@ export interface SidecarSupervisorOptions {
 const DEFAULT_BACKOFF_MS = [1000, 2000, 5000, 10_000, 30_000, 60_000];
 const STDERR_LINES_PER_MINUTE = 120;
 const MAX_LOG_LINE = 2000;
+/** In a sidecar's working directory while its process group runs: `{pgid, command, args}`. */
+const PGID_FILE = 'pgid';
 
 export class SidecarSupervisor {
   private readonly sidecars = new Map<string, Sidecar>();
@@ -150,7 +152,7 @@ export class SidecarSupervisor {
       const parsed = parseSidecarSpec(entry.config);
       if (parsed) desired.set(id, parsed);
     }
-    for (const id of this.sidecars.keys()) if (!desired.has(id)) this.remove(id);
+    for (const id of this.sidecars.keys()) if (!desired.has(id)) this.remove(id, true);
     for (const [id, parsed] of desired) {
       const key = 'error' in parsed ? `invalid:${parsed.error}` : specKey(parsed);
       const current = this.sidecars.get(id);
@@ -220,7 +222,23 @@ export class SidecarSupervisor {
   /** Stop every sidecar and refuse new ones: gateway shutdown. */
   async close(): Promise<void> {
     this.closed = true;
-    await Promise.all([...this.sidecars.keys()].map(id => this.remove(id)));
+    await Promise.all([...this.sidecars.keys()].map(id => this.remove(id, false)));
+  }
+
+  /**
+   * Kill the sidecars a previous gateway left running: one that was SIGKILLed or
+   * OOM-killed never ran close(), and its detached process groups outlive it. Run at
+   * boot before the first reconcile.
+   */
+  async reclaimOrphans(): Promise<void> {
+    const dir = path.join(this.options.runtimeRoot, 'sidecars');
+    let ids: string[];
+    try { ids = fs.readdirSync(dir); } catch { return; }
+    for (const id of ids) {
+      await this.reclaimGroup(id);
+      // Empty unless the sidecar wrote there; reconcile recreates it for a configured id.
+      try { fs.rmdirSync(this.workDir(id)); } catch { /* not empty */ }
+    }
   }
 
   /** Last-resort synchronous kill for process exit paths that cannot await. */
@@ -237,7 +255,8 @@ export class SidecarSupervisor {
     return sidecar;
   }
 
-  private remove(id: string): Promise<void> {
+  /** Stop and forget a sidecar; `purge` also deletes its working directory (the entry is gone, not the gateway). */
+  private remove(id: string, purge: boolean): Promise<void> {
     const sidecar = this.sidecars.get(id);
     if (!sidecar) return Promise.resolve();
     this.sidecars.delete(id);
@@ -246,7 +265,49 @@ export class SidecarSupervisor {
       await this.halt(sidecar);
       sidecar.phase = { kind: 'stopped' };
       this.notify(sidecar);
+      if (purge && !this.sidecars.has(id)) fs.rmSync(this.workDir(id), { recursive: true, force: true });
     });
+  }
+
+  private workDir(id: string): string {
+    return path.join(this.options.runtimeRoot, 'sidecars', id);
+  }
+
+  /** Drop the group record, unless a later start of the same id has replaced it. */
+  private forgetGroup(id: string, pgid: number | undefined): void {
+    const file = path.join(this.workDir(id), PGID_FILE);
+    try {
+      if ((JSON.parse(fs.readFileSync(file, 'utf8')) as { pgid?: unknown }).pgid === pgid) fs.rmSync(file, { force: true });
+    } catch { /* none recorded */ }
+  }
+
+  /**
+   * SIGKILL the process group recorded for `id` by an earlier spawn whose stop never
+   * ran. A recorded leader that is alive must still run the recorded command line, so a
+   * recycled pid is never killed; only its args are compared when it has some, because
+   * uvx re-execs itself as `uv tool uvx <args>`. A group whose leader exited but whose members live on
+   * (python after uvx) cannot have been recycled: a pgid is not reused while the group exists.
+   */
+  private async reclaimGroup(id: string): Promise<void> {
+    const file = path.join(this.workDir(id), PGID_FILE);
+    let record: { pgid: number; command: string; args: string };
+    try { record = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return; }
+    try {
+      if (!Number.isInteger(record.pgid) || record.pgid <= 1) return;
+      const members = (await listProcesses()).filter(p => p.pgid === record.pgid);
+      const leader = members.find(p => p.pid === record.pgid);
+      const runsRecorded = (line: string): boolean => record.args ? line.endsWith(` ${record.args}`) : line === record.command;
+      if (!members.length || (leader && !runsRecorded(leader.command))) return;
+      try { process.kill(-record.pgid, 'SIGKILL'); } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ESRCH') throw err;
+        return;
+      }
+      this.options.log(`connector-sidecar: connector=${id} reclaimed orphaned process group ${record.pgid} (${members.length} process(es))`);
+    } catch (err) {
+      this.options.log(`connector-sidecar: connector=${id} orphan check failed: ${(err as Error).message}`);
+    } finally {
+      fs.rmSync(file, { force: true });
+    }
   }
 
   private enqueue(sidecar: Sidecar, op: () => Promise<void>): Promise<void> {
@@ -276,9 +337,11 @@ export class SidecarSupervisor {
         ? await resolveUvCommand(spec.command, { installRoot: this.options.runtimeRoot, searchPath: this.options.searchPath })
         : spec.command;
       if (!this.current(sidecar, key)) return;
+      await this.reclaimGroup(sidecar.id);
+      if (!this.current(sidecar, key)) return;
       port = await allocatePort(sidecar.lastPort);
       sidecar.lastPort = port;
-      const cwd = path.join(this.options.runtimeRoot, 'sidecars', sidecar.id);
+      const cwd = this.workDir(sidecar.id);
       fs.mkdirSync(cwd, { recursive: true, mode: 0o700 });
       child = spawn(command, spec.args, {
         cwd,
@@ -287,6 +350,10 @@ export class SidecarSupervisor {
         // Its own process group, so stopping it also stops what it spawned (uvx runs python).
         detached: true,
       });
+      // Detached, so the group id is the leader's pid. Kept until halt, for reclaimOrphans.
+      if (child.pid !== undefined) {
+        fs.writeFileSync(path.join(cwd, PGID_FILE), JSON.stringify({ pgid: child.pid, command, args: spec.args.join(' ') }), { mode: 0o600 });
+      }
     } catch (err) {
       this.failed(sidecar, key, (err as Error).message);
       return;
@@ -361,6 +428,7 @@ export class SidecarSupervisor {
     sidecar.phase = { kind: 'stopped' };
     if (child) {
       await stopChild(child, this.options.stopGraceMs);
+      this.forgetGroup(sidecar.id, child.pid);
       this.options.log(`connector-sidecar: connector=${sidecar.id} stopped pid=${child.pid}`);
     }
   }
@@ -457,6 +525,19 @@ async function allocatePort(preferred?: number): Promise<number> {
   const port = await tryListen(0);
   if (!port) throw new Error('no free loopback port');
   return port;
+}
+
+/** Every process's pid, process group and full command line. */
+function listProcesses(): Promise<Array<{ pid: number; pgid: number; command: string }>> {
+  return new Promise((resolve, reject) => {
+    execFile('ps', ['-ww', '-eo', 'pid=,pgid=,args='], { maxBuffer: 8 * 1024 * 1024 }, (err, stdout) => {
+      if (err) { reject(err); return; }
+      resolve(stdout.split('\n').flatMap(line => {
+        const match = /^\s*(\d+)\s+(\d+)\s(.*)$/.exec(line);
+        return match ? [{ pid: Number(match[1]), pgid: Number(match[2]), command: match[3].trim() }] : [];
+      }));
+    });
+  });
 }
 
 function canConnect(port: number): Promise<boolean> {
