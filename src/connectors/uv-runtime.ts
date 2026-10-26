@@ -46,6 +46,8 @@ export interface UvRuntimeOptions {
   /** Overrides the pinned wheel table (tests). */
   wheels?: Readonly<Record<string, UvWheel>>;
   fetchImpl?: typeof fetch;
+  /** Abandons the download and the wait for another installer's lock (gateway shutdown). */
+  signal?: AbortSignal;
 }
 
 /** An existing executable named `name` in one of the `searchPath` directories. */
@@ -79,7 +81,7 @@ export async function resolveUvCommand(command: string, options: UvRuntimeOption
   // One install per directory in this process; installUv's lock file covers other processes.
   let pending = installs.get(binDir);
   if (!pending) {
-    pending = installUv(binDir, wheel, options.fetchImpl ?? fetch).finally(() => installs.delete(binDir));
+    pending = installUv(binDir, wheel, options.fetchImpl ?? fetch, options.signal).finally(() => installs.delete(binDir));
     installs.set(binDir, pending);
   }
   await pending;
@@ -88,7 +90,31 @@ export async function resolveUvCommand(command: string, options: UvRuntimeOption
 
 const LOCK_STALE_MS = 10 * 60 * 1000;
 
-async function installUv(binDir: string, wheel: UvWheel, fetchImpl: typeof fetch): Promise<void> {
+/** False only when no process has this pid; EPERM means it exists under another user. */
+function processExists(pid: number): boolean {
+  try { process.kill(pid, 0); return true; } catch (err) { return (err as NodeJS.ErrnoException).code !== 'ESRCH'; }
+}
+
+/**
+ * Remove a lock whose installer is gone, and the staging directories it left. A
+ * SIGKILLed gateway never runs installUv's finally, and waiting out LOCK_STALE_MS would
+ * block every uvx sidecar for ten minutes.
+ */
+function clearStaleLock(lock: string): void {
+  let stale: boolean;
+  try {
+    const holder = Number(fs.readFileSync(lock, 'utf8'));
+    stale = (Number.isInteger(holder) && holder > 0 && !processExists(holder)) || Date.now() - fs.statSync(lock).mtimeMs > LOCK_STALE_MS;
+  } catch { return; /* released meanwhile */ }
+  if (!stale) return;
+  fs.rmSync(lock, { force: true });
+  const parent = path.dirname(lock);
+  for (const name of fs.readdirSync(parent)) {
+    if (name.startsWith('.staging-')) fs.rmSync(path.join(parent, name), { recursive: true, force: true });
+  }
+}
+
+async function installUv(binDir: string, wheel: UvWheel, fetchImpl: typeof fetch, signal?: AbortSignal): Promise<void> {
   const parent = path.dirname(binDir);
   fs.mkdirSync(parent, { recursive: true, mode: 0o700 });
   const lock = path.join(parent, '.install.lock');
@@ -99,16 +125,16 @@ async function installUv(binDir: string, wheel: UvWheel, fetchImpl: typeof fetch
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
       if (fs.existsSync(path.join(binDir, 'uv'))) return;
-      try {
-        if (Date.now() - fs.statSync(lock).mtimeMs > LOCK_STALE_MS) fs.rmSync(lock, { force: true });
-      } catch { /* released meanwhile */ }
+      signal?.throwIfAborted();
+      clearStaleLock(lock);
       await new Promise(resolve => setTimeout(resolve, 500));
     }
   }
   const staging = fs.mkdtempSync(path.join(parent, '.staging-'));
   try {
     if (fs.existsSync(path.join(binDir, 'uv'))) return;
-    const response = await fetchImpl(wheel.url, { redirect: 'error', signal: AbortSignal.timeout(5 * 60 * 1000) });
+    const timeout = AbortSignal.timeout(5 * 60 * 1000);
+    const response = await fetchImpl(wheel.url, { redirect: 'error', signal: signal ? AbortSignal.any([timeout, signal]) : timeout });
     if (!response.ok) throw new Error(`uv download failed: HTTP ${response.status}`);
     const archive = Buffer.from(await response.arrayBuffer());
     const digest = createHash('sha256').update(archive).digest('hex');

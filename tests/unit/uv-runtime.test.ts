@@ -127,3 +127,44 @@ it('reads stored and deflated zip entries and reports missing ones', () => {
   expect(() => readZipEntries(stored, ['a', 'b'])).toThrow('uv archive is missing b');
   expect(() => readZipEntries(Buffer.from('not a zip at all, padded to more than twenty-two bytes'), ['a'])).toThrow('not a zip file');
 });
+
+it('takes over the lock of an installer that died mid-download and clears its staging dir', async () => {
+  const parent = path.join(root, `uv-${UV_VERSION}`);
+  fs.mkdirSync(path.join(parent, '.staging-abc123'), { recursive: true });
+  const { spawnSync } = require('child_process') as typeof import('child_process');
+  const dead = spawnSync(process.execPath, ['-p', 'process.pid']).stdout.toString().trim();
+  fs.writeFileSync(path.join(parent, '.install.lock'), dead);
+  const outcome = await Promise.race([
+    resolveUvCommand('uvx', linux(WHEEL_SHA, fakeFetch(WHEEL))).then(() => 'installed'),
+    new Promise(r => setTimeout(() => r('still waiting on the dead lock after 3s'), 3000)),
+  ]);
+  expect(outcome).toBe('installed');
+  expect(fs.readdirSync(parent).sort()).toEqual(['bin']);
+});
+
+it('keeps waiting on the lock of an installer that is still running', async () => {
+  const parent = path.join(root, `uv-${UV_VERSION}`);
+  fs.mkdirSync(parent, { recursive: true });
+  fs.writeFileSync(path.join(parent, '.install.lock'), String(process.ppid));
+  const fetchImpl = fakeFetch(WHEEL);
+  const outcome = await Promise.race([
+    resolveUvCommand('uvx', linux(WHEEL_SHA, fetchImpl)).then(() => 'installed'),
+    new Promise(r => setTimeout(() => r('waiting'), 1500)),
+  ]);
+  expect({ outcome, fetched: fetchImpl.mock.calls.length }).toEqual({ outcome: 'waiting', fetched: 0 });
+  fs.rmSync(path.join(parent, '.install.lock'));
+  await resolveUvCommand('uvx', linux(WHEEL_SHA, fetchImpl));
+});
+
+it('abandons a download when its signal aborts', async () => {
+  const controller = new AbortController();
+  const fetchImpl = jest.fn((_url: string, init: RequestInit) => new Promise<Response>((_resolve, reject) => {
+    init.signal!.addEventListener('abort', () => reject(init.signal!.reason));
+  }));
+  const pending = resolveUvCommand('uvx', { ...linux(WHEEL_SHA, fetchImpl as unknown as jest.Mock), signal: controller.signal });
+  await new Promise(r => setTimeout(r, 50));
+  controller.abort(new Error('gateway shutting down'));
+  const outcome = await Promise.race([pending.then(() => 'installed', (err: Error) => err.message), new Promise(r => setTimeout(() => r('still downloading 2s after the abort'), 2000))]);
+  expect(outcome).toBe('gateway shutting down');
+  expect(fs.readdirSync(path.join(root, `uv-${UV_VERSION}`))).toEqual([]);
+});

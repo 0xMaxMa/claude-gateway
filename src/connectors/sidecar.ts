@@ -132,6 +132,8 @@ export class SidecarSupervisor {
   private readonly sidecars = new Map<string, Sidecar>();
   private readonly options: Required<Omit<SidecarSupervisorOptions, 'searchPath'>> & { searchPath?: string };
   private closed = false;
+  /** Aborted by close(), so a uv download in progress does not hold up shutdown. */
+  private readonly shutdown = new AbortController();
 
   constructor(options: SidecarSupervisorOptions) {
     this.options = {
@@ -223,7 +225,15 @@ export class SidecarSupervisor {
   /** Stop every sidecar and refuse new ones: gateway shutdown. */
   async close(): Promise<void> {
     this.closed = true;
-    await Promise.all([...this.sidecars.keys()].map(id => this.remove(id, false)));
+    this.shutdown.abort(new Error('gateway shutting down'));
+    const sidecars = [...this.sidecars.values()];
+    // A stop normally ends within stopGraceMs; one stuck behind a slow lifecycle step
+    // in its queue must not hold up the gateway's exit.
+    let timer: NodeJS.Timeout | undefined;
+    const timedOut = new Promise<boolean>(resolve => { timer = setTimeout(() => resolve(true), 2 * this.options.stopGraceMs); });
+    const stopped = Promise.all(sidecars.map(sidecar => this.remove(sidecar.id, false))).then(() => false);
+    if (await Promise.race([stopped, timedOut])) killGroups(sidecars);
+    clearTimeout(timer);
   }
 
   /**
@@ -244,10 +254,7 @@ export class SidecarSupervisor {
 
   /** Last-resort synchronous kill for process exit paths that cannot await. */
   killAllNow(): void {
-    for (const sidecar of this.sidecars.values()) {
-      const child = (sidecar.phase as { child?: ChildProcess }).child;
-      if (child) signalGroup(child, 'SIGKILL');
-    }
+    killGroups(this.sidecars.values());
   }
 
   private create(id: string): Sidecar {
@@ -335,7 +342,7 @@ export class SidecarSupervisor {
     let port: number;
     try {
       const command = isUvCommand(spec.command)
-        ? await resolveUvCommand(spec.command, { installRoot: this.options.runtimeRoot, searchPath: this.options.searchPath })
+        ? await resolveUvCommand(spec.command, { installRoot: this.options.runtimeRoot, searchPath: this.options.searchPath, signal: this.shutdown.signal })
         : spec.command;
       if (!this.current(sidecar, key)) return;
       await this.reclaimGroup(sidecar.id);
@@ -487,6 +494,13 @@ export class SidecarSupervisor {
       });
       stream?.on('end', () => { emit(partial); partial = ''; });
     }
+  }
+}
+
+function killGroups(sidecars: Iterable<Sidecar>): void {
+  for (const sidecar of sidecars) {
+    const child = (sidecar.phase as { child?: ChildProcess }).child;
+    if (child) signalGroup(child, 'SIGKILL');
   }
 }
 

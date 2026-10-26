@@ -328,6 +328,37 @@ describe('SidecarSupervisor', () => {
   });
 });
 
+describe('shutdown while a sidecar is still resolving uv', () => {
+  afterEach(() => { jest.dontMock('../../src/connectors/uv-runtime'); jest.resetModules(); });
+
+  const supervisorWith = (resolveUvCommand: (command: string, options: { signal?: AbortSignal }) => Promise<string>, stopGraceMs: number) => {
+    jest.resetModules();
+    jest.doMock('../../src/connectors/uv-runtime', () => ({ isUvCommand: (command: string) => command === 'uvx', resolveUvCommand }));
+    const { SidecarSupervisor } = require('../../src/connectors/sidecar') as typeof import('../../src/connectors/sidecar');
+    const supervisor = new SidecarSupervisor({ runtimeRoot: tmpDir, stopGraceMs, log: () => {} });
+    supervisor.reconcile({ fx: sidecarEntry({ command: 'uvx', args: [fixture] }) });
+    return supervisor;
+  };
+  const closeMs = async (supervisor: { close(): Promise<void> }): Promise<number> => {
+    await new Promise(r => setTimeout(r, 50));
+    const started = Date.now();
+    await Promise.race([supervisor.close(), new Promise(r => setTimeout(r, 4000))]);
+    return Date.now() - started;
+  };
+
+  it('aborts the uv install instead of waiting for it', async () => {
+    const supervisor = supervisorWith((_command, { signal }) => new Promise((_resolve, reject) => {
+      signal?.addEventListener('abort', () => reject(new Error('aborted')));
+    }), 5000);
+    expect(await closeMs(supervisor)).toBeLessThan(500);
+  });
+
+  it('gives up after twice the stop grace when the install ignores the abort', async () => {
+    const supervisor = supervisorWith(() => new Promise(resolve => setTimeout(() => resolve(process.execPath), 3000)), 200);
+    expect(await closeMs(supervisor)).toBeLessThan(1000);
+  });
+});
+
 describe('sidecar connectors through the routes and the proxy', () => {
   const TOKEN_ENV = path.join(os.tmpdir(), `connector-sidecar-${process.pid}.env`);
   let cfgPath: string;
