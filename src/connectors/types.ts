@@ -45,6 +45,8 @@
  */
 export type ConnectorCredentialOwner = 'none' | 'static' | 'gateway' | 'external';
 
+import type { SidecarStatus } from './sidecar';
+
 export interface ConnectorStatus {
   id: string;
   label: string;
@@ -84,6 +86,9 @@ export interface ConnectorStatus {
    * through it is failing. Without this the API reports an indefinitely healthy
    * connector that stopped working hours ago.
    */
+  /** The gateway-run MCP server of a sidecar entry (connectors/sidecar.ts); omitted for
+   *  other connectors and for a paused one, whose sidecar is stopped. */
+  sidecar?: SidecarStatus;
   refresh?: {
     /** Consecutive transient failures; resets to 0 on the first success. */
     consecutiveFailures: number;

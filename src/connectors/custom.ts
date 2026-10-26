@@ -184,6 +184,9 @@ export type ConnectorSecretRoute = 'none' | 'proxy' | 'launch' | 'exposed';
 const CLIENT_ONLY_FIELDS = ['headersHelper', 'oauth'];
 
 export function connectorSecretRoute(entry: CustomConnectorEntry | undefined): ConnectorSecretRoute {
+  // A sidecar's url is a loopback port the gateway allocates and may change on restart,
+  // so it is never written into a session's config, secret or not.
+  if (entry?.config && typeof entry.config === 'object' && entry.config.sidecar !== undefined) return 'proxy';
   if (!entry || !Array.isArray(entry.secretNames) || !entry.secretNames.length) return 'none';
   const config = entry.config;
   if (!config || typeof config !== 'object') return 'exposed';
@@ -195,7 +198,7 @@ export function connectorSecretRoute(entry: CustomConnectorEntry | undefined): C
 }
 
 /** Fields the gateway drives each transport with; never copied into an agent-facing entry. */
-const TRANSPORT_FIELDS = ['type', 'command', 'args', 'env', 'cwd', 'url', 'headers'];
+const TRANSPORT_FIELDS = ['type', 'command', 'args', 'env', 'cwd', 'url', 'headers', 'sidecar'];
 
 /** The configured fields an agent-facing entry keeps (enabled_tools, timeout, ...):
  * everything except the transport fields and any field holding a placeholder. The

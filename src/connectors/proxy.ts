@@ -31,7 +31,7 @@ import { userInfo } from 'os';
 import * as path from 'path';
 import { pipeline, type Duplex } from 'node:stream';
 import type { AddressInfo } from 'node:net';
-import express, { Router, type Request, type Response } from 'express';
+import express, { Router, type NextFunction, type Request, type Response } from 'express';
 import type { AgentConfig, GatewayConfig } from '../types';
 import type { CustomConnectorEntry } from './types';
 import { resolveEnabledConnectors } from './resolve';
@@ -39,6 +39,7 @@ import { agentFacingFields, connectorSecretRoute, isStreamableHttpType } from '.
 import { sanitizeJevChildEnv } from '../jev/child-env';
 import { clearRuntimeExposure, recordRuntimeExposure } from './exposure';
 import { MAX_REDIRECTS, sameOriginRedirect } from './redirect';
+import { connectorSidecars } from './sidecar';
 
 export const CONNECTOR_PROXY_PATH = '/internal/mcp/connectors';
 
@@ -307,6 +308,15 @@ export function createConnectorProxyRouter(): Router {
     catch (err) { console.error(`connector-proxy: connector=${id} authorization check failed: ${(err as Error).message}`); }
     if (!bridgeable(resolved)) { res.status(403).end(); return; }
     res.status(204).end();
+  });
+  // A sidecar that is still starting has no url yet: hold the request until it
+  // listens rather than failing a session that spawned alongside it.
+  router.all(`${CONNECTOR_PROXY_PATH}/:id`, (req: Request, _res: Response, next: NextFunction) => {
+    const match = /^Bearer (\S+)$/.exec(req.headers.authorization ?? '');
+    const id = req.params['id'] ?? '';
+    const sidecars = connectorSidecars.get();
+    if (!match || !grants.has(match[1]) || !isSameHost(req) || !sidecars.statusOf(id) || sidecars.urlOf(id)) { next(); return; }
+    sidecars.waitUntilReady(id).then(() => next(), () => next());
   });
   router.all(`${CONNECTOR_PROXY_PATH}/:id`, (req: Request, res: Response) => {
     if (!isSameHost(req)) { res.status(403).json({ error: 'Forbidden' }); return; }

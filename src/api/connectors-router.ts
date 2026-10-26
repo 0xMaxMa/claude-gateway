@@ -22,6 +22,7 @@ import {
 import { createCustomConnectorsStore, type ConnectorScope, type CustomConnectorsStore } from '../connectors/custom-connectors-store';
 import { secretExposureFields } from '../connectors/exposure';
 import { internalSecretKeysOf } from '../connectors/oauth-refresh-sweep';
+import { connectorSidecars, parseSidecarSpec } from '../connectors/sidecar';
 import type { AgentRunner } from '../agent/runner';
 
 type AuthedRequest = Request & { apiKey: ApiKey };
@@ -191,7 +192,8 @@ export function createConnectorsRouter(
       // them and every counter would read a constant 0.
       const refresh =
         custom.credentialOwner === 'gateway' ? refreshStatusOf(req.params.id, tokenEnv) : undefined;
-      res.json({ id: req.params.id, connected, ...(custom.defaultEnabled !== undefined ? { defaultEnabled: custom.defaultEnabled } : {}), ...(custom.paused === true ? { paused: true } : {}), ...(refresh ? { refresh } : {}), ...secretExposureFields(req.params.id, custom) });
+      const sidecar = connectorSidecars.get().statusOf(req.params.id);
+      res.json({ id: req.params.id, connected, ...(custom.defaultEnabled !== undefined ? { defaultEnabled: custom.defaultEnabled } : {}), ...(custom.paused === true ? { paused: true } : {}), ...(refresh ? { refresh } : {}), ...(sidecar ? { sidecar } : {}), ...secretExposureFields(req.params.id, custom) });
     } catch (err) {
       console.error(
         `connectors-router: status for connector=${req.params.id} failed: ${(err as Error).message}`,
@@ -555,6 +557,14 @@ export function createConnectorsRouter(
       return;
     }
 
+    // Before the placeholder check, so a {placeholder} inside sidecar gets the reason
+    // it is refused rather than a count mismatch.
+    const sidecar = parseSidecarSpec(body.config as Record<string, unknown>);
+    if (sidecar && 'error' in sidecar) {
+      res.status(400).json({ error: sidecar.error });
+      return;
+    }
+
     const placeholders = extractPlaceholders(body.config);
     if (placeholders.length !== 1 || placeholders[0] !== 'access_token') {
       res.status(400).json({
@@ -837,6 +847,12 @@ export function createConnectorsRouter(
         }
       }
       secrets = body.secrets as Record<string, string>;
+    }
+
+    const sidecar = parseSidecarSpec(body.config as Record<string, unknown>);
+    if (sidecar && 'error' in sidecar) {
+      res.status(400).json({ error: sidecar.error });
+      return;
     }
 
     const oauth = body.oauth === true;
