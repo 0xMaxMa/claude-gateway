@@ -3,7 +3,7 @@ import { createLazyToolCatalog } from './lazy-tools';
 import type { McpToolDefinition } from './types';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -21,6 +21,31 @@ describe('lazy gateway tools', () => {
     expect(parse(catalog.search({ name: 'TOOL_01' })).tools).toEqual([defs[1]]);
     expect(parse(catalog.search({ query: 'ORIGINAL description 22' })).tools).toEqual([defs[22]]);
     expect(catalog.search({ limit: 21 }).isError).toBe(true);
+  });
+  // Queries workers sent to tool_search against real workspace-mcp catalogs; each of these
+  // returned nothing under the every-word rule, costing the worker a whole model turn.
+  test('ranks tools by matching words when no tool matches every word, and treats * as an empty query', () => {
+    const catalogs = JSON.parse(readFileSync(join(import.meta.dir, 'fixtures/workspace-mcp-tools.json'), 'utf8')) as Record<string, McpToolDefinition[]>;
+    const search = (server: string, query: string) => parse(createLazyToolCatalog(catalogs[server]).search({ query }));
+    const top = (server: string, query: string) => search(server, query).tools.map((tool: McpToolDefinition) => tool.name);
+    expect({
+      'list events': top('google-calendar', 'list events')[0],
+      'list events calendar': top('google-calendar', 'list events calendar')[0],
+      'search messages list': top('gmail', 'search messages list')[0],
+      // The description says "updating", so manage_event ties get_events on "event" and sorts second.
+      'update event': top('google-calendar', 'update event').slice(0, 2),
+    }).toEqual({
+      'list events': 'get_events',
+      'list events calendar': 'get_events',
+      'search messages list': 'search_gmail_messages',
+      'update event': ['get_events', 'manage_event'],
+    });
+    for (const server of ['gmail', 'google-calendar']) {
+      const all = search(server, '*');
+      expect({ total: all.total, schemas: all.tools.some((tool: McpToolDefinition) => 'inputSchema' in tool) }).toEqual({ total: catalogs[server].length, schemas: false });
+    }
+    expect(top('gmail', 'search gmail messages')).toEqual(['search_gmail_messages']);
+    expect(search('gmail', 'zzz qqq').total).toBe(0);
   });
   test('unauthorized, task and recursive tools never reach dispatcher', async () => {
     let calls = 0; const dispatch = async () => { calls++; return { content: [] }; };

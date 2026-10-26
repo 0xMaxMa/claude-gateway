@@ -24,10 +24,21 @@ export function createLazyToolCatalog(tools: readonly McpToolDefinition[], exclu
       const offset = args.offset ?? 0; const limit = args.limit ?? 5;
       if (typeof offset !== 'number' || !Number.isSafeInteger(offset) || offset < 0 ||
           typeof limit !== 'number' || !Number.isInteger(limit) || limit < 1 || limit > 20) return fail('Invalid search pagination');
-      const query = String(args.query ?? '').trim().toLowerCase();
+      const rawQuery = String(args.query ?? '').trim().toLowerCase();
+      const query = rawQuery === '*' ? '' : rawQuery;
       const name = String(args.name ?? '').trim().toLowerCase();
-      const matches = catalog.filter(tool => name ? tool.name.toLowerCase() === name :
-        query.split(/\s+/).every(word => `${tool.name} ${tool.description}`.toLowerCase().includes(word)));
+      const text = (tool: McpToolDefinition) => `${tool.name} ${tool.description}`.toLowerCase();
+      let matches = catalog.filter(tool => name ? tool.name.toLowerCase() === name :
+        query.split(/\s+/).every(word => text(tool).includes(word)));
+      // Natural multi-word queries ("update event") often have no tool containing every
+      // word, and an empty result costs the worker a turn: rank by how many words match.
+      if (!name && !matches.length) {
+        const words = [...new Set(query.split(/[^a-z0-9]+/).filter(Boolean))];
+        matches = catalog.map(tool => ({ tool, hits: words.filter(word => text(tool).includes(word)).length }))
+          .filter(({ hits }) => hits > 0)
+          .sort((a, b) => b.hits - a.hits || a.tool.name.localeCompare(b.tool.name))
+          .map(({ tool }) => tool);
+      }
       const schemas = args.include_schema ?? Boolean(query || name);
       return result({ total: matches.length, offset, next_offset: offset + limit < matches.length ? offset + limit : null,
         tools: matches.slice(offset, offset + limit).map(tool => schemas ? tool : { name: tool.name, description: tool.description }) });

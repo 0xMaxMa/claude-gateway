@@ -1,0 +1,66 @@
+{
+ "google-calendar": [
+  {
+   "name": "list_calendars",
+   "description": "Retrieves a list of calendars accessible to the authenticated user."
+  },
+  {
+   "name": "get_events",
+   "description": "Retrieves events from a specified Google Calendar. Can retrieve a single event by ID or multiple events within a time range.\nYou can also search for events by keyword by supplying the optional \"query\" param."
+  },
+  {
+   "name": "manage_event",
+   "description": "Manages calendar events. Supports creating, updating, deleting, and RSVP."
+  },
+  {
+   "name": "manage_out_of_office",
+   "description": "Manages Out of Office events on Google Calendar. These special events auto-decline\nmeeting invitations and set the user's status to \"Out of office\" across Google Workspace."
+  },
+  {
+   "name": "manage_focus_time",
+   "description": "Manages Focus Time events on Google Calendar. These special events auto-decline\nmeeting invitations and, by default, set the user's chat status to Do Not\nDisturb, helping protect blocks of uninterrupted work time."
+  },
+  {
+   "name": "query_freebusy",
+   "description": "Returns free/busy information for a set of calendars."
+  }
+ ],
+ "gmail": [
+  {
+   "name": "search_gmail_messages",
+   "description": "Searches messages in a user's Gmail account based on a query.\nReturns both Message IDs and Thread IDs for each found message, along with Gmail web interface links for manual verification.\nSupports pagination via page_token parameter."
+  },
+  {
+   "name": "get_gmail_message_content",
+   "description": "Retrieves the full content (subject, sender, recipients, body) of a specific Gmail message.\n\nBodies are returned inline and truncated at 20,000 characters. Set full=True to\nget the complete, untruncated message instead: it is exported to storage and the\nresponse carries a short-lived download URL (HTTP transport) or file path (stdio\ntransport) rather than the body, so large messages never stream through the model\ncontext. Stateless deployments without GCS staging have no storage, so there\nfull=True returns the untruncated body inline; with GCS staging configured it\nreturns a signed download URL like any other HTTP deployment."
+  },
+  {
+   "name": "get_gmail_messages_content_batch",
+   "description": "Retrieves the content of multiple Gmail messages in a single batch request.\nSupports up to 25 messages per batch to prevent SSL connection exhaustion."
+  },
+  {
+   "name": "get_gmail_attachment_content",
+   "description": "Downloads an email attachment and saves it to local disk.\n\nIn stdio mode, returns the local file path for direct access.\nIn HTTP mode, returns a temporary download URL (valid for 1 hour).\nMay re-fetch message metadata to resolve filename and MIME type."
+  },
+  {
+   "name": "send_gmail_message",
+   "description": "Sends an email using the user's Gmail account. Supports new emails, replies, and\nforwards, with optional attachments. Supports Gmail's \"Send As\" feature to send\nfrom configured alias addresses.\n\nTo forward an existing message, pass forward_message_id. The original subject,\nbody (quoted with a \"Forwarded message\" header), and attachments are carried over.\nIn forward mode, body (if any) is prepended as a note and subject is optional.\nThreading, reply, and signature options do not apply when forwarding.\n\nTHIS TOOL SENDS IMMEDIATELY AND CANNOT SCHEDULE. Gmail's REST API exposes no\nsend-time parameter; Schedule send is a web-UI feature with no API equivalent,\nso no argument to this tool can defer delivery. Never tell a user a message\nwas scheduled. For \"prepare now, deliver later\", create a draft with\ndraft_gmail_message. An external scheduler must retain the message data to\ncreate and send a new message via send_gmail_message at the chosen time, or\ncall users.drafts.send with the draft ID returned by draft_gmail_message.\nAlternatively, let the user schedule that draft in the Gmail UI."
+  },
+  {
+   "name": "draft_gmail_message",
+   "description": "Creates a draft email in the user's Gmail account. Supports new, reply, and forward\ndrafts with optional attachments. Supports Gmail's \"Send As\" feature to draft from\nconfigured alias addresses.\n\nTo save a forward as a draft for review, pass forward_message_id. The original\nsubject, body (quoted with a \"Forwarded message\" header), and attachments are\ncarried over. In forward mode, body (if any) is prepended as a note, subject is\noptional, and threading, reply, and signature options do not apply.\n\nSCHEDULED SEND IS NOT AVAILABLE. Gmail's REST API exposes no send-time\nparameter; the Schedule send feature is web-UI only, and a message cannot be\nplaced in the Scheduled folder through the API. Do not claim a message was\nscheduled. To deliver at a chosen time, create a draft with\ndraft_gmail_message. An external scheduler must retain the message data to\ncreate and send a new message via send_gmail_message then, or call\nusers.drafts.send with the draft ID returned by draft_gmail_message.\nAlternatively, let the user schedule the draft in the Gmail UI."
+  },
+  {
+   "name": "get_gmail_thread_content",
+   "description": "Retrieves the complete content of a Gmail conversation thread, including all messages.\n\nOptionally also returns structured ownership analysis so a caller can\ndetermine who sent the last message and who owes whom a response without\nre-parsing the formatted string or making a second tool call."
+  },
+  {
+   "name": "get_gmail_threads_content_batch",
+   "description": "Retrieves the content of multiple Gmail threads in a single batch request.\nSupports up to 25 threads per batch to prevent SSL connection exhaustion."
+  },
+  {
+   "name": "list_gmail_labels",
+   "description": "Lists labels in the user's Gmail account."
+  }
+ ]
+}
