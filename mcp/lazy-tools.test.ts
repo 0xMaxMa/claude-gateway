@@ -27,7 +27,22 @@ describe('lazy gateway tools', () => {
     const catalog = createLazyToolCatalog(defs);
     for (const name of ['missing', 'task_spawn', 'tool_call', 'tool_search']) expect((await catalog.call({ name, arguments: {} }, dispatch)).isError).toBe(true);
     expect((await catalog.call({ name: 'tool_00', arguments: [] }, dispatch)).isError).toBe(true);
+    expect((await catalog.call({ name: 'tool_00', arguments: '{"target":' }, dispatch)).isError).toBe(true);
+    expect((await catalog.call({ tool_name: 'task_spawn', arguments: {} }, dispatch)).isError).toBe(true);
     expect(calls).toBe(0);
+  });
+  test('tolerates tool_name and JSON-string arguments, and names a wrong call shape', async () => {
+    const seen: Array<[string, Record<string, unknown>]> = [];
+    const dispatch = async (name: string, input: Record<string, unknown>) => { seen.push([name, input]); return { content: [] }; };
+    const catalog = createLazyToolCatalog(defs);
+    expect((await catalog.call({ tool_name: 'tool_01', arguments: { target: 'a' } }, dispatch)).isError).toBeFalsy();
+    expect((await catalog.call({ tool_name: 'tool_02', arguments: '{"target":"b"}' }, dispatch)).isError).toBeFalsy();
+    expect(seen).toEqual([['tool_01', { target: 'a' }], ['tool_02', { target: 'b' }]]);
+    const missing = await catalog.call({ tool: 'tool_01', args: {} }, dispatch);
+    expect(missing.isError).toBe(true);
+    expect(missing.content[0].text).toContain('received keys: tool, args');
+    expect((await catalog.call({ name: 'nope', arguments: {} }, dispatch)).content[0].text).toContain('"nope"');
+    expect(seen).toHaveLength(2);
   });
   test('excludeReserved filters an underlying tool literally named tool_search/tool_call; the connector opt-out does not', async () => {
     const collision: McpToolDefinition[] = [...defs,

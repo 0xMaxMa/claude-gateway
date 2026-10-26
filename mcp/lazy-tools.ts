@@ -34,10 +34,20 @@ export function createLazyToolCatalog(tools: readonly McpToolDefinition[], exclu
     },
     async call(args: Record<string, unknown>, dispatch: (name: string, input: Record<string, unknown>) => Promise<McpToolResult>): Promise<McpToolResult> {
       // A model knows these tools by their MCP names (`mcp__gateway__x`); the catalog holds the bare `x`.
-      const name = typeof args.name === 'string' ? args.name.replace(/^mcp__gateway__/, '') : undefined;
-      if (!name || !names.has(name)) return fail('Unknown or unauthorized gateway tool');
-      if (!args.arguments || typeof args.arguments !== 'object' || Array.isArray(args.arguments)) return fail('Tool arguments must be an object');
-      return dispatch(name, args.arguments as Record<string, unknown>);
+      // Models also reach for `tool_name` and JSON-encoded `arguments`; a bare rejection sent one
+      // retrying the same wrong shape until its turn ran out, so accept those and name what is wrong.
+      const rawName = typeof args.name === 'string' ? args.name : args.tool_name;
+      if (typeof rawName !== 'string' || !rawName.trim()) {
+        return fail(`tool_call needs "name" (the exact tool name from tool_search) and "arguments" (an object); received keys: ${Object.keys(args).join(', ') || 'none'}`);
+      }
+      const name = rawName.trim().replace(/^mcp__gateway__/, '');
+      if (!names.has(name)) return fail(`Unknown or unauthorized gateway tool "${name}"; call tool_search to list the available tools`);
+      let input = args.arguments;
+      if (typeof input === 'string') {
+        try { input = JSON.parse(input); } catch { return fail('Tool arguments must be an object (received a string that is not JSON)'); }
+      }
+      if (!input || typeof input !== 'object' || Array.isArray(input)) return fail('Tool arguments must be an object');
+      return dispatch(name, input as Record<string, unknown>);
     },
   };
 }
