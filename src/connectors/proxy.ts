@@ -122,13 +122,17 @@ function proxyBaseUrl(): string {
  * container cannot: it keeps the resolved entries, since nothing else in the container
  * can reach the gateway. Either fallback is recorded for the status API, which then
  * reports this agent's secrets as agent-readable (connectors/exposure.ts).
+ *
+ * `proxied` names the connectors written as proxy entries. Their file entry holds no
+ * resolved value, so only `proxiedShape` changing needs a respawn (see
+ * SessionProcess.connectorConfigChanged).
  */
 export function agentFacingConnectors(
   agent: Pick<AgentConfig, 'id' | 'connectors' | 'isolateMemory'>,
   gateway: GatewayConfig,
   resolved: Record<string, unknown>,
   options: { container?: ContainerLaunch; containerUnavailable?: boolean; sanitizeEnv?: boolean } = {},
-): { servers: Record<string, unknown>; grant?: string } {
+): { servers: Record<string, unknown>; grant?: string; proxied: ReadonlySet<string> } {
   const entries = gateway.gateway?.customConnectors ?? {};
   const entryOf = (id: string): CustomConnectorEntry | undefined =>
     Object.prototype.hasOwnProperty.call(entries, id) ? entries[id] : undefined;
@@ -140,7 +144,8 @@ export function agentFacingConnectors(
     if (route === 'proxy') routes.set(id, options.container ? 'launch' : 'proxy');
     else if (route === 'launch') routes.set(id, 'launch');
   }
-  const fallBack = (): { servers: Record<string, unknown>; grant: string } => {
+  const proxied = new Set<string>();
+  const fallBack = (): { servers: Record<string, unknown>; grant: string; proxied: ReadonlySet<string> } => {
     // A direct-entry fallback is still owned by this live session. Keep its
     // exposure until that session ends; a later discovery or spawn is independent.
     const exposureGrant = randomBytes(32).toString('base64url');
@@ -152,9 +157,9 @@ export function agentFacingConnectors(
       bridges: new Set(),
     });
     recordRuntimeExposure(exposureGrant, agent.id, routes.keys());
-    return { servers, grant: exposureGrant };
+    return { servers, grant: exposureGrant, proxied };
   };
-  if (!routes.size) return { servers };
+  if (!routes.size) return { servers, proxied };
   if (options.containerUnavailable && !options.container) {
     console.warn(`connector-proxy: agent=${agent.id} container cannot launch connectors; ${[...routes.keys()].join(', ')} keep their resolved entries`);
     return fallBack();
@@ -196,7 +201,8 @@ export function agentFacingConnectors(
     const config = entryOf(id)!.config;
     const kept = agentFacingFields(config);
     if (route === 'proxy') {
-      servers[id] = { ...kept, type: config.type, url: `${base}${CONNECTOR_PROXY_PATH}/${encodeURIComponent(id)}`, headers: { Authorization: `Bearer ${grant}` } };
+      servers[id] = { ...proxiedShape(entryOf(id)!), url: `${base}${CONNECTOR_PROXY_PATH}/${encodeURIComponent(id)}`, headers: { Authorization: `Bearer ${grant}` } };
+      proxied.add(id);
       continue;
     }
     const launchPath = `${CONNECTOR_PROXY_PATH}/${encodeURIComponent(id)}/stdio`;
@@ -204,7 +210,12 @@ export function agentFacingConnectors(
       ? { ...kept, command: 'node', args: [`${options.container.containerDir}/connector-launcher.mjs`], env: { GATEWAY_CONNECTOR_SOCKET: `${options.container.containerDir}/${socketName}`, GATEWAY_CONNECTOR_PATH: launchPath, GATEWAY_CONNECTOR_GRANT: grant } }
       : { ...kept, command: process.execPath, args: [LAUNCHER], env: { GATEWAY_CONNECTOR_URL: `${base}${launchPath}`, GATEWAY_CONNECTOR_GRANT: grant } };
   }
-  return { servers, grant };
+  return { servers, grant, proxied };
+}
+
+/** A proxy entry without its per-spawn url and grant: everything a session reads from it. */
+export function proxiedShape(entry: CustomConnectorEntry): Record<string, unknown> {
+  return { ...agentFacingFields(entry.config), type: entry.config.type };
 }
 
 /** A container's private channel for launcher upgrades and live authorization checks. */

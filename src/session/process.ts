@@ -2,7 +2,7 @@ import { sanitizeJevChildEnv, jevCredentialEnvNames } from '../jev/child-env';
 import { workerEnvironment } from './worker-environment';
 import { ProcessDiagnostics, TurnOutcome } from './process-diagnostics';
 import { prepareManagedConnectors } from './managed-connectors';
-import { agentFacingConnectors, revokeConnectorGrant, type ContainerLaunch } from '../connectors/proxy';
+import { agentFacingConnectors, proxiedShape, revokeConnectorGrant, type ContainerLaunch } from '../connectors/proxy';
 import { prepareContainerLaunch } from './container-connectors';
 import { RequestToolCapture, RequestToolSchemas } from './request-tool-capture';
 import type { InputImage } from './input-image';
@@ -21,7 +21,7 @@ import { processSupervisorSupported, recordProcessRoot, stopProcessGroup, worker
 import { gatewayCapacity } from '../orchestration/capacity';
 import { OrchestrationError } from '../orchestration/types';
 import chokidar from 'chokidar';
-import { AgentConfig, GatewayConfig } from '../types';
+import { AgentConfig, CustomConnectorEntry, GatewayConfig } from '../types';
 import { resolveSharedConfig, sharedVaultDir } from '../agent/knowledge';
 import { agentMemoryBudget, composeChatMemory } from '../agent/workspace-loader';
 import { resolveDreamingConfig } from '../agent/dreaming/config';
@@ -39,7 +39,7 @@ import {
   truncateDetail,
 } from '../utils/tool-labels';
 import { resolveEnabledConnectors } from '../connectors/resolve';
-import { isReservedConnectorId } from '../connectors/custom';
+import { connectorSecretRoute, isReservedConnectorId } from '../connectors/custom';
 
 export const MAX_HISTORY_MESSAGES = 50;
 
@@ -51,6 +51,11 @@ export const MAX_HISTORY_MESSAGES = 50;
  */
 function connectorFingerprint(server: unknown): string {
   return createHash('sha256').update(JSON.stringify(server) ?? 'undefined').digest('hex');
+}
+
+/** The fingerprint of a proxied connector: its file entry, which holds no resolved value. */
+function proxiedFingerprint(entry: CustomConnectorEntry): string {
+  return `proxy:${connectorFingerprint(proxiedShape(entry))}`;
 }
 
 /**
@@ -373,6 +378,8 @@ export class SessionProcess extends EventEmitter {
   // newly connected connector look like a change to a session that cannot use MCP
   // servers in the first place.
   private spawnedConnectors: Map<string, string> | null = null;
+  /** The connectors this spawn wrote as loopback proxy entries (connectors/proxy.ts). */
+  private proxiedConnectors: ReadonlySet<string> = new Set();
 
   constructor(
     sessionId: string,
@@ -721,8 +728,19 @@ export class SessionProcess extends EventEmitter {
    */
   connectorConfigChanged(connectorId: string, resolvedServer: unknown): boolean {
     if (!this.spawnedConnectors) return false;
-    const now = resolvedServer === undefined ? undefined : connectorFingerprint(resolvedServer);
+    // A proxied session re-resolves the connector on every request, so a rotated
+    // token or a moved url reaches it without a respawn; only its file entry counts.
+    // The runner adopts a caller's overlay into this shared config before asking.
+    const entry = this.connectorEntry(connectorId);
+    const now = resolvedServer === undefined ? undefined
+      : entry && this.proxiedConnectors.has(connectorId) && connectorSecretRoute(entry) === 'proxy' ? proxiedFingerprint(entry)
+      : connectorFingerprint(resolvedServer);
     return this.spawnedConnectors.get(connectorId) !== now;
+  }
+
+  private connectorEntry(id: string): CustomConnectorEntry | undefined {
+    const entries = this.gatewayConfig.gateway.customConnectors ?? {};
+    return Object.prototype.hasOwnProperty.call(entries, id) ? entries[id] : undefined;
   }
 
   /** Only trust connector namespaces actually written into this subprocess config. */
@@ -894,7 +912,7 @@ export class SessionProcess extends EventEmitter {
     // An app-agent's CLI runs inside its container, where the gateway's loopback
     // address is not reachable: its connectors launch through a workspace socket,
     // or, in a container that cannot run the launcher, keep their resolved entries.
-    const { servers: agentFacing, grant } = agentFacingConnectors(this.agentConfig, this.gatewayConfig, connectorServers, {
+    const { servers: agentFacing, grant, proxied } = agentFacingConnectors(this.agentConfig, this.gatewayConfig, connectorServers, {
       container: this.containerLaunch,
       containerUnavailable: this.isContainerAgent() && !this.containerLaunch,
       sanitizeEnv: true,
@@ -916,9 +934,11 @@ export class SessionProcess extends EventEmitter {
         );
       }
       extraServers[name] = agentFacing[name];
-      spawnedConnectors.set(name, connectorFingerprint(server));
+      const entry = this.connectorEntry(name);
+      spawnedConnectors.set(name, entry && proxied.has(name) ? proxiedFingerprint(entry) : connectorFingerprint(server));
     }
     this.spawnedConnectors = spawnedConnectors;
+    this.proxiedConnectors = proxied;
 
     const mcpConfig = {
       mcpServers: {
