@@ -382,7 +382,8 @@ export class SidecarSupervisor {
       if (ranFor >= this.options.stableMs) sidecar.failures = 0;
       this.failed(sidecar, key, `exited ${signal ? `by ${signal}` : `with code ${code}`}`);
     });
-    this.options.log(`connector-sidecar: connector=${sidecar.id} started pid=${child.pid} port=${port}`);
+    // Without a pid the spawn failed (ENOENT) and its 'error' event reports that.
+    if (child.pid !== undefined) this.options.log(`connector-sidecar: connector=${sidecar.id} started pid=${child.pid} port=${port}`);
     // Not awaited: the queue must stay free for a stop while a slow server comes up.
     void this.awaitReady(sidecar, key, child, port, spec, () => exited);
   }
@@ -481,9 +482,10 @@ export class SidecarSupervisor {
         windowStart = now; lines = 0; suppressed = 0;
       }
       if (++lines > STDERR_LINES_PER_MINUTE) { suppressed++; return; }
-      let masked = line.slice(0, MAX_LOG_LINE).replace(/(Bearer\s+)[^\s"',]+/gi, '$1[redacted]');
+      // Mask before cutting: a secret that crosses the cut would otherwise keep its first part.
+      let masked = line.replace(/(Bearer\s+)[^\s"',]+/gi, '$1[redacted]');
       for (const value of secretValues()) masked = masked.split(value).join('[redacted]');
-      this.options.log(`${prefix} output: ${masked}`);
+      this.options.log(`${prefix} output: ${masked.slice(0, MAX_LOG_LINE)}`);
     };
     for (const stream of [child.stdout, child.stderr]) {
       let partial = '';

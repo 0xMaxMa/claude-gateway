@@ -46,3 +46,11 @@ test('container and tool-less agents do not inherit host connector availability'
   expect(connectedConnectorsContext({ id: 'a' } as AgentConfig, gateway, false)).toBe('');
   expect(connectedConnectorsContext({ id: 'a', allow_tools: false } as AgentConfig, gateway)).toBe('');
 });
+
+test('caps a long label like a long description', () => {
+  resolved.mockReturnValue({ gmail: {} });
+  const long = { gateway: { customConnectors: { gmail: { label: 'Gmail ' + 'x'.repeat(20_000), config: {}, secretNames: [] } } } } as unknown as GatewayConfig;
+  const text = connectedConnectorsContext({ id: 'a' } as AgentConfig, long);
+  expect(text).toContain('"label":"Gmail xxx');
+  expect(text.length).toBeLessThan(2000);
+});

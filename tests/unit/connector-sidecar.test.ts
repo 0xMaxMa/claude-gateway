@@ -26,6 +26,7 @@ let forkThenExit: string;
 const FIXTURE = `
 const http = require('http');
 if (process.env.IGNORE_TERM) process.on('SIGTERM', () => {});
+if (process.env.LONG_LINE) process.stderr.write('x'.repeat(1995) + process.env.LONG_LINE + '\\n');
 if (process.env.NEVER_LISTEN) { setInterval(() => {}, 1000); return; }
 const server = http.createServer((req, res) => {
   if (req.url === '/exit') { res.end('bye'); setTimeout(() => process.exit(3), 10); return; }
@@ -333,6 +334,27 @@ describe('SidecarSupervisor', () => {
       expect(error).toContain('must not contain {placeholders}');
       expect(supervisor.statusOf('fx')?.state).toBe('crashed');
     });
+  });
+
+  it('masks a stored secret that crosses the log line cut', async () => {
+    const tokenEnv = path.join(tmpDir, 'masking.env');
+    const secret = 'ya29.stored-secret-crossing-the-cut';
+    fs.writeFileSync(tokenEnv, `CUSTOM__fx__access_token=${secret}\n`);
+    process.env.GATEWAY_MCP_TOKEN_ENV_PATH = tokenEnv;
+    try {
+      supervisor.reconcile({ fx: sidecarEntry(fixtureSpec({ LONG_LINE: secret })) });
+      const line = await until(() => logs.find(l => l.includes('output: xxx')));
+      expect({ leaked: line.includes('ya29'), tail: line.slice(-6) }).toEqual({ leaked: false, tail: 'x[reda' });
+    } finally {
+      delete process.env.GATEWAY_MCP_TOKEN_ENV_PATH;
+    }
+  });
+
+  it('does not log a start for a command that cannot be spawned', async () => {
+    supervisor.reconcile({ fx: sidecarEntry({ command: path.join(tmpDir, 'no-such-command') }) });
+    await until(() => supervisor.statusOf('fx')?.state === 'crashed');
+    expect(logs.filter(l => l.includes('started'))).toEqual([]);
+    expect(logs).toContainEqual(expect.stringContaining('connector=fx spawn'));
   });
 
   it('masks bearer values in the output it logs', async () => {

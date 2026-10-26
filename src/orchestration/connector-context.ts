@@ -2,7 +2,10 @@ import { resolveEnabledConnectors } from '../connectors/resolve';
 import { remoteBrowserIds } from './browser-routing';
 import type { AgentConfig, GatewayConfig } from '../types';
 
-const MAX_DESCRIPTION = 160;
+/** A label or description is connector-supplied text in every decision prompt. */
+const MAX_FIELD = 160;
+
+const cap = (text: string): string => text.length > MAX_FIELD ? `${text.slice(0, MAX_FIELD - 1)}…` : text;
 
 /**
  * The decision never holds connector tools (connectorsAllowed=false), so without this it only
@@ -21,8 +24,8 @@ export function connectedConnectorsContext(agent: AgentConfig, gateway: GatewayC
     const description = entry?.description?.trim();
     return {
       id,
-      label: entry?.label?.trim() || id,
-      ...(description ? { description: description.length > MAX_DESCRIPTION ? `${description.slice(0, MAX_DESCRIPTION - 1)}…` : description } : {}),
+      label: cap(entry?.label?.trim() || id),
+      ...(description ? { description: cap(description) } : {}),
     };
   });
   if (!connectors.length) return '';
