@@ -301,6 +301,8 @@ export class SidecarSupervisor {
     child.once('exit', (code, signal) => {
       exited = true;
       if ((sidecar.phase as { child?: ChildProcess }).child !== child) return;
+      // The leader is gone but what it started (uvx's python) may still hold the port.
+      signalGroup(child, 'SIGKILL');
       const ranFor = sidecar.phase.kind === 'ready' ? Date.now() - sidecar.phase.since : 0;
       if (ranFor >= this.options.stableMs) sidecar.failures = 0;
       this.failed(sidecar, key, `exited ${signal ? `by ${signal}` : `with code ${code}`}`);

@@ -20,6 +20,7 @@ const TOKEN = 'fixture-access-token-1';
 
 let tmpDir: string;
 let fixture: string;
+let forkThenExit: string;
 
 /** Listens on $PORT (127.0.0.1) and reports what it was started with and what it was sent. */
 const FIXTURE = `
@@ -38,10 +39,20 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
 process.stderr.write('fixture: Authorization: Bearer leaked-in-a-log-line\\n');
 `;
 
+/** Starts a child in its process group (as uvx starts python), records its pid, then exits. */
+const FORK_THEN_EXIT = `
+const { spawn } = require('child_process');
+const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+require('fs').appendFileSync(process.env.PIDS, child.pid + '\\n');
+setTimeout(() => process.exit(1), 50);
+`;
+
 beforeAll(() => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cgw-sidecar-'));
   fixture = path.join(tmpDir, 'fixture.js');
   fs.writeFileSync(fixture, FIXTURE);
+  forkThenExit = path.join(tmpDir, 'fork-then-exit.js');
+  fs.writeFileSync(forkThenExit, FORK_THEN_EXIT);
 });
 
 afterAll(() => {
@@ -173,6 +184,22 @@ describe('SidecarSupervisor', () => {
     expect(alive(second)).toBe(true);
     expect(supervisor.statusOf('fx')?.restarts).toBe(1);
     expect(logs).toContainEqual(expect.stringContaining('connector=fx exited with code 3'));
+  });
+
+  it('kills what a crashed leader left in its process group', async () => {
+    const pids = path.join(tmpDir, 'leader-exit.pids');
+    fs.writeFileSync(pids, '');
+    const once = new SidecarSupervisor({ runtimeRoot: tmpDir, backoffMs: [60_000], stopGraceMs: 500, log: line => logs.push(line) });
+    try {
+      once.reconcile({ fx: sidecarEntry({ command: process.execPath, args: [forkThenExit], env: { PIDS: pids } }) });
+      await until(() => logs.some(l => l.includes('connector=fx exited with code 1')));
+      await new Promise(r => setTimeout(r, 300));
+      const orphans = fs.readFileSync(pids, 'utf8').trim().split('\n').map(Number);
+      expect({ orphans: orphans.length, alive: orphans.filter(alive).length }).toEqual({ orphans: 1, alive: 0 });
+    } finally {
+      for (const pid of fs.readFileSync(pids, 'utf8').trim().split('\n').map(Number)) if (alive(pid)) process.kill(pid, 'SIGKILL');
+      await once.close();
+    }
   });
 
   it('stops on pause and on delete', async () => {
