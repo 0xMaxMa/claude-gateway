@@ -327,15 +327,21 @@ export function createConnectorProxyRouter(): Router {
     if (grant.routes.get(id) !== 'proxy') { res.status(403).json({ error: 'Forbidden' }); return; }
     if (!['GET', 'POST', 'DELETE'].includes(req.method)) { res.status(405).json({ error: 'Method not allowed' }); return; }
     let upstream: ReturnType<typeof upstreamOf>;
+    // A connected sidecar entry that is crashed, backing off or restarting has no url
+    // for now. That is temporary, and MCP clients treat a 403 as permanent.
+    let sidecarDown = false;
     try {
       const resolved = grant.resolve(id);
       upstream = upstreamOf(resolved);
+      const sidecar = connectorSidecars.get().statusOf(id);
+      sidecarDown = resolved !== undefined && !upstream && sidecar !== undefined && sidecar.state !== 'ready';
       // Disconnected/disabled resolves to nothing, which is normal; a resolved entry
       // the proxy cannot use is a configuration error worth a line.
-      if (resolved !== undefined && !upstream) console.error(`connector-proxy: connector=${id} has no usable http url/headers`);
+      if (resolved !== undefined && !upstream && !sidecarDown) console.error(`connector-proxy: connector=${id} has no usable http url/headers`);
     } catch (err) {
       console.error(`connector-proxy: connector=${id} resolve failed: ${(err as Error).message}`);
     }
+    if (sidecarDown) { res.status(503).setHeader('Retry-After', '5').json({ error: 'Connector sidecar is not ready yet' }); return; }
     if (!upstream) { res.status(403).json({ error: 'Connector is not available' }); return; }
 
     const headers: Record<string, string> = {};

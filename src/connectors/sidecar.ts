@@ -206,7 +206,8 @@ export class SidecarSupervisor {
   waitUntilReady(id: string): Promise<string | undefined> {
     const sidecar = this.sidecars.get(id);
     if (!sidecar || sidecar.phase.kind === 'ready') return Promise.resolve(this.urlOf(id));
-    if (!sidecar.spec || sidecar.phase.kind === 'invalid' || sidecar.phase.kind === 'stopped') return Promise.resolve(undefined);
+    // 'stopped' is not final here: a listed sidecar is stopped only between a halt and its next start.
+    if (!sidecar.spec || sidecar.phase.kind === 'invalid') return Promise.resolve(undefined);
     const timeoutMs = sidecar.spec.readyTimeoutMs;
     return new Promise(resolve => {
       const done = (): void => {

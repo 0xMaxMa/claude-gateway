@@ -25,6 +25,7 @@ let forkThenExit: string;
 /** Listens on $PORT (127.0.0.1) and reports what it was started with and what it was sent. */
 const FIXTURE = `
 const http = require('http');
+if (process.env.IGNORE_TERM) process.on('SIGTERM', () => {});
 if (process.env.NEVER_LISTEN) { setInterval(() => {}, 1000); return; }
 const server = http.createServer((req, res) => {
   if (req.url === '/exit') { res.end('bye'); setTimeout(() => process.exit(3), 10); return; }
@@ -172,6 +173,26 @@ describe('SidecarSupervisor', () => {
     expect(((await getJson(supervisor.urlOf('fx')!)).env as Record<string, string>).VERSION).toBe('2');
     expect(alive(first)).toBe(false);
     expect(supervisor.statusOf('fx')).toEqual({ state: 'ready', pid: second, restarts: 1 });
+  });
+
+  it('holds a waiter across a spec-change restart instead of giving up while the old process stops', async () => {
+    supervisor.reconcile({ fx: sidecarEntry(fixtureSpec({ IGNORE_TERM: '1' })) });
+    await readyUrl('fx');
+    supervisor.reconcile({ fx: sidecarEntry(fixtureSpec({ IGNORE_TERM: '1', VERSION: '2' })) });
+    await new Promise(r => setImmediate(r));
+    expect(supervisor.statusOf('fx')?.state).toBe('starting');
+    const url = await supervisor.waitUntilReady('fx');
+    expect({ url: url ?? null }).toEqual({ url: expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+\/mcp$/) });
+    expect(((await getJson(url!)).env as Record<string, string>).VERSION).toBe('2');
+  });
+
+  it('answers a waiter at once for a removed sidecar', async () => {
+    supervisor.reconcile({ fx: sidecarEntry(fixtureSpec({ IGNORE_TERM: '1' })) });
+    await readyUrl('fx');
+    supervisor.reconcile({});
+    const started = Date.now();
+    expect(await supervisor.waitUntilReady('fx')).toBeUndefined();
+    expect(Date.now() - started).toBeLessThan(50);
   });
 
   it('restarts a crashed sidecar after the backoff', async () => {
@@ -393,6 +414,24 @@ describe('sidecar connectors through the routes and the proxy', () => {
     await until(() => !alive(seen.pid));
     expect(supervisor.statusOf('fx')).toBeUndefined();
     proxy.revokeConnectorGrant(grant);
+  });
+
+  it('answers 503 with Retry-After, not a permanent 403 or a config error, while a sidecar is down', async () => {
+    const errors: string[] = [];
+    const spy = jest.spyOn(console, 'error').mockImplementation((...args: unknown[]) => { errors.push(args.join(' ')); });
+    try {
+      const crashing = { type: 'http', headers: { Authorization: 'Bearer {access_token}' }, sidecar: { command: process.execPath, args: ['-e', 'process.exit(1)'] } };
+      expect((await push(crashing)).status).toBe(200);
+      const config = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+      const { servers, grant } = proxy.agentFacingConnectors({ id: 'a' }, config, require('../../src/connectors/resolve').resolveEnabledConnectors({}, config.gateway.customConnectors));
+      const entry = servers.fx as { url: string; headers: Record<string, string> };
+      const call = await fetch(entry.url, { method: 'POST', headers: entry.headers, body: '{}' });
+      proxy.revokeConnectorGrant(grant);
+      expect({ status: call.status, retryAfter: call.headers.get('retry-after'), configError: errors.filter(l => l.includes('has no usable http url/headers')) })
+        .toEqual({ status: 503, retryAfter: expect.stringMatching(/^\d+$/), configError: [] });
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('stops on pause and starts again on resume', async () => {
