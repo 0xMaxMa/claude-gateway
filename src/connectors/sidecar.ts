@@ -384,14 +384,15 @@ export class SidecarSupervisor {
     });
     this.options.log(`connector-sidecar: connector=${sidecar.id} started pid=${child.pid} port=${port}`);
     // Not awaited: the queue must stay free for a stop while a slow server comes up.
-    void this.awaitReady(sidecar, key, child, port, spec.readyTimeoutMs, () => exited);
+    void this.awaitReady(sidecar, key, child, port, spec, () => exited);
   }
 
-  private async awaitReady(sidecar: Sidecar, key: string, child: ChildProcess, port: number, timeoutMs: number, exited: () => boolean): Promise<void> {
+  private async awaitReady(sidecar: Sidecar, key: string, child: ChildProcess, port: number, spec: SidecarSpec, exited: () => boolean): Promise<void> {
     const running = (): boolean => !exited() && this.current(sidecar, key) && (sidecar.phase as { child?: ChildProcess }).child === child;
+    const timeoutMs = spec.readyTimeoutMs;
     const deadline = Date.now() + timeoutMs;
     while (running() && Date.now() < deadline) {
-      if (await canConnect(port)) {
+      if (await answersHttp(port, spec.path) && await listenerInGroup(port, child.pid!)) {
         if (!running()) return;
         sidecar.phase = { kind: 'ready', child, port, since: Date.now() };
         sidecar.lastError = undefined;
@@ -399,7 +400,7 @@ export class SidecarSupervisor {
         this.notify(sidecar);
         return;
       }
-      await delay(250);
+      await delay(50);
     }
     if (!running()) return;
     this.enqueue(sidecar, async () => {
@@ -555,13 +556,54 @@ function listProcesses(): Promise<Array<{ pid: number; pgid: number; command: st
   });
 }
 
-function canConnect(port: number): Promise<boolean> {
+/*
+ * Readiness, and why it is two checks. The proxy sends the connector's credential to
+ * whatever answers on the sidecar's port, and allocatePort releases its probe socket
+ * before the spawn, so another local process can take the port first. A sidecar is
+ * ready only when something on the port answers HTTP on its MCP path (any status: an
+ * MCP server answers a bare GET with 405 or 401) AND every process listening on the
+ * port is in the sidecar's process group.
+ *
+ * What this does not cover: a host without lsof skips the ownership check, so there
+ * any HTTP server that wins the port race passes; a process that binds the port after
+ * the sidecar became ready and the sidecar released it; and anything the sidecar's
+ * own command starts in its group.
+ */
+
+/**
+ * True once an HTTP server answers a GET on `mcpPath` with any status line. A raw
+ * socket that this side closes first: with `Connection: close` the server would close
+ * first and leave its port in TIME_WAIT, and workspace-mcp refuses to bind a port in
+ * TIME_WAIT when it restarts on the same one.
+ */
+function answersHttp(port: number, mcpPath: string): Promise<boolean> {
   return new Promise(resolve => {
     const socket = net.connect({ host: '127.0.0.1', port });
+    let head = '';
     const finish = (ok: boolean): void => { socket.destroy(); resolve(ok); };
     socket.setTimeout(1000, () => finish(false));
-    socket.once('connect', () => finish(true));
+    socket.once('connect', () => socket.write(`GET ${mcpPath} HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\n\r\n`));
+    socket.on('data', (chunk: Buffer) => {
+      head += chunk.toString('latin1');
+      if (head.length >= 13) finish(/^HTTP\/1\.[01] \d{3}[ \r]/.test(head));
+    });
+    socket.once('end', () => finish(false));
     socket.once('error', () => finish(false));
+  });
+}
+
+/** True when every process listening on `port` is in process group `pgid`; also true when lsof is not installed. */
+function listenerInGroup(port: number, pgid: number): Promise<boolean> {
+  return new Promise(resolve => {
+    execFile('lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-Fp'], (err, stdout) => {
+      if ((err as NodeJS.ErrnoException | null)?.code === 'ENOENT') { resolve(true); return; }
+      const listeners = stdout.split('\n').filter(line => line.startsWith('p')).map(line => Number(line.slice(1)));
+      if (!listeners.length) { resolve(false); return; }
+      listProcesses().then(
+        processes => resolve(listeners.every(pid => processes.some(p => p.pid === pid && p.pgid === pgid))),
+        () => resolve(false),
+      );
+    });
   });
 }
 

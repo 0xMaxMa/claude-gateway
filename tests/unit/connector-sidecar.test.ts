@@ -312,6 +312,21 @@ describe('SidecarSupervisor', () => {
     expect(alive(pid)).toBe(false);
   });
 
+  it.each([
+    ['a raw TCP listener', (port: number) => require('net').createServer((socket: import('net').Socket) => socket.end()).listen(port, '127.0.0.1')],
+    ['an HTTP server outside its process group', (port: number) => http.createServer((_req, res) => res.end('{}')).listen(port, '127.0.0.1')],
+  ])('is not ready while %s holds its port', async (_name, listen) => {
+    supervisor.reconcile({ fx: sidecarEntry(fixtureSpec({ NEVER_LISTEN: '1' })) });
+    const line = await until(() => logs.find(l => l.includes('connector=fx started pid=')));
+    const foreign = listen(Number(/port=(\d+)/.exec(line)![1])) as import('net').Server;
+    try {
+      await new Promise(r => setTimeout(r, 1000));
+      expect({ url: supervisor.urlOf('fx') ?? null, state: supervisor.statusOf('fx')?.state }).toEqual({ url: null, state: 'starting' });
+    } finally {
+      foreign.close();
+    }
+  });
+
   it('reports an invalid hand-edited spec without starting anything', () => {
     supervisor.reconcile({ fx: sidecarEntry({ command: 'x', env: { T: '{access_token}' } }) });
     return until(() => supervisor.statusOf('fx')?.lastError).then(error => {
