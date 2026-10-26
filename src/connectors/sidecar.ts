@@ -526,8 +526,13 @@ async function stopChild(child: ChildProcess, graceMs: number): Promise<void> {
   signalGroup(child, 'SIGKILL');
 }
 
-/** A free loopback port, preferring `preferred` so a restart keeps its address. */
-async function allocatePort(preferred?: number): Promise<number> {
+/**
+ * A free loopback port other than `avoid`, the previous run's. Its connections can
+ * leave that port in TIME_WAIT, and workspace-mcp then exits with "address already in
+ * use" (it binds without SO_REUSEADDR). Nothing depends on the port staying the same:
+ * the proxy looks the url up per request.
+ */
+async function allocatePort(avoid?: number): Promise<number> {
   const tryListen = (port: number): Promise<number | undefined> => new Promise(resolve => {
     const server = net.createServer();
     server.once('error', () => resolve(undefined));
@@ -536,13 +541,11 @@ async function allocatePort(preferred?: number): Promise<number> {
       server.close(() => resolve(address.port));
     });
   });
-  if (preferred) {
-    const port = await tryListen(preferred);
-    if (port) return port;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const port = await tryListen(0);
+    if (port && port !== avoid) return port;
   }
-  const port = await tryListen(0);
-  if (!port) throw new Error('no free loopback port');
-  return port;
+  throw new Error('no free loopback port');
 }
 
 /** Every process's pid, process group and full command line. */

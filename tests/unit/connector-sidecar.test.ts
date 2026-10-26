@@ -26,6 +26,12 @@ let forkThenExit: string;
 const FIXTURE = `
 const http = require('http');
 if (process.env.IGNORE_TERM) process.on('SIGTERM', () => {});
+// Like workspace-mcp, which refuses a port its previous run left in TIME_WAIT.
+if (process.env.USED_PORTS) {
+  const fs = require('fs');
+  if (fs.existsSync(process.env.USED_PORTS) && fs.readFileSync(process.env.USED_PORTS, 'utf8').split('\\n').includes(process.env.PORT)) { console.error('port already in use'); process.exit(1); }
+  fs.appendFileSync(process.env.USED_PORTS, process.env.PORT + '\\n');
+}
 if (process.env.LONG_LINE) process.stderr.write('x'.repeat(1995) + process.env.LONG_LINE + '\\n');
 if (process.env.NEVER_LISTEN) { setInterval(() => {}, 1000); return; }
 const server = http.createServer((req, res) => {
@@ -185,6 +191,18 @@ describe('SidecarSupervisor', () => {
     const url = await supervisor.waitUntilReady('fx');
     expect({ url: url ?? null }).toEqual({ url: expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+\/mcp$/) });
     expect(((await getJson(url!)).env as Record<string, string>).VERSION).toBe('2');
+  });
+
+  it('restarts on a port its previous run did not use', async () => {
+    const used = path.join(tmpDir, 'used-ports');
+    fs.rmSync(used, { force: true });
+    supervisor.reconcile({ fx: sidecarEntry(fixtureSpec({ USED_PORTS: used })) });
+    const first = (await getJson(await readyUrl('fx'))).pid;
+    supervisor.reconcile({ fx: sidecarEntry(fixtureSpec({ USED_PORTS: used, VERSION: '2' })) });
+    await until(() => logs.some(l => l.includes('stopped pid=')));
+    await supervisor.waitUntilReady('fx');
+    expect({ restarted: supervisor.statusOf('fx')?.pid !== first, state: supervisor.statusOf('fx')?.state, crashes: logs.filter(l => l.includes('exited with code')) })
+      .toEqual({ restarted: true, state: 'ready', crashes: [] });
   });
 
   it('answers a waiter at once for a removed sidecar', async () => {
