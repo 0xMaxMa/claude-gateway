@@ -117,6 +117,8 @@ export interface SidecarSupervisorOptions {
   /** A run at least this long resets the backoff. */
   stableMs?: number;
   stopGraceMs?: number;
+  /** Picks each backoff's jitter (default Math.random). */
+  random?: () => number;
   /** The sidecar's PATH, and where an existing uv is looked for (default: the gateway's PATH, plus ~/.local/bin for uv). */
   searchPath?: string;
   log?: (line: string) => void;
@@ -145,6 +147,7 @@ export class SidecarSupervisor {
       backoffMs: DEFAULT_BACKOFF_MS,
       stableMs: 30_000,
       stopGraceMs: 5000,
+      random: Math.random,
       log: line => console.error(line),
       ...options,
     };
@@ -412,8 +415,11 @@ export class SidecarSupervisor {
     const running = (): boolean => !exited() && this.current(sidecar, key) && (sidecar.phase as { child?: ChildProcess }).child === child;
     const timeoutMs = spec.readyTimeoutMs;
     const deadline = Date.now() + timeoutMs;
+    // lsof and ps are slow; a foreign listener holding the port is unlikely to leave soon.
+    let ownershipPollMs = 50;
     while (running() && Date.now() < deadline) {
-      if (await answersHttp(port, spec.path) && await listenerInGroup(port, child.pid!)) {
+      if (!await answersHttp(port, spec.path)) { await delay(50); continue; }
+      if (await listenerInGroup(port, child.pid!)) {
         if (!running()) return;
         sidecar.phase = { kind: 'ready', child, port, since: Date.now() };
         sidecar.lastError = undefined;
@@ -421,7 +427,8 @@ export class SidecarSupervisor {
         this.notify(sidecar);
         return;
       }
-      await delay(50);
+      await delay(Math.min(ownershipPollMs, Math.max(0, deadline - Date.now())));
+      ownershipPollMs = Math.min(2 * ownershipPollMs, 1000);
     }
     if (!running()) return;
     this.enqueue(sidecar, async () => {
@@ -438,7 +445,8 @@ export class SidecarSupervisor {
     this.options.log(`connector-sidecar: connector=${sidecar.id} ${error}`);
     if (!this.current(sidecar, key)) return;
     const backoff = this.options.backoffMs;
-    const wait = backoff[Math.min(sidecar.failures, backoff.length - 1)];
+    // +/-20%, so sidecars that failed together do not all retry together.
+    const wait = Math.round(backoff[Math.min(sidecar.failures, backoff.length - 1)] * (0.8 + 0.4 * this.options.random()));
     sidecar.failures++;
     const timer = setTimeout(() => {
       if (!this.current(sidecar, key) || sidecar.phase.kind !== 'backoff' || sidecar.phase.timer !== timer) return;

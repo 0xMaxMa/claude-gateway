@@ -121,11 +121,21 @@ it('never downloads on a platform without a pinned wheel', async () => {
   expect(fetchImpl).not.toHaveBeenCalled();
 });
 
-it('reads stored and deflated zip entries and reports missing ones', () => {
+it('reads stored and deflated zip entries and reports missing ones', async () => {
   const stored = zip({ a: Buffer.from('one') }, 0);
-  expect(readZipEntries(stored, ['a']).get('a')!.toString()).toBe('one');
-  expect(() => readZipEntries(stored, ['a', 'b'])).toThrow('uv archive is missing b');
-  expect(() => readZipEntries(Buffer.from('not a zip at all, padded to more than twenty-two bytes'), ['a'])).toThrow('not a zip file');
+  expect((await readZipEntries(stored, ['a'])).get('a')!.toString()).toBe('one');
+  expect((await readZipEntries(zip({ a: Buffer.from('two') }), ['a'])).get('a')!.toString()).toBe('two');
+  await expect(readZipEntries(stored, ['a', 'b'])).rejects.toThrow('uv archive is missing b');
+  await expect(readZipEntries(Buffer.from('not a zip at all, padded to more than twenty-two bytes'), ['a'])).rejects.toThrow('not a zip file');
+});
+
+it('keeps the event loop running while it inflates', async () => {
+  const archive = zip({ uv: Buffer.alloc(64 * 1024 * 1024) });
+  const order: string[] = [];
+  setImmediate(() => order.push('event loop'));
+  const files = await readZipEntries(archive, ['uv']);
+  order.push('inflated');
+  expect({ order, size: files.get('uv')!.length }).toEqual({ order: ['event loop', 'inflated'], size: 64 * 1024 * 1024 });
 });
 
 it('takes over the lock of an installer that died mid-download and clears its staging dir', async () => {

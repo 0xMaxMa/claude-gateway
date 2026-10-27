@@ -382,6 +382,41 @@ describe('SidecarSupervisor', () => {
     }
   });
 
+  it('backs off its ownership check while an HTTP server outside its group holds its port', async () => {
+    const childProcess = require('child_process') as typeof import('child_process');
+    const execFile = jest.spyOn(childProcess, 'execFile');
+    try {
+      supervisor.reconcile({ fx: sidecarEntry(fixtureSpec({ NEVER_LISTEN: '1' })) });
+      const line = await until(() => logs.find(l => l.includes('connector=fx started pid=')));
+      const foreign = http.createServer((_req, res) => res.end('{}')).listen(Number(/port=(\d+)/.exec(line)![1]), '127.0.0.1');
+      try {
+        await new Promise(r => setTimeout(r, 2000));
+        const checks = execFile.mock.calls.filter(([command]) => command === 'lsof').length;
+        expect({ state: supervisor.statusOf('fx')?.state, fewChecks: checks <= 8 }).toEqual({ state: 'starting', fewChecks: true });
+      } finally {
+        foreign.close();
+      }
+    } finally {
+      execFile.mockRestore();
+    }
+  });
+
+  it('jitters each backoff by up to 20% with the random source it is given', async () => {
+    const waits: number[] = [];
+    const real = global.setTimeout;
+    const spy = jest.spyOn(global, 'setTimeout').mockImplementation(((fn: () => void, ms?: number) => { waits.push(ms ?? 0); return real(fn, ms); }) as typeof setTimeout);
+    const supervisors = [0, 0.5, 0.999999].map(value =>
+      new SidecarSupervisor({ runtimeRoot: tmpDir, backoffMs: [1000], stopGraceMs: 500, random: () => value, log: line => logs.push(line) }));
+    try {
+      supervisors.forEach((s, i) => s.reconcile({ [['fx', 'a', 'b'][i]]: sidecarEntry({ command: path.join(tmpDir, 'no-such-command') }) }));
+      await until(() => logs.filter(l => l.includes('spawn')).length === 3);
+      expect(waits.filter(ms => ms >= 800 && ms <= 1200).sort((x, y) => x - y)).toEqual([800, 1000, 1200]);
+    } finally {
+      spy.mockRestore();
+      await Promise.all(supervisors.map(s => s.close()));
+    }
+  });
+
   it('reports an invalid hand-edited spec without starting anything', () => {
     supervisor.reconcile({ fx: sidecarEntry({ command: 'x', env: { T: '{access_token}' } }) });
     return until(() => supervisor.statusOf('fx')?.lastError).then(error => {

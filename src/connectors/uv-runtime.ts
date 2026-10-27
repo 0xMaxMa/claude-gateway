@@ -12,7 +12,8 @@ import { createHash } from 'crypto';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { inflateRawSync } from 'zlib';
+import { promisify } from 'util';
+import * as zlib from 'zlib';
 
 export const UV_VERSION = '0.8.3';
 
@@ -139,7 +140,7 @@ async function installUv(binDir: string, wheel: UvWheel, fetchImpl: typeof fetch
     const archive = Buffer.from(await response.arrayBuffer());
     const digest = createHash('sha256').update(archive).digest('hex');
     if (digest !== wheel.sha256) throw new Error(`uv download sha256 mismatch: expected ${wheel.sha256}, got ${digest}`);
-    const files = readZipEntries(archive, [`uv-${UV_VERSION}.data/scripts/uv`, `uv-${UV_VERSION}.data/scripts/uvx`]);
+    const files = await readZipEntries(archive, [`uv-${UV_VERSION}.data/scripts/uv`, `uv-${UV_VERSION}.data/scripts/uvx`]);
     const stagedBin = path.join(staging, 'bin');
     fs.mkdirSync(stagedBin, { mode: 0o700 });
     for (const [name, data] of files) fs.writeFileSync(path.join(stagedBin, path.basename(name)), data, { mode: 0o755 });
@@ -152,8 +153,10 @@ async function installUv(binDir: string, wheel: UvWheel, fetchImpl: typeof fetch
   }
 }
 
+const inflateRaw = promisify(zlib.inflateRaw);
+
 /** The named entries of a zip archive (stored or deflated), from its central directory. */
-export function readZipEntries(archive: Buffer, names: string[]): Map<string, Buffer> {
+export async function readZipEntries(archive: Buffer, names: string[]): Promise<Map<string, Buffer>> {
   const EOCD = 0x06054b50, CENTRAL = 0x02014b50, LOCAL = 0x04034b50;
   let eocd = -1;
   for (let i = archive.length - 22; i >= Math.max(0, archive.length - 22 - 0xffff); i--) {
@@ -179,7 +182,7 @@ export function readZipEntries(archive: Buffer, names: string[]): Map<string, Bu
     const dataStart = localOffset + 30 + archive.readUInt16LE(localOffset + 26) + archive.readUInt16LE(localOffset + 28);
     const raw = archive.subarray(dataStart, dataStart + compressedSize);
     if (method === 0) out.set(name, Buffer.from(raw));
-    else if (method === 8) out.set(name, inflateRawSync(raw));
+    else if (method === 8) out.set(name, await inflateRaw(raw));
     else throw new Error(`uv archive entry ${name} uses unsupported compression ${method}`);
   }
   const missing = names.filter(name => !out.has(name));
