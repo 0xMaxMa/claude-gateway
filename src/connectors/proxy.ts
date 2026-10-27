@@ -39,7 +39,7 @@ import { agentFacingFields, connectorSecretRoute, isStreamableHttpType } from '.
 import { sanitizeJevChildEnv } from '../jev/child-env';
 import { clearRuntimeExposure, recordRuntimeExposure } from './exposure';
 import { MAX_REDIRECTS, sameOriginRedirect } from './redirect';
-import { connectorSidecars } from './sidecar';
+import { connectorSidecars, type SidecarStatus } from './sidecar';
 
 export const CONNECTOR_PROXY_PATH = '/internal/mcp/connectors';
 
@@ -328,19 +328,21 @@ export function createConnectorProxyRouter(): Router {
     if (!['GET', 'POST', 'DELETE'].includes(req.method)) { res.status(405).json({ error: 'Method not allowed' }); return; }
     let upstream: ReturnType<typeof upstreamOf>;
     // A connected sidecar entry that is crashed, backing off or restarting has no url
-    // for now. That is temporary, and MCP clients treat a 403 as permanent.
-    let sidecarDown = false;
+    // for now. That is temporary, and MCP clients treat a 403 as permanent. One with an
+    // invalid spec stays down until an admin fixes config.json, so it is no 503.
+    let sidecarDown: SidecarStatus | undefined;
     try {
       const resolved = grant.resolve(id);
       upstream = upstreamOf(resolved);
       const sidecar = connectorSidecars.get().statusOf(id);
-      sidecarDown = resolved !== undefined && !upstream && sidecar !== undefined && sidecar.state !== 'ready';
+      if (resolved !== undefined && !upstream && sidecar && sidecar.state !== 'ready') sidecarDown = sidecar;
       // Disconnected/disabled resolves to nothing, which is normal; a resolved entry
       // the proxy cannot use is a configuration error worth a line.
       if (resolved !== undefined && !upstream && !sidecarDown) console.error(`connector-proxy: connector=${id} has no usable http url/headers`);
     } catch (err) {
       console.error(`connector-proxy: connector=${id} resolve failed: ${(err as Error).message}`);
     }
+    if (sidecarDown?.state === 'invalid') { res.status(500).json({ error: `Connector sidecar configuration is invalid: ${sidecarDown.lastError}` }); return; }
     if (sidecarDown) { res.status(503).setHeader('Retry-After', '5').json({ error: 'Connector sidecar is not ready yet' }); return; }
     if (!upstream) { res.status(403).json({ error: 'Connector is not available' }); return; }
 

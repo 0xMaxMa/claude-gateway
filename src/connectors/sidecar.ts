@@ -36,7 +36,7 @@ export interface SidecarSpec {
   readyTimeoutMs: number;
 }
 
-export type SidecarState = 'starting' | 'ready' | 'crashed';
+export type SidecarState = 'starting' | 'ready' | 'crashed' | 'invalid';
 
 /** What the connector status API reports. Never carries env values or headers. */
 export interface SidecarStatus {
@@ -202,7 +202,10 @@ export class SidecarSupervisor {
     if (!sidecar) return undefined;
     const { phase } = sidecar;
     // A listed sidecar that is stopped is between a stop and its next start.
-    const state: SidecarState = phase.kind === 'ready' ? 'ready' : phase.kind === 'starting' || phase.kind === 'stopped' ? 'starting' : 'crashed';
+    const state: SidecarState = phase.kind === 'ready' ? 'ready'
+      : phase.kind === 'starting' || phase.kind === 'stopped' ? 'starting'
+      : phase.kind === 'invalid' ? 'invalid'
+      : 'crashed';
     const pid = phase.kind === 'ready' || phase.kind === 'starting' ? (phase as { child?: ChildProcess }).child?.pid : undefined;
     return {
       state,

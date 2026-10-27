@@ -356,7 +356,7 @@ describe('SidecarSupervisor', () => {
     supervisor.reconcile({ fx: sidecarEntry({ command: 'x', env: { T: '{access_token}' } }) });
     return until(() => supervisor.statusOf('fx')?.lastError).then(error => {
       expect(error).toContain('must not contain {placeholders}');
-      expect(supervisor.statusOf('fx')?.state).toBe('crashed');
+      expect(supervisor.statusOf('fx')?.state).toBe('invalid');
     });
   });
 
@@ -575,7 +575,30 @@ describe('sidecar connectors through the routes and the proxy', () => {
       const call = await fetch(entry.url, { method: 'POST', headers: entry.headers, body: '{}' });
       proxy.revokeConnectorGrant(grant);
       expect({ status: call.status, retryAfter: call.headers.get('retry-after'), configError: errors.filter(l => l.includes('has no usable http url/headers')) })
-        .toEqual({ status: 503, retryAfter: expect.stringMatching(/^\d+$/), configError: [] });
+        .toEqual({ status: 503, retryAfter: '5', configError: [] });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('answers 500 without Retry-After for a hand-edited invalid spec, which no wait will fix', async () => {
+    const errors: string[] = [];
+    const spy = jest.spyOn(console, 'error').mockImplementation((...args: unknown[]) => { errors.push(args.join(' ')); });
+    try {
+      expect((await push(sidecarConfig())).status).toBe(200);
+      const supervisor = sidecars.connectorSidecars.get();
+      const pid = await until(() => supervisor.statusOf('fx')?.state === 'ready' && supervisor.statusOf('fx')!.pid);
+      const config = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+      config.gateway.customConnectors.fx.config.sidecar.env = { PORT: '1' };
+      fs.writeFileSync(cfgPath, JSON.stringify(config));
+      supervisor.reconcile(config.gateway.customConnectors);
+      await until(() => !alive(pid) && supervisor.statusOf('fx')?.state === 'invalid');
+      const { servers, grant } = proxy.agentFacingConnectors({ id: 'a' }, config, require('../../src/connectors/resolve').resolveEnabledConnectors({}, config.gateway.customConnectors));
+      const entry = servers.fx as { url: string; headers: Record<string, string> };
+      const call = await fetch(entry.url, { method: 'POST', headers: entry.headers, body: '{}' });
+      proxy.revokeConnectorGrant(grant);
+      expect({ status: call.status, retryAfter: call.headers.get('retry-after'), body: await call.json(), configError: errors.filter(l => l.includes('has no usable http url/headers')) })
+        .toEqual({ status: 500, retryAfter: null, body: { error: 'Connector sidecar configuration is invalid: sidecar.env must not set PORT: the gateway assigns it' }, configError: [] });
     } finally {
       spy.mockRestore();
     }
