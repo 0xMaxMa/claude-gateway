@@ -311,12 +311,20 @@ export function createConnectorProxyRouter(): Router {
   });
   // A sidecar that is still starting has no url yet: hold the request until it
   // listens rather than failing a session that spawned alongside it.
-  router.all(`${CONNECTOR_PROXY_PATH}/:id`, (req: Request, _res: Response, next: NextFunction) => {
+  router.all(`${CONNECTOR_PROXY_PATH}/:id`, (req: Request, res: Response, next: NextFunction) => {
     const match = /^Bearer (\S+)$/.exec(req.headers.authorization ?? '');
     const id = req.params['id'] ?? '';
     const sidecars = connectorSidecars.get();
-    if (!match || !grants.has(match[1]) || !isSameHost(req) || !sidecars.statusOf(id) || sidecars.urlOf(id)) { next(); return; }
-    sidecars.waitUntilReady(id).then(() => next(), () => next());
+    if (!match || grants.get(match[1])?.routes.get(id) !== 'proxy' || !isSameHost(req) || !sidecars.statusOf(id) || sidecars.urlOf(id)) { next(); return; }
+    const gone = new AbortController();
+    const leave = (): void => gone.abort();
+    req.once('close', leave);
+    res.once('close', leave);
+    void sidecars.waitUntilReady(id, gone.signal).then(() => {
+      req.off('close', leave);
+      res.off('close', leave);
+      if (!gone.signal.aborted) next();
+    });
   });
   router.all(`${CONNECTOR_PROXY_PATH}/:id`, (req: Request, res: Response) => {
     if (!isSameHost(req)) { res.status(403).json({ error: 'Forbidden' }); return; }

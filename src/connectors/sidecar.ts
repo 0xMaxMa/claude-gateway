@@ -220,8 +220,8 @@ export class SidecarSupervisor {
     };
   }
 
-  /** Resolves with the url once ready; undefined when it fails first, after its readyTimeoutMs, or when it is not running. */
-  waitUntilReady(id: string): Promise<string | undefined> {
+  /** Resolves with the url once ready; undefined when it fails first, after its readyTimeoutMs, on `signal`, or when it is not running. */
+  waitUntilReady(id: string, signal?: AbortSignal): Promise<string | undefined> {
     const sidecar = this.sidecars.get(id);
     if (!sidecar || sidecar.phase.kind === 'ready') return Promise.resolve(this.urlOf(id));
     // 'stopped' is not final here: a listed sidecar is stopped only between a halt and its next start.
@@ -231,10 +231,12 @@ export class SidecarSupervisor {
       const done = (): void => {
         clearTimeout(timer);
         sidecar.waiters.delete(done);
+        signal?.removeEventListener('abort', done);
         resolve(this.urlOf(id));
       };
       const timer = setTimeout(done, timeoutMs);
       sidecar.waiters.add(done);
+      signal?.addEventListener('abort', done, { once: true });
     });
   }
 

@@ -720,6 +720,45 @@ describe('sidecar connectors through the routes and the proxy', () => {
     }
   });
 
+  it('holds only a request whose grant proxies that connector', async () => {
+    expect((await push(sidecarConfig({ NEVER_LISTEN: '1' }))).status).toBe(200);
+    const other = await request(base).post('/api/v1/connectors/other/oauth/receive').set('Authorization', 'Bearer admin')
+      .send({ access_token: TOKEN, label: 'Other', config: { type: 'http', url: 'http://127.0.0.1:1/mcp', headers: { Authorization: 'Bearer {access_token}' } } });
+    expect(other.status).toBe(200);
+    const config = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+    const resolved = require('../../src/connectors/resolve').resolveEnabledConnectors({}, config.gateway.customConnectors);
+    const { servers, grant } = proxy.agentFacingConnectors({ id: 'a' }, config, { other: resolved.other });
+    const entry = servers.other as { url: string; headers: Record<string, string> };
+    try {
+      const answer = await Promise.race([
+        fetch(entry.url.replace(/other$/, 'fx'), { method: 'POST', headers: entry.headers, body: '{}' }).then(res => res.status),
+        new Promise(r => setTimeout(() => r('held'), 1500)),
+      ]);
+      expect(answer).toBe(403);
+    } finally {
+      proxy.revokeConnectorGrant(grant);
+    }
+  });
+
+  it('drops a held request\'s waiter when its client goes away', async () => {
+    expect((await push(sidecarConfig({ NEVER_LISTEN: '1' }))).status).toBe(200);
+    const supervisor = sidecars.connectorSidecars.get();
+    const waiters = () => (supervisor as unknown as { sidecars: Map<string, { waiters: Set<unknown> }> }).sidecars.get('fx')!.waiters.size;
+    const config = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+    const { servers, grant } = proxy.agentFacingConnectors({ id: 'a' }, config, require('../../src/connectors/resolve').resolveEnabledConnectors({}, config.gateway.customConnectors));
+    const entry = servers.fx as { url: string; headers: Record<string, string> };
+    const client = http.request(entry.url, { method: 'POST', headers: entry.headers });
+    try {
+      client.on('error', () => {});
+      client.end('{}');
+      await until(() => waiters() === 1, 2000);
+      client.destroy();
+      expect(await until(() => waiters() === 0, 1000).then(() => 0, () => waiters())).toBe(0);
+    } finally {
+      proxy.revokeConnectorGrant(grant);
+    }
+  });
+
   it('stops on pause and starts again on resume', async () => {
     expect((await push(sidecarConfig())).status).toBe(200);
     const supervisor = sidecars.connectorSidecars.get();
