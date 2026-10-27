@@ -133,6 +133,8 @@ export class SidecarSupervisor {
   private readonly options: Required<Omit<SidecarSupervisorOptions, 'searchPath'>> & { searchPath?: string };
   private closed = false;
   private entries: Record<string, CustomConnectorEntry> | undefined;
+  /** Children between SIGTERM and exit. Their sidecar's phase is already past them, so the shutdown paths look here. */
+  private readonly stopping = new Map<ChildProcess, Promise<void>>();
   /** Aborted by close(), so a uv download in progress does not hold up shutdown. */
   private readonly shutdown = new AbortController();
 
@@ -242,8 +244,8 @@ export class SidecarSupervisor {
     // in its queue must not hold up the gateway's exit.
     let timer: NodeJS.Timeout | undefined;
     const timedOut = new Promise<boolean>(resolve => { timer = setTimeout(() => resolve(true), 2 * this.options.stopGraceMs); });
-    const stopped = Promise.all(sidecars.map(sidecar => this.remove(sidecar.id, false))).then(() => false);
-    if (await Promise.race([stopped, timedOut])) killGroups(sidecars);
+    const stopped = Promise.all([...sidecars.map(sidecar => this.remove(sidecar.id, false)), ...this.stopping.values()]).then(() => false);
+    if (await Promise.race([stopped, timedOut])) killGroups(sidecars, this.stopping.keys());
     clearTimeout(timer);
   }
 
@@ -265,7 +267,7 @@ export class SidecarSupervisor {
 
   /** Last-resort synchronous kill for process exit paths that cannot await. */
   killAllNow(): void {
-    killGroups(this.sidecars.values());
+    killGroups(this.sidecars.values(), this.stopping.keys());
   }
 
   private create(id: string): Sidecar {
@@ -418,7 +420,7 @@ export class SidecarSupervisor {
     this.enqueue(sidecar, async () => {
       if (!running()) return;
       sidecar.phase = { kind: 'starting' };
-      await stopChild(child, this.options.stopGraceMs);
+      await this.stop(child);
       this.failed(sidecar, key, `not listening on its port within ${timeoutMs}ms`);
     });
   }
@@ -448,10 +450,16 @@ export class SidecarSupervisor {
     const child = (phase as { child?: ChildProcess }).child;
     sidecar.phase = { kind: 'stopped' };
     if (child) {
-      await stopChild(child, this.options.stopGraceMs);
+      await this.stop(child);
       this.forgetGroup(sidecar.id, child.pid);
       this.options.log(`connector-sidecar: connector=${sidecar.id} stopped pid=${child.pid}`);
     }
+  }
+
+  private stop(child: ChildProcess): Promise<void> {
+    const stopped = stopChild(child, this.options.stopGraceMs).finally(() => this.stopping.delete(child));
+    this.stopping.set(child, stopped);
+    return stopped;
   }
 
   private searchPath(): string {
@@ -516,11 +524,12 @@ function isConnected(id: string, entry: CustomConnectorEntry, tokenEnv: Record<s
   try { return hasAllSecrets(id, entry, tokenEnv); } catch { return false; }
 }
 
-function killGroups(sidecars: Iterable<Sidecar>): void {
+function killGroups(sidecars: Iterable<Sidecar>, stopping: Iterable<ChildProcess>): void {
   for (const sidecar of sidecars) {
     const child = (sidecar.phase as { child?: ChildProcess }).child;
     if (child) signalGroup(child, 'SIGKILL');
   }
+  for (const child of stopping) signalGroup(child, 'SIGKILL');
 }
 
 function signalGroup(child: ChildProcess, signal: NodeJS.Signals): void {

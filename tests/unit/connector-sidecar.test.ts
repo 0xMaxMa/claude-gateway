@@ -318,6 +318,33 @@ describe('SidecarSupervisor', () => {
     expect(supervisor.urlOf('fx')).toBeUndefined();
   });
 
+  it('does not resolve close while a removed sidecar that ignores SIGTERM is still running', async () => {
+    supervisor.reconcile({ fx: sidecarEntry(fixtureSpec({ IGNORE_TERM: '1' })) });
+    await readyUrl('fx');
+    const pid = supervisor.statusOf('fx')!.pid!;
+    supervisor.reconcile({});
+    await new Promise(r => setImmediate(r));
+    const started = Date.now();
+    await supervisor.close();
+    expect({ alive: alive(pid), withinBound: Date.now() - started < 2 * 500 + 200 }).toEqual({ alive: false, withinBound: true });
+  });
+
+  it('kills a sidecar that is mid-stop from the synchronous exit path', async () => {
+    const slow = new SidecarSupervisor({ runtimeRoot: tmpDir, backoffMs: [50], stopGraceMs: 10_000, log: () => {} });
+    try {
+      slow.reconcile({ fx: sidecarEntry(fixtureSpec({ IGNORE_TERM: '1' })) });
+      await until(() => slow.urlOf('fx'));
+      const pid = slow.statusOf('fx')!.pid!;
+      slow.reconcile({});
+      await new Promise(r => setTimeout(r, 100));
+      expect(alive(pid)).toBe(true);
+      slow.killAllNow();
+      await until(() => !alive(pid), 2000);
+    } finally {
+      await slow.close();
+    }
+  });
+
   it('gives each sidecar its own port and stops them all on close', async () => {
     supervisor.reconcile({ a: sidecarEntry(fixtureSpec()), b: sidecarEntry(fixtureSpec()) });
     const [a, b] = [await readyUrl('a'), await readyUrl('b')];
