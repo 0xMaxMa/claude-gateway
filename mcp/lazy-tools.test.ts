@@ -47,6 +47,63 @@ describe('lazy gateway tools', () => {
     expect(top('gmail', 'search gmail messages')).toEqual(['search_gmail_messages']);
     expect(search('gmail', 'zzz qqq').total).toBe(0);
   });
+  describe('Drive, Docs and Sheets catalogs', () => {
+    const catalogs = JSON.parse(readFileSync(join(import.meta.dir, 'fixtures/workspace-mcp-tools.json'), 'utf8')) as Record<string, McpToolDefinition[]>;
+    const top = (server: string, query: string) => parse(createLazyToolCatalog(catalogs[server]).search({ query })).tools.map((tool: McpToolDefinition) => tool.name);
+    const disabled: Record<string, string[]> = {
+      gmail: ['modify_gmail_message_labels', 'batch_modify_gmail_message_labels', 'manage_gmail_label', 'list_gmail_filters', 'manage_gmail_filter'],
+      'google-calendar': ['create_calendar'],
+      'google-drive': ['manage_drive_access', 'set_drive_file_permissions'],
+      'google-docs': ['manage_document_comment'],
+      'google-sheets': ['manage_spreadsheet_comment'],
+    };
+    test('rank the tool a worker means first', () => {
+      expect({
+        'find and replace in doc': top('google-docs', 'find and replace in doc')[0],
+        'export doc to pdf': top('google-docs', 'export doc to pdf')[0],
+        'append rows': top('google-sheets', 'append rows')[0],
+        'search files': top('google-drive', 'search files')[0],
+        'create folder': top('google-drive', 'create folder')[0],
+        'copy file': top('google-drive', 'copy file')[0],
+        'list my files': top('google-drive', 'list my files')[0],
+        // No Drive tool contains all three words.
+        'show folder contents': top('google-drive', 'show folder contents')[0],
+      }).toEqual({
+        'find and replace in doc': 'find_and_replace_doc',
+        'export doc to pdf': 'export_doc_to_pdf',
+        'append rows': 'append_table_rows',
+        'search files': 'search_drive_files',
+        'create folder': 'create_drive_folder',
+        'copy file': 'copy_drive_file',
+        'list my files': 'list_drive_items',
+        'show folder contents': 'list_drive_items',
+      });
+    });
+    // Known gap: tools containing every query word (as substrings, so "spreadsheet" contains
+    // "read") come back by name, not relevance. These pass once the ranker weighs name matches.
+    for (const [server, query, expected] of [
+      ['google-docs', 'update document text', 'modify_doc_text'],
+      ['google-sheets', 'read sheet values', 'read_sheet_values'],
+      ['google-sheets', 'create spreadsheet', 'create_spreadsheet'],
+      ['google-drive', 'download file', 'get_drive_file_download_url'],
+    ]) test.failing(`known ranking gap: "${query}" should rank ${expected} first`, () => {
+      expect(top(server, query)[0]).toBe(expected);
+    });
+    test('hide every disabled tool and list the full catalog for * without schemas', () => {
+      expect(Object.keys(catalogs).sort()).toEqual(Object.keys(disabled).sort());
+      for (const [server, names] of Object.entries(disabled)) {
+        expect(catalogs[server].map(tool => tool.name).filter(name => name === 'start_google_auth' || names.includes(name))).toEqual([]);
+      }
+      const listed = Object.fromEntries(Object.keys(disabled).map(server => {
+        const all = parse(createLazyToolCatalog(catalogs[server]).search({ query: '*', limit: 20 }));
+        return [server, { total: all.total, schemas: all.tools.some((tool: McpToolDefinition) => 'inputSchema' in tool) }];
+      }));
+      expect(listed).toEqual({
+        gmail: { total: 9, schemas: false }, 'google-calendar': { total: 6, schemas: false },
+        'google-drive': { total: 14, schemas: false }, 'google-docs': { total: 18, schemas: false }, 'google-sheets': { total: 15, schemas: false },
+      });
+    });
+  });
   test('unauthorized, task and recursive tools never reach dispatcher', async () => {
     let calls = 0; const dispatch = async () => { calls++; return { content: [] }; };
     const catalog = createLazyToolCatalog(defs);
