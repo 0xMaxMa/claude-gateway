@@ -21,6 +21,8 @@ const TOKEN = 'fixture-access-token-1';
 let tmpDir: string;
 let fixture: string;
 let forkThenExit: string;
+/** Holds a token for every id the supervisor tests use: a sidecar runs only while its connector is connected. */
+let connectedEnv: string;
 
 /** Listens on $PORT (127.0.0.1) and reports what it was started with and what it was sent. */
 const FIXTURE = `
@@ -61,9 +63,13 @@ beforeAll(() => {
   fs.writeFileSync(fixture, FIXTURE);
   forkThenExit = path.join(tmpDir, 'fork-then-exit.js');
   fs.writeFileSync(forkThenExit, FORK_THEN_EXIT);
+  connectedEnv = path.join(tmpDir, 'connected.env');
+  fs.writeFileSync(connectedEnv, ['fx', 'a', 'b'].map(id => `CUSTOM__${id}__access_token=${TOKEN}\n`).join(''));
+  process.env.GATEWAY_MCP_TOKEN_ENV_PATH = connectedEnv;
 });
 
 afterAll(() => {
+  delete process.env.GATEWAY_MCP_TOKEN_ENV_PATH;
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
@@ -364,7 +370,7 @@ describe('SidecarSupervisor', () => {
       const line = await until(() => logs.find(l => l.includes('output: xxx')));
       expect({ leaked: line.includes('ya29'), tail: line.slice(-6) }).toEqual({ leaked: false, tail: 'x[reda' });
     } finally {
-      delete process.env.GATEWAY_MCP_TOKEN_ENV_PATH;
+      process.env.GATEWAY_MCP_TOKEN_ENV_PATH = connectedEnv;
     }
   });
 
@@ -446,7 +452,7 @@ describe('sidecar connectors through the routes and the proxy', () => {
     await sidecars.connectorSidecars.get().close();
     await new Promise(r => server.close(r));
     fs.rmSync(TOKEN_ENV, { force: true });
-    delete process.env.GATEWAY_MCP_TOKEN_ENV_PATH;
+    process.env.GATEWAY_MCP_TOKEN_ENV_PATH = connectedEnv;
   });
 
   const push = (config: Record<string, unknown>, token = TOKEN) =>
@@ -499,7 +505,46 @@ describe('sidecar connectors through the routes and the proxy', () => {
     expect((await request(base).delete('/api/v1/connectors/fx').set('Authorization', 'Bearer admin')).status).toBe(200);
     await until(() => !alive(seen.pid));
     expect(supervisor.statusOf('fx')).toBeUndefined();
+    expect(JSON.parse(fs.readFileSync(cfgPath, 'utf8')).gateway.customConnectors.fx).toBeUndefined();
     proxy.revokeConnectorGrant(grant);
+  });
+
+  it('stops a static connector\'s sidecar on disconnect and starts it on a fresh port on reconnect', async () => {
+    const admin = (req: request.Test): request.Test => req.set('Authorization', 'Bearer admin');
+    const added = await admin(request(base).post('/api/v1/connectors/custom')).send({ label: 'Static', config: sidecarConfig(), secrets: { access_token: TOKEN } });
+    expect({ status: added.status, id: added.body.id, connected: added.body.connected }).toEqual({ status: 200, id: 'static', connected: true });
+    const supervisor = sidecars.connectorSidecars.get();
+    const firstUrl = await until(() => supervisor.urlOf('static'));
+    const first = supervisor.statusOf('static')!.pid!;
+    const workDir = path.join(tmpDir, 'sidecars', 'static');
+    expect(fs.existsSync(workDir)).toBe(true);
+
+    expect((await admin(request(base).delete('/api/v1/connectors/static'))).status).toBe(200);
+    await until(() => !alive(first));
+    const row = (await admin(request(base).get('/api/v1/connectors'))).body.connectors.find((c: { id: string }) => c.id === 'static');
+    expect({ connected: row.connected, sidecar: row.sidecar ?? null }).toEqual({ connected: false, sidecar: null });
+    await until(() => !fs.existsSync(workDir));
+    await expect(fetch(firstUrl)).rejects.toThrow();
+
+    expect((await admin(request(base).post('/api/v1/connectors/static/connect')).send({ token: 'fixture-access-token-2' })).status).toBe(200);
+    const secondUrl = await until(() => supervisor.urlOf('static'));
+    const second = supervisor.statusOf('static')!.pid!;
+    expect({ newPid: second !== first, newPort: new URL(secondUrl).port !== new URL(firstUrl).port, state: supervisor.statusOf('static')!.state })
+      .toEqual({ newPid: true, newPort: true, state: 'ready' });
+  });
+
+  it('runs a `none` connector\'s sidecar with no secret and stops it when DELETE removes the entry', async () => {
+    const admin = (req: request.Test): request.Test => req.set('Authorization', 'Bearer admin');
+    const config = { type: 'http', sidecar: fixtureSpec() };
+    const added = await admin(request(base).post('/api/v1/connectors/custom')).send({ label: 'Open', config });
+    expect({ status: added.status, connected: added.body.connected }).toEqual({ status: 200, connected: true });
+    const supervisor = sidecars.connectorSidecars.get();
+    const pid = await until(() => supervisor.statusOf('open')?.state === 'ready' && supervisor.statusOf('open')!.pid);
+
+    expect((await admin(request(base).delete('/api/v1/connectors/open'))).status).toBe(200);
+    await until(() => !alive(pid));
+    expect({ entry: JSON.parse(fs.readFileSync(cfgPath, 'utf8')).gateway.customConnectors.open ?? null, sidecar: supervisor.statusOf('open') ?? null })
+      .toEqual({ entry: null, sidecar: null });
   });
 
   it('stores confirmTools from a push, rejects an invalid list, and does not restart the sidecar when only confirmTools changes', async () => {

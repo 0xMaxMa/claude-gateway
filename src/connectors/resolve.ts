@@ -9,7 +9,7 @@
 import type { AgentConfig, CustomConnectorEntry } from '../types';
 import { type ConnectorStatus } from './types';
 import { parseCounter, readTokenEnv } from './token-env';
-import { customSecretKey, substitutePlaceholders, withoutConfirmTools } from './custom';
+import { customSecretKey, hasAllSecrets, substitutePlaceholders, withoutConfirmTools } from './custom';
 import { secretExposureFields } from './exposure';
 import { connectorSidecars } from './sidecar';
 import {
@@ -186,9 +186,7 @@ export function listConnectorStatus(
 
   return Object.entries(customConnectors).map(([id, entry]) => {
     try {
-      const connected = entry.secretNames.every(
-        (name: string) => !!tokenEnv[customSecretKey(id, name)],
-      );
+      const connected = hasAllSecrets(id, entry, tokenEnv);
       // Omitted rather than set to undefined when refresh is healthy: the single-status
       // route omits it too, and a caller doing `'refresh' in status` should get the same
       // answer from both.

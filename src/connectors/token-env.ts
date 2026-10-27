@@ -197,6 +197,14 @@ export function hasSecret(envName: string): boolean {
   return getSecret(envName) !== null;
 }
 
+const writeListeners = new Set<() => void>();
+
+/** Run `listener` after each rewrite of the file by this process. Returns the unsubscribe. */
+export function onSecretsWritten(listener: () => void): () => void {
+  writeListeners.add(listener);
+  return () => { writeListeners.delete(listener); };
+}
+
 /** Atomically rewrite the file (mode 0600) from a map. */
 function writeAll(map: Record<string, string>): void {
   const file = tokenEnvPath();
@@ -224,6 +232,7 @@ function writeAll(map: Record<string, string>): void {
     }
     throw err;
   }
+  for (const listener of writeListeners) listener();
 }
 
 /**

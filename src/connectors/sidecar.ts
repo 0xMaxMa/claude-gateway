@@ -5,17 +5,17 @@
  *
  *   sidecar: { command, args?, env?, path? = "/mcp", readyTimeoutMs? = 120000 }
  *
- * instead of a `url`. While the entry exists and is not paused, the supervisor below
- * keeps that command running on a loopback port it allocates and passes as `PORT`,
+ * instead of a `url`. While the entry exists, is connected and is not paused, the
+ * supervisor below keeps that command running on a loopback port it allocates and passes as `PORT`,
  * and resolve.ts points the entry's url at `http://127.0.0.1:<port><path>`. Agents
  * still reach it only through the loopback proxy (connectors/proxy.ts), which adds
  * the entry's `headers` per request, so the credential never enters the sidecar's
  * argv or environment, and a token-only update never restarts it.
  *
  * The desired set of sidecars is always "every sidecar entry in customConnectors that
- * is not paused": every write path calls `reconcile` with the whole map, so the
- * supervisor converges on the same state however many times, and in whatever order,
- * it is told.
+ * is connected and not paused": every config write calls `reconcile` with the whole
+ * map and every secret write re-runs it with the last one, so the supervisor converges
+ * on the same state however many times, and in whatever order, it is told.
  */
 
 import { execFile, spawn, type ChildProcess } from 'child_process';
@@ -24,8 +24,8 @@ import * as net from 'net';
 import * as os from 'os';
 import * as path from 'path';
 import type { CustomConnectorEntry } from './types';
-import { extractPlaceholders, isStreamableHttpType, customSecretKey } from './custom';
-import { readTokenEnv } from './token-env';
+import { extractPlaceholders, hasAllSecrets, isStreamableHttpType, customSecretKey } from './custom';
+import { onSecretsWritten, readTokenEnv } from './token-env';
 import { isUvCommand, resolveUvCommand } from './uv-runtime';
 
 export interface SidecarSpec {
@@ -132,6 +132,7 @@ export class SidecarSupervisor {
   private readonly sidecars = new Map<string, Sidecar>();
   private readonly options: Required<Omit<SidecarSupervisorOptions, 'searchPath'>> & { searchPath?: string };
   private closed = false;
+  private entries: Record<string, CustomConnectorEntry> | undefined;
   /** Aborted by close(), so a uv download in progress does not hold up shutdown. */
   private readonly shutdown = new AbortController();
 
@@ -145,14 +146,16 @@ export class SidecarSupervisor {
     };
   }
 
-  /** Converge on one running sidecar per non-paused sidecar entry in `entries`. */
+  /** Converge on one running sidecar per connected, non-paused sidecar entry in `entries`. */
   reconcile(entries: Record<string, CustomConnectorEntry> | undefined): void {
     if (this.closed) return;
+    this.entries = entries;
     const desired = new Map<string, SidecarSpec | { error: string }>();
+    let tokenEnv: Record<string, string> | undefined;
     for (const [id, entry] of Object.entries(entries ?? {})) {
       if (!entry || entry.paused === true || !entry.config || typeof entry.config !== 'object') continue;
       const parsed = parseSidecarSpec(entry.config);
-      if (parsed) desired.set(id, parsed);
+      if (parsed && isConnected(id, entry, tokenEnv ??= readTokenEnv())) desired.set(id, parsed);
     }
     for (const id of this.sidecars.keys()) if (!desired.has(id)) this.remove(id, true);
     for (const [id, parsed] of desired) {
@@ -180,6 +183,11 @@ export class SidecarSupervisor {
         await this.start(sidecar);
       });
     }
+  }
+
+  /** Reconcile the last entries again: a connect or disconnect changes only the secrets. */
+  secretsChanged(): void {
+    this.reconcile(this.entries);
   }
 
   /** The upstream url while the sidecar is ready, else undefined. */
@@ -500,6 +508,11 @@ export class SidecarSupervisor {
   }
 }
 
+/** A hand-edited entry without `secretNames` is reported disconnected, so it runs nothing. */
+function isConnected(id: string, entry: CustomConnectorEntry, tokenEnv: Record<string, string>): boolean {
+  try { return hasAllSecrets(id, entry, tokenEnv); } catch { return false; }
+}
+
 function killGroups(sidecars: Iterable<Sidecar>): void {
   for (const sidecar of sidecars) {
     const child = (sidecar.phase as { child?: ChildProcess }).child;
@@ -617,15 +630,21 @@ function delay(ms: number): Promise<void> {
 }
 
 let shared: SidecarSupervisor | undefined;
+let unsubscribe: (() => void) | undefined;
+
+function install(supervisor: SidecarSupervisor): SidecarSupervisor {
+  unsubscribe?.();
+  shared = supervisor;
+  unsubscribe = onSecretsWritten(() => supervisor.secretsChanged());
+  return supervisor;
+}
 
 /** The gateway's one supervisor. `configure` replaces it (boot, tests). */
 export const connectorSidecars = {
   configure(options: SidecarSupervisorOptions): SidecarSupervisor {
-    shared = new SidecarSupervisor(options);
-    return shared;
+    return install(new SidecarSupervisor(options));
   },
   get(): SidecarSupervisor {
-    shared ??= new SidecarSupervisor({ runtimeRoot: path.join(os.homedir(), '.claude-gateway', 'runtimes') });
-    return shared;
+    return shared ?? install(new SidecarSupervisor({ runtimeRoot: path.join(os.homedir(), '.claude-gateway', 'runtimes') }));
   },
 };

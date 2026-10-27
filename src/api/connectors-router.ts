@@ -19,6 +19,7 @@ import {
   isReservedPlaceholder,
   isReservedConnectorId,
   parseConfirmTools,
+  hasAllSecrets,
 } from '../connectors/custom';
 import { createCustomConnectorsStore, type ConnectorScope, type CustomConnectorsStore } from '../connectors/custom-connectors-store';
 import { secretExposureFields } from '../connectors/exposure';
@@ -182,9 +183,7 @@ export function createConnectorsRouter(
     // rather than answering "not connected".
     try {
       const tokenEnv = readTokenEnv();
-      const connected = custom.secretNames.every(
-        (name: string) => !!tokenEnv[customSecretKey(req.params.id, name)],
-      );
+      const connected = hasAllSecrets(req.params.id, custom, tokenEnv);
       // Same caveat the list endpoint carries: a transiently-failing refresh
       // leaves the (possibly expired) access_token in place, so `connected`
       // alone would keep polling clients green over a dead connector.

@@ -116,6 +116,11 @@ export function customSecretKey(id: string, name: string): string {
   return `CUSTOM__${id}__${name}`;
 }
 
+/** What `connected` means on every status surface: every secret the entry declares is stored. */
+export function hasAllSecrets(id: string, entry: Pick<CustomConnectorEntry, 'secretNames'>, tokenEnv: Record<string, string>): boolean {
+  return entry.secretNames.every(name => !!tokenEnv[customSecretKey(id, name)]);
+}
+
 /**
  * Namespaced key for gateway-internal bookkeeping about a connector (the refresh
  * token, its expiry, failure counters — see oauth-refresh-sweep.ts), stored in the
