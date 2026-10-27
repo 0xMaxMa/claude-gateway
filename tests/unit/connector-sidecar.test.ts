@@ -327,9 +327,10 @@ describe('SidecarSupervisor', () => {
     const pid = supervisor.statusOf('fx')!.pid!;
     supervisor.reconcile({});
     await new Promise(r => setImmediate(r));
-    const started = Date.now();
     await supervisor.close();
-    expect({ alive: alive(pid), withinBound: Date.now() - started < 2 * 500 + 200 }).toEqual({ alive: false, withinBound: true });
+    // Logged by the stop itself; close's 2x-grace fallback would resolve before it.
+    const stoppedBeforeClose = logs.includes(`connector-sidecar: connector=fx stopped pid=${pid}`);
+    expect({ alive: alive(pid), stoppedBeforeClose }).toEqual({ alive: false, stoppedBeforeClose: true });
   });
 
   it('kills a sidecar that is mid-stop from the synchronous exit path', async () => {

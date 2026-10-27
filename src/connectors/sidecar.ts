@@ -284,7 +284,11 @@ export class SidecarSupervisor {
     return sidecar;
   }
 
-  /** Stop and forget a sidecar; `purge` also deletes its working directory (the entry is gone, not the gateway). */
+  /**
+   * Stop and forget a sidecar; `purge` also deletes its working directory. Reconcile
+   * purges whenever an entry stops being desired (removed, disconnected or paused);
+   * close() does not, since the gateway is stopping, not the connector.
+   */
   private remove(id: string, purge: boolean): Promise<void> {
     const sidecar = this.sidecars.get(id);
     if (!sidecar) return Promise.resolve();
