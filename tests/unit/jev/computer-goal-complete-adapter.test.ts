@@ -115,3 +115,20 @@ test('a goal stopped at a field without its text asks the agent for that field',
   expect(f.ended()).toHaveLength(0);
  }finally{await f.close();}
 });
+
+test('device_shell on the same Mac leaves the session to a computer run still in progress',async()=>{
+ const f=fixture();try{
+  let finish!:(v:any)=>void;runComputerUse.mockImplementationOnce(()=>new Promise(r=>{finish=r;}));
+  const callTool=jest.fn(async({name}:{name:string})=>({content:[{type:'text',text:JSON.stringify(name==='computer_shell'?{exitCode:0,stdout:'',stderr:'',truncated:false,durationMs:1,timedOut:false}:name==='computer_end_session'?{state:'stopped'}:{state:'approved'})}]}));
+  jest.mocked(withComputerConnection).mockImplementation(async(_c,fn)=>fn({callTool,listTools:async()=>({tools:[{name:'computer_shell'}]})} as any));
+  await f.adapter.submit(f.task,'r1','open Notes');
+  for(let i=0;i<20&&!finish;i++)await new Promise(r=>setImmediate(r));
+  const out=await f.adapter.shell({principalId:'p',conversationId:'c',actionId:'x'} as any,{session_id:'target',command:'id'}) as any;
+  expect(out.exitCode).toBe(0);expect(out).not.toHaveProperty('accessReleased');
+  expect(callTool.mock.calls.map(([c]:any)=>c.name)).not.toContain('computer_end_session');
+  finish({status:'succeeded',reason:'GOAL_REACHED',steps:1,evaluations:0});
+  for(let i=0;i<50;i++){if(typeof await f.adapter.inspect(f.task,'r1')==='object')break;await new Promise(r=>setImmediate(r));}
+  // The run itself still ends the session once its goal is reached.
+  expect(callTool.mock.calls.filter(([c]:any)=>c.name==='computer_end_session')).toHaveLength(1);
+ }finally{await f.close();}
+});

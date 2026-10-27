@@ -110,3 +110,46 @@ test('an older relay without computer_shell is SHELL_UNSUPPORTED before access i
   expect(f.listTools).toHaveBeenCalledTimes(1);expect(f.callTool).not.toHaveBeenCalled();
  }finally{await f.close();}
 });
+
+test('a finished command ends the device session, so the Mac no longer shows it as controlled',async()=>{
+ const f=setup({computer_request_access:[reply({state:'approved'})],computer_shell:[reply(RESULT)],computer_end_session:[reply({state:'stopped'})]});
+ try{
+  expect(await f.adapter.shell(context,{session_id:'mac',command:'which htop'})).toMatchObject({...RESULT,accessReleased:true});
+  expect(f.callTool.mock.calls.map((c:any)=>c[0].name)).toEqual(['computer_request_access','computer_shell','computer_end_session']);
+  expect((f.callTool.mock.calls[2] as any)[0].arguments).toEqual({device_id:'dev',grant_id:'grant'});
+ }finally{await f.close();}
+});
+
+test('a refused command also ends the session; an unconfirmed end is reported, not hidden',async()=>{
+ const f=setup({computer_request_access:[reply({state:'approved'})],computer_shell:[reply({error:'SHELL_ACCESS_DENIED'},true)],computer_end_session:[reply({error:'INTERNAL'},true)]});
+ try{expect(await f.adapter.shell(context,{session_id:'mac',command:'id'})).toMatchObject({error:'SHELL_ACCESS_DENIED',accessReleased:false});}finally{await f.close();}
+});
+
+test.each([['CONSENT_PENDING'],['SHELL_OUTCOME_UNKNOWN']])('%s keeps the session: the prompt is still open or the command may still run',async(code)=>{
+ const f=setup({computer_request_access:[reply({state:'approved'})],computer_shell:[reply({error:code},true),reply({error:code},true)]});
+ try{
+  const out=await f.adapter.shell(context,{session_id:'mac',command:'id'}) as any;
+  expect(out.error).toBe(code);expect(out).not.toHaveProperty('accessReleased');
+  expect(f.callTool.mock.calls.map((c:any)=>c[0].name)).not.toContain('computer_end_session');
+ }finally{await f.close();}
+});
+
+test('concurrent commands on one Mac: only the last one to finish ends the session',async()=>{
+ const f=setup({computer_request_access:[reply({state:'approved'}),reply({state:'approved'})],computer_end_session:[reply({state:'stopped'})]});
+ let finishFirst!:()=>void;const firstDone=new Promise<void>(r=>{finishFirst=r;});let shells=0;
+ f.callTool.mockImplementation(async(req:any)=>{
+  if(req.name==='computer_request_access')return reply({state:'approved'});
+  if(req.name==='computer_end_session')return reply({state:'stopped'});
+  if(req.name==='computer_shell'){if(++shells===1)await firstDone;return reply(RESULT);}
+  throw Error('unexpected '+req.name);
+ });
+ try{
+  const slow=f.adapter.shell(context,{session_id:'mac',command:'sleep 1'});
+  await new Promise(r=>setImmediate(r));
+  const fast=await f.adapter.shell({...context,actionId:'input:other'},{session_id:'mac',command:'id'}) as any;
+  expect(fast).not.toHaveProperty('accessReleased');
+  finishFirst();
+  expect(await slow).toMatchObject({accessReleased:true});
+  expect(f.callTool.mock.calls.filter((c:any)=>c[0].name==='computer_end_session')).toHaveLength(1);
+ }finally{await f.close();}
+});
