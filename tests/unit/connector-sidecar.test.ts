@@ -408,6 +408,26 @@ describe('SidecarSupervisor', () => {
     expect(logs).toContainEqual(expect.stringContaining('connector=fx spawn'));
   });
 
+  it('starts a fixed command right after a spawn failure instead of locking the connector', async () => {
+    supervisor.reconcile({ fx: sidecarEntry({ command: '/nonexistent-command' }) });
+    // Lands while the first start is allocating its port.
+    for (let i = 0; i < 10; i++) await null;
+    supervisor.reconcile({ fx: sidecarEntry(fixtureSpec()) });
+    const state = await until(() => supervisor.statusOf('fx')?.state === 'ready', 5000).then(() => 'ready', () => supervisor.statusOf('fx')?.state);
+    const stopping = (supervisor as unknown as { stopping: Map<unknown, unknown> }).stopping.size;
+    const closed = await Promise.race([supervisor.close().then(() => 'closed'), new Promise(r => setTimeout(() => r('hung'), 400))]);
+    expect({ state, stopping, closed }).toEqual({ state: 'ready', stopping: 0, closed: 'closed' });
+  });
+
+  it('does not spawn a start that a newer spec replaced while it allocated a port', async () => {
+    supervisor.reconcile({ fx: sidecarEntry(fixtureSpec({ VERSION: '1' })) });
+    for (let i = 0; i < 10; i++) await null;
+    supervisor.reconcile({ fx: sidecarEntry(fixtureSpec({ VERSION: '2' })) });
+    const url = await readyUrl('fx');
+    expect({ version: ((await getJson(url)).env as Record<string, string>).VERSION, starts: logs.filter(l => l.includes('started pid=')).length })
+      .toEqual({ version: '2', starts: 1 });
+  });
+
   it('masks bearer values in the output it logs', async () => {
     supervisor.reconcile({ fx: sidecarEntry(fixtureSpec()) });
     await readyUrl('fx');
@@ -444,6 +464,27 @@ describe('shutdown while a sidecar is still resolving uv', () => {
   it('gives up after twice the stop grace when the install ignores the abort', async () => {
     const supervisor = supervisorWith(() => new Promise(resolve => setTimeout(() => resolve(process.execPath), 3000)), 200);
     expect(await closeMs(supervisor)).toBeLessThan(1000);
+  });
+});
+
+describe('a stop queued in the same tick as a failed spawn', () => {
+  afterEach(() => { jest.dontMock('child_process'); jest.resetModules(); });
+
+  it('does not wait for an exit that a never-spawned child never emits', async () => {
+    let afterSpawn: (() => void) | undefined;
+    jest.resetModules();
+    jest.doMock('child_process', () => {
+      const actual = jest.requireActual('child_process') as typeof import('child_process');
+      return { ...actual, spawn: (...args: Parameters<typeof actual.spawn>) => { const child = actual.spawn(...args); afterSpawn?.(); return child; } };
+    });
+    const { SidecarSupervisor } = require('../../src/connectors/sidecar') as typeof import('../../src/connectors/sidecar');
+    const supervisor = new SidecarSupervisor({ runtimeRoot: tmpDir, backoffMs: [50], stopGraceMs: 500, log: () => {} });
+    afterSpawn = () => { afterSpawn = undefined; supervisor.reconcile({ fx: sidecarEntry(fixtureSpec()) }); };
+    supervisor.reconcile({ fx: sidecarEntry({ command: '/nonexistent-command' }) });
+    const state = await until(() => supervisor.statusOf('fx')?.state === 'ready', 5000).then(() => 'ready', () => supervisor.statusOf('fx')?.state);
+    const stopping = (supervisor as unknown as { stopping: Map<unknown, unknown> }).stopping.size;
+    const closed = await Promise.race([supervisor.close().then(() => 'closed'), new Promise(r => setTimeout(() => r('hung'), 400))]);
+    expect({ state, stopping, closed }).toEqual({ state: 'ready', stopping: 0, closed: 'closed' });
   });
 });
 

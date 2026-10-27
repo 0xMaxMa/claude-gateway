@@ -361,6 +361,7 @@ export class SidecarSupervisor {
       await this.reclaimGroup(sidecar.id);
       if (!this.current(sidecar, key)) return;
       port = await allocatePort(sidecar.lastPort);
+      if (!this.current(sidecar, key)) return;
       sidecar.lastPort = port;
       const cwd = this.workDir(sidecar.id);
       fs.mkdirSync(cwd, { recursive: true, mode: 0o700 });
@@ -541,8 +542,10 @@ function signalGroup(child: ChildProcess, signal: NodeJS.Signals): void {
 
 /** SIGTERM the sidecar's process group, then SIGKILL it after `graceMs`. */
 async function stopChild(child: ChildProcess, graceMs: number): Promise<void> {
+  // A failed spawn has no pid and emits 'error' and 'close', never 'exit'.
+  if (child.pid === undefined) return;
   if (child.exitCode !== null || child.signalCode !== null) { signalGroup(child, 'SIGKILL'); return; }
-  const exited = new Promise<void>(resolve => child.once('exit', () => resolve()));
+  const exited = new Promise<void>(resolve => { child.once('exit', () => resolve()); child.once('close', () => resolve()); });
   signalGroup(child, 'SIGTERM');
   const timer = setTimeout(() => signalGroup(child, 'SIGKILL'), graceMs);
   await exited;
