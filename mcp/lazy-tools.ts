@@ -28,10 +28,22 @@ export function createLazyToolCatalog(tools: readonly McpToolDefinition[], exclu
       const query = rawQuery === '*' ? '' : rawQuery;
       const name = String(args.name ?? '').trim().toLowerCase();
       const text = (tool: McpToolDefinition) => `${tool.name} ${tool.description}`.toLowerCase();
-      let matches = catalog.filter(tool => name ? tool.name.toLowerCase() === name :
-        query.split(/\s+/).every(word => text(tool).includes(word)));
+      const words = query.split(/\s+/);
+      // Name hits outweigh description hits, and a whole name token outweighs a substring,
+      // so "read sheet values" puts read_sheet_values above move_sheet_rows ("spreadsheet").
+      const score = (tool: McpToolDefinition) => {
+        const toolName = tool.name.toLowerCase(), tokens = toolName.split('_');
+        return words.reduce((sum, word) => sum + (tokens.includes(word) ? 4 : toolName.includes(word) ? 2 : 1), 0);
+      };
+      let matches = name ? catalog.filter(tool => tool.name.toLowerCase() === name) :
+        catalog.filter(tool => words.every(word => text(tool).includes(word)))
+          .map(tool => ({ tool, score: score(tool) }))
+          .sort((a, b) => b.score - a.score || a.tool.name.localeCompare(b.tool.name))
+          .map(({ tool }) => tool);
       // Natural multi-word queries ("update event") often have no tool containing every
       // word, and an empty result costs the worker a turn: rank by how many words match.
+      // The name score stays out of this tier: it would put manage_event above get_events
+      // for "update event" but list_calendars above get_events for "list events calendar".
       if (!name && !matches.length) {
         const words = [...new Set(query.split(/[^a-z0-9]+/).filter(Boolean))];
         matches = catalog.map(tool => ({ tool, hits: words.filter(word => text(tool).includes(word)).length }))

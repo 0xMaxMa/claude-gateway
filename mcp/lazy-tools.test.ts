@@ -79,15 +79,48 @@ describe('lazy gateway tools', () => {
         'show folder contents': 'list_drive_items',
       });
     });
-    // Known gap: tools containing every query word (as substrings, so "spreadsheet" contains
-    // "read") come back by name, not relevance. These pass once the ranker weighs name matches.
-    for (const [server, query, expected] of [
-      ['google-docs', 'update document text', 'modify_doc_text'],
-      ['google-sheets', 'read sheet values', 'read_sheet_values'],
-      ['google-sheets', 'create spreadsheet', 'create_spreadsheet'],
-      ['google-drive', 'download file', 'get_drive_file_download_url'],
-    ]) test.failing(`known ranking gap: "${query}" should rank ${expected} first`, () => {
-      expect(top(server, query)[0]).toBe(expected);
+    test('rank a name match above a description match when every query word matches', () => {
+      expect({
+        'read sheet values': top('google-sheets', 'read sheet values')[0],
+        'create spreadsheet': top('google-sheets', 'create spreadsheet')[0],
+        'download file': top('google-drive', 'download file')[0],
+      }).toEqual({
+        'read sheet values': 'read_sheet_values',
+        'create spreadsheet': 'create_spreadsheet',
+        'download file': 'get_drive_file_download_url',
+      });
+    });
+    // Known gap: modify_doc_text names "doc", not "document", so it ties batch_update_doc
+    // (whose name holds "update") and loses on name order. Only a doc/document prefix rule fixes it.
+    test.failing('known ranking gap: "update document text" should rank modify_doc_text first', () => {
+      expect(top('google-docs', 'update document text')[0]).toBe('modify_doc_text');
+    });
+    test('ranking only reorders: every query returns the same tools as the unranked filter', () => {
+      const unranked = (tools: McpToolDefinition[], rawQuery: string) => {
+        const query = rawQuery.trim().toLowerCase() === '*' ? '' : rawQuery.trim().toLowerCase();
+        const text = (tool: McpToolDefinition) => `${tool.name} ${tool.description}`.toLowerCase();
+        let matches = tools.filter(tool => query.split(/\s+/).every(word => text(tool).includes(word)));
+        if (!matches.length) {
+          const words = [...new Set(query.split(/[^a-z0-9]+/).filter(Boolean))];
+          matches = tools.filter(tool => words.some(word => text(tool).includes(word)));
+        }
+        return matches.map(tool => tool.name).sort();
+      };
+      const queries = ['*', '', 'list events', 'update event', 'list events calendar', 'search messages list', 'search gmail messages',
+        'update document text', 'read sheet values', 'create spreadsheet', 'download file', 'find and replace in doc', 'export doc to pdf',
+        'append rows', 'search files', 'create folder', 'copy file', 'list my files', 'show folder contents', 'doc', 'sheet', 'read',
+        'send email', 'draft reply', 'attachment', 'free busy', 'out of office', 'comments', 'zzz qqq', 'get_doc_content', 'DRIVE file permissions'];
+      for (const [server, tools] of Object.entries(catalogs)) for (const query of queries) {
+        const catalog = createLazyToolCatalog(tools);
+        const first = parse(catalog.search({ query, limit: 20 }));
+        const names: string[] = [];
+        for (let offset = 0; offset < first.total; offset += 20) {
+          names.push(...parse(catalog.search({ query, offset, limit: 20 })).tools.map((tool: McpToolDefinition) => tool.name));
+        }
+        expect({ server, query, total: first.total, names: [...names].sort() })
+          .toEqual({ server, query, total: unranked(tools, query).length, names: unranked(tools, query) });
+        expect(new Set(names).size).toBe(names.length);
+      }
     });
     test('hide every disabled tool and list the full catalog for * without schemas', () => {
       expect(Object.keys(catalogs).sort()).toEqual(Object.keys(disabled).sort());
