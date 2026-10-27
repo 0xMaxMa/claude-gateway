@@ -22,6 +22,11 @@ describe('lazy gateway tools', () => {
     expect(parse(catalog.search({ query: 'ORIGINAL description 22' })).tools).toEqual([defs[22]]);
     expect(catalog.search({ limit: 21 }).isError).toBe(true);
   });
+  test('an empty or * query lists tools in name order, even names with an empty _ token', () => {
+    const catalog = createLazyToolCatalog(['zeta__x', 'omega_', 'beta', 'alpha'].map(name => ({ name, description: name, inputSchema: { type: 'object' } })));
+    const listed = (query: string) => parse(catalog.search({ query })).tools.map((tool: McpToolDefinition) => tool.name);
+    expect({ star: listed('*'), empty: listed('') }).toEqual({ star: ['alpha', 'beta', 'omega_', 'zeta__x'], empty: ['alpha', 'beta', 'omega_', 'zeta__x'] });
+  });
   // Queries workers sent to tool_search against real workspace-mcp catalogs; each of these
   // returned nothing under the every-word rule, costing the worker a whole model turn.
   test('ranks tools by matching words when no tool matches every word, and treats * as an empty query', () => {
@@ -117,8 +122,9 @@ describe('lazy gateway tools', () => {
         for (let offset = 0; offset < first.total; offset += 20) {
           names.push(...parse(catalog.search({ query, offset, limit: 20 })).tools.map((tool: McpToolDefinition) => tool.name));
         }
-        expect({ server, query, total: first.total, names: [...names].sort() })
-          .toEqual({ server, query, total: unranked(tools, query).length, names: unranked(tools, query) });
+        const listing = query === '' || query === '*';
+        expect({ server, query, total: first.total, names: listing ? names : [...names].sort() })
+          .toEqual({ server, query, total: unranked(tools, query).length, names: listing ? tools.map(tool => tool.name).sort((a, b) => a.localeCompare(b)) : unranked(tools, query) });
         expect(new Set(names).size).toBe(names.length);
       }
     });

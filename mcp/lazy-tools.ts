@@ -28,7 +28,7 @@ export function createLazyToolCatalog(tools: readonly McpToolDefinition[], exclu
       const query = rawQuery === '*' ? '' : rawQuery;
       const name = String(args.name ?? '').trim().toLowerCase();
       const text = (tool: McpToolDefinition) => `${tool.name} ${tool.description}`.toLowerCase();
-      const words = query.split(/\s+/);
+      const words = query ? query.split(/\s+/) : [];
       // Name hits outweigh description hits, and a whole name token outweighs a substring,
       // so "read sheet values" puts read_sheet_values above move_sheet_rows ("spreadsheet").
       const score = (tool: McpToolDefinition) => {
