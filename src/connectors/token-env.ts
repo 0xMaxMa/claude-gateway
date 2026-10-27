@@ -232,7 +232,14 @@ function writeAll(map: Record<string, string>): void {
     }
     throw err;
   }
-  for (const listener of writeListeners) listener();
+  // The write succeeded; a listener's failure is its own.
+  for (const listener of writeListeners) {
+    try {
+      listener();
+    } catch (err) {
+      console.error(`token-env: a secrets-written listener failed: ${(err as Error).message}`);
+    }
+  }
 }
 
 /**
