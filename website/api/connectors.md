@@ -204,7 +204,7 @@ curl -s -H "X-Api-Key: admin-key-456" \
 | `paused` | Present and `true` only while the connector is paused (see [`PATCH /:id`](#patch-apiv1connectorsid)). A paused connector still reports `connected: true` |
 | `secretExposure` | `"agent-readable"` when the connector's secret is still written into a session's MCP config file: for every agent when the entry has a `headersHelper` or `oauth` field or a `ws` transport, or for the agents in `exposedAgents` (see [Credential isolation](#credential-isolation)). Absent when the secret stays in the gateway. Also returned by `GET /api/v1/connectors/:id/status` |
 | `exposedAgents` | With `secretExposure`, when only some agents' live sessions write the secret: agents with at least one active session that could not use the gateway route (an app-agent container without Node, or a socket path too long to bind). Sorted agent ids; in memory, so empty again after a gateway restart until those sessions spawn |
-| `sidecar` | Present only for a [sidecar connector](#sidecar-connectors) whose process the gateway tracks: `{state, pid?, restarts, lastError?}`. Absent while the connector is paused. See [Status](#sidecar-status). Also returned by `GET /api/v1/connectors/:id/status` |
+| `sidecar` | Present only for a [sidecar connector](#sidecar-connectors) whose process the gateway tracks: `{state, pid?, restarts, lastError?}`. Absent while the connector is paused or not connected. See [Status](#sidecar-status). Also returned by `GET /api/v1/connectors/:id/status` |
 | `refresh` | **Absent when healthy.** Present only while a `gateway`-owned connector's background token refresh is failing — either transiently (a network error, DNS, a 5xx) or because the authorization server itself refused the grant. See below. Never present for any other owner: this gateway holds a `refresh_token` for none of them. |
 
 `connected` is computed purely from secret presence, and a transient refresh
@@ -633,7 +633,7 @@ Validation answers `400` with the reason when:
 
 The gateway checks the spec again whenever it reconciles, because `config.json` can be
 edited by hand. A hand-edited invalid spec is not started. Its status reads
-`state: "crashed"` with the reason in `lastError`.
+`state: "invalid"` with the reason in `lastError`.
 
 ### The PORT contract {#sidecar-port}
 
@@ -651,10 +651,13 @@ to know it.
 
 ### Lifecycle {#sidecar-lifecycle}
 
-The gateway runs one process per sidecar entry that is not paused. It converges on that
-set whenever connectors change:
+The gateway runs one process per sidecar entry that is connected and not paused.
+Connected means what `connected` means in the [list](#get-apiv1connectors): every
+secret the entry declares is stored. It converges on that set whenever connectors
+change:
 
 - on `POST /api/v1/connectors/custom` and `POST /:id/oauth/receive`;
+- whenever the gateway writes a connector secret: `POST /:id/connect`, a sign-in, a token refresh, or a `DELETE /:id` that clears secrets;
 - on any `config.json` change to `gateway.customConnectors`, including a hand edit the gateway reloads;
 - at boot.
 
@@ -666,15 +669,16 @@ rotates the token.
 These stop the process:
 
 - `PATCH /:id` with `paused: true`. `paused: false` starts it again.
+- a plain `DELETE /:id` on a `static` or `gateway`-owned connector. It clears the secrets and keeps the entry, so the connector is no longer connected. Storing the secret again (`POST /:id/connect` for a `static` owner) starts it again on a fresh port.
 - a `DELETE /:id` that removes the entry. That is the default for `none` and `external` owners, and `?remove=true` for any owner.
 - gateway shutdown.
 
-A stop sends `SIGTERM` to the sidecar's whole process group, then `SIGKILL` after
-5 seconds. Pausing or removing the entry also deletes the sidecar's working directory.
+A `none`-owner connector declares no secrets, so it is always connected. Its process
+runs until the connector is paused or removed.
 
-A plain `DELETE /:id` on a `static` or `gateway`-owned connector clears its secrets and
-keeps the entry. The sidecar keeps running, and the connector reports
-`connected: false`. Use `?remove=true` or pause it to stop the process.
+A stop sends `SIGTERM` to the sidecar's whole process group, then `SIGKILL` after
+5 seconds. Pausing, disconnecting or removing the connector also deletes the sidecar's
+working directory.
 
 When the process exits on its own, or fails to start, the gateway restarts it after a
 backoff of 1, 2, 5, 10, 30 and then 60 seconds. A run that lasts 30 seconds resets the
@@ -719,17 +723,19 @@ to a sidecar connector:
 
 | Field | Description |
 |-------|-------------|
-| `state` | `starting` (spawned, or between a stop and the next start), `ready`, or `crashed` (waiting out a backoff, or an invalid spec) |
+| `state` | `starting` (spawned, or between a stop and the next start), `ready`, `crashed` (waiting out a backoff), or `invalid` (a hand-edited spec that fails validation; nothing runs until `config.json` is fixed) |
 | `pid` | The process id while `starting` or `ready` |
 | `restarts` | Restarts since the gateway started tracking this sidecar: after a crash, a failed start or a spec change. Back to `0` after a pause and resume, or a gateway restart |
 | `lastError` | The last failure, such as `exited with code 1` or `not listening on its port within 120000ms`. Present only while the state is not `ready` |
 
-The block is absent while the connector is paused. It never carries env values or
-headers.
+The block is absent while the connector is paused or not connected. It never carries
+env values or headers.
 
 An agent request that reaches the proxy while the sidecar is `starting` waits until it is
 ready or fails, up to `readyTimeoutMs`. While it is `crashed` the proxy answers
-`503` with `Retry-After: 5`.
+`503` with `Retry-After: 5`. While it is `invalid` the proxy answers `500` with
+`{"error": "Connector sidecar configuration is invalid: <reason>"}` and no
+`Retry-After`, since waiting does not fix it.
 
 ### uv and uvx {#sidecar-uv}
 
@@ -755,7 +761,6 @@ It arrives only in the request headers the proxy adds to each forwarded request.
 - A legacy app-agent session runs its connectors inside its container. The sidecar listens on the host's loopback, which the container cannot reach, so a sidecar connector does not work there.
 - A gateway that is killed with `SIGKILL` (or by the OOM killer) cannot stop its sidecars, and they keep running. The gateway records each sidecar's process group in a `pgid` file in its working directory. At the next boot it kills each recorded group whose leader still runs the recorded command line, or whose leader has exited while other members remain. The same check runs before each start of that sidecar. Until the gateway boots again, the orphan keeps running.
 - [Connector resources](#connector-resources) need a `config.url`, so `resourcesPath` cannot be set on a sidecar connector.
-- `DELETE` without `?remove=true` keeps the process of a `static` or `gateway`-owned sidecar running (see [Lifecycle](#sidecar-lifecycle)).
 
 ### Example {#sidecar-example}
 
