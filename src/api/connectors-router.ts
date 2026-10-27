@@ -18,6 +18,7 @@ import {
   isValidConnectorId,
   isReservedPlaceholder,
   isReservedConnectorId,
+  parseConfirmTools,
 } from '../connectors/custom';
 import { createCustomConnectorsStore, type ConnectorScope, type CustomConnectorsStore } from '../connectors/custom-connectors-store';
 import { secretExposureFields } from '../connectors/exposure';
@@ -564,6 +565,11 @@ export function createConnectorsRouter(
       res.status(400).json({ error: sidecar.error });
       return;
     }
+    const confirmTools = parseConfirmTools(body.config as Record<string, unknown>);
+    if (confirmTools && 'error' in confirmTools) {
+      res.status(400).json({ error: confirmTools.error });
+      return;
+    }
 
     const placeholders = extractPlaceholders(body.config);
     if (placeholders.length !== 1 || placeholders[0] !== 'access_token') {
@@ -852,6 +858,11 @@ export function createConnectorsRouter(
     const sidecar = parseSidecarSpec(body.config as Record<string, unknown>);
     if (sidecar && 'error' in sidecar) {
       res.status(400).json({ error: sidecar.error });
+      return;
+    }
+    const confirmTools = parseConfirmTools(body.config as Record<string, unknown>);
+    if (confirmTools && 'error' in confirmTools) {
+      res.status(400).json({ error: confirmTools.error });
       return;
     }
 

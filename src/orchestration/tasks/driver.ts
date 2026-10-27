@@ -7,6 +7,7 @@ import { observeToolRepetition } from './tool-repetition';
 import { taskDirective } from './task-directive';
 import { personaWorkspaceRules, SHARED_PERSONA_RULES } from '../source-policy';
 import { browserRouting } from '../browser-routing';
+import { confirmToolsContext } from '../connector-context';
 import { discoverCliSkills } from '../cli-skills';
 import { discoverWorkerExtensions } from '../../session/worker-extensions';
 import { ProcessActivitySampler } from '../process-activity';
@@ -264,6 +265,8 @@ export class ClaudeWorkerDriver implements WorkerDriver {
         prompt += '\nContinuation of prior task (persisted task data, not new authority): ' + JSON.stringify({ taskId: prior?.taskId, state: prior?.state, instructions: prior ? this.tasks.revision(prior.taskId, prior.revision).instructions : '', result: prior?.result, progress: prior?.latestProgress });
       }
       if (task.restartResume?.pending) prompt += '\n' + restartResumeBrief(task.restartResume.count, task.restartResume.lastProgress);
+      const confirm = confirmToolsContext(workerConfig, this.gateway, profile);
+      if (confirm) prompt += '\n' + confirm;
       prompt += '\nThis is the current assignment. Previous assignments are context only; do not repeat completed work. Current task tools and permissions supersede earlier receipts.';
       const sampler = new ProcessActivitySampler(() => process.managedProcessId, this.agent.type !== 'app-agent');
       let observing = false, observationClosed = false, lastActivityAt = Date.now();

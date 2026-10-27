@@ -502,6 +502,22 @@ describe('sidecar connectors through the routes and the proxy', () => {
     proxy.revokeConnectorGrant(grant);
   });
 
+  it('stores confirmTools from a push, rejects an invalid list, and does not restart the sidecar when only confirmTools changes', async () => {
+    const bad = await push({ ...sidecarConfig(), confirmTools: ['send_gmail_message', 'send_gmail_message'] });
+    expect({ status: bad.status, error: bad.body.error }).toEqual({ status: 400, error: 'confirmTools must not repeat a tool name' });
+    expect((await push({ ...sidecarConfig(), confirmTools: ['manage_event'] })).status).toBe(200);
+    const supervisor = sidecars.connectorSidecars.get();
+    const pid = await until(() => supervisor.statusOf('fx')?.state === 'ready' && supervisor.statusOf('fx')!.pid);
+    expect((await push({ ...sidecarConfig(), confirmTools: ['manage_event', 'manage_focus_time'] }, 'fixture-access-token-2')).status).toBe(200);
+    expect(supervisor.statusOf('fx')).toEqual({ state: 'ready', pid, restarts: 0 });
+    const stored = JSON.parse(fs.readFileSync(cfgPath, 'utf8')).gateway.customConnectors.fx.config;
+    expect(stored.confirmTools).toEqual(['manage_event', 'manage_focus_time']);
+    const config = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+    const { servers, grant } = proxy.agentFacingConnectors({ id: 'a' }, config, require('../../src/connectors/resolve').resolveEnabledConnectors({}, config.gateway.customConnectors));
+    proxy.revokeConnectorGrant(grant);
+    expect(Object.keys(servers.fx as object).sort()).toEqual(['headers', 'type', 'url']);
+  });
+
   it('answers 503 with Retry-After, not a permanent 403 or a config error, while a sidecar is down', async () => {
     const errors: string[] = [];
     const spy = jest.spyOn(console, 'error').mockImplementation((...args: unknown[]) => { errors.push(args.join(' ')); });

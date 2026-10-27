@@ -9,7 +9,7 @@
 import type { AgentConfig, CustomConnectorEntry } from '../types';
 import { type ConnectorStatus } from './types';
 import { parseCounter, readTokenEnv } from './token-env';
-import { customSecretKey, substitutePlaceholders } from './custom';
+import { customSecretKey, substitutePlaceholders, withoutConfirmTools } from './custom';
 import { secretExposureFields } from './exposure';
 import { connectorSidecars } from './sidecar';
 import {
@@ -96,7 +96,7 @@ export function resolveEnabledConnectors(
       }
       if (!allPresent) continue; // enabled but not fully connected — skip
 
-      out[id] = withSidecarUrl(id, substitutePlaceholders(entry.config, secrets));
+      out[id] = withSidecarUrl(id, withoutConfirmTools(substitutePlaceholders(entry.config, secrets)));
     } catch (err) {
       // A malformed pasted config (see CustomConnectorEntry's doc comment:
       // admin-trusted, not code-reviewed) must not take down every other
