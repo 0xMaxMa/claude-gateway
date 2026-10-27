@@ -137,6 +137,8 @@ export class SidecarSupervisor {
   private readonly stopping = new Map<ChildProcess, Promise<void>>();
   /** Aborted by close(), so a uv download in progress does not hold up shutdown. */
   private readonly shutdown = new AbortController();
+  /** Bumped on every secret write, so the output mask stops trusting its cached secrets. */
+  private secretWrites = 0;
 
   constructor(options: SidecarSupervisorOptions) {
     this.options = {
@@ -189,6 +191,7 @@ export class SidecarSupervisor {
 
   /** Reconcile the last entries again: a connect or disconnect changes only the secrets. */
   secretsChanged(): void {
+    this.secretWrites++;
     this.reconcile(this.entries);
   }
 
@@ -392,6 +395,7 @@ export class SidecarSupervisor {
       if ((sidecar.phase as { child?: ChildProcess }).child !== child) return;
       // The leader is gone but what it started (uvx's python) may still hold the port.
       signalGroup(child, 'SIGKILL');
+      this.forgetGroup(sidecar.id, child.pid);
       const ranFor = sidecar.phase.kind === 'ready' ? Date.now() - sidecar.phase.since : 0;
       if (ranFor >= this.options.stableMs) sidecar.failures = 0;
       this.failed(sidecar, key, `exited ${signal ? `by ${signal}` : `with code ${code}`}`);
@@ -485,12 +489,12 @@ export class SidecarSupervisor {
     let windowStart = Date.now();
     let lines = 0;
     let suppressed = 0;
-    let secrets: { at: number; values: string[] } | undefined;
+    let secrets: { at: number; writes: number; values: string[] } | undefined;
     const secretValues = (): string[] => {
-      if (!secrets || Date.now() - secrets.at > 10_000) {
+      if (!secrets || secrets.writes !== this.secretWrites || Date.now() - secrets.at > 10_000) {
         const env = readTokenEnv();
         const mark = customSecretKey(sidecar.id, '');
-        secrets = { at: Date.now(), values: Object.entries(env).filter(([name, value]) => name.startsWith(mark) && value.length >= 8).map(([, value]) => value) };
+        secrets = { at: Date.now(), writes: this.secretWrites, values: Object.entries(env).filter(([name, value]) => name.startsWith(mark) && value.length >= 8).map(([, value]) => value) };
       }
       return secrets.values;
     };
@@ -515,7 +519,12 @@ export class SidecarSupervisor {
         if (partial.length > MAX_LOG_LINE) { emit(partial); partial = ''; }
         for (const part of parts) emit(part);
       });
-      stream?.on('end', () => { emit(partial); partial = ''; });
+      stream?.on('end', () => {
+        emit(partial);
+        partial = '';
+        if (suppressed) this.options.log(`${prefix} output: ${suppressed} line(s) suppressed`);
+        suppressed = 0;
+      });
     }
   }
 }

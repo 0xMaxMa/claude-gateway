@@ -35,9 +35,11 @@ if (process.env.USED_PORTS) {
   fs.appendFileSync(process.env.USED_PORTS, process.env.PORT + '\\n');
 }
 if (process.env.LONG_LINE) process.stderr.write('x'.repeat(1995) + process.env.LONG_LINE + '\\n');
+if (process.env.FLOOD) { for (let i = 0; i < Number(process.env.FLOOD); i++) process.stderr.write('flood ' + i + '\\n'); return; }
 if (process.env.NEVER_LISTEN) { setInterval(() => {}, 1000); return; }
 const server = http.createServer((req, res) => {
   if (req.url === '/exit') { res.end('bye'); setTimeout(() => process.exit(3), 10); return; }
+  if (req.url.startsWith('/say/')) { process.stderr.write(decodeURIComponent(req.url.slice(5)) + '\\n'); res.end(); return; }
   let body = '';
   req.on('data', c => { body += c; });
   req.on('end', () => {
@@ -140,7 +142,8 @@ describe('parseSidecarSpec', () => {
 });
 
 describe('SidecarSupervisor', () => {
-  const { SidecarSupervisor } = require('../../src/connectors/sidecar') as typeof import('../../src/connectors/sidecar');
+  const { SidecarSupervisor, connectorSidecars } = require('../../src/connectors/sidecar') as typeof import('../../src/connectors/sidecar');
+  const { setSecret } = require('../../src/connectors/token-env') as typeof import('../../src/connectors/token-env');
   let supervisor: InstanceType<typeof SidecarSupervisor>;
   let logs: string[];
 
@@ -433,6 +436,51 @@ describe('SidecarSupervisor', () => {
     await readyUrl('fx');
     await until(() => logs.some(l => l.includes('fixture: Authorization')));
     expect(logs).toContainEqual('connector-sidecar: connector=fx output: fixture: Authorization: Bearer [redacted]');
+  });
+
+  it('masks a secret written while the sidecar runs', async () => {
+    const tokenEnv = path.join(tmpDir, 'rotated.env');
+    fs.writeFileSync(tokenEnv, `CUSTOM__fx__access_token=${TOKEN}\n`);
+    process.env.GATEWAY_MCP_TOKEN_ENV_PATH = tokenEnv;
+    const live = connectorSidecars.configure({ runtimeRoot: tmpDir, backoffMs: [50], stopGraceMs: 500, log: line => logs.push(line) });
+    try {
+      live.reconcile({ fx: sidecarEntry(fixtureSpec()) });
+      const url = await until(() => live.urlOf('fx'));
+      await until(() => logs.some(l => l.includes('fixture: Authorization')));
+      setSecret('CUSTOM__fx__access_token', 'rotated-secret-value');
+      await fetch(new URL('/say/said%20rotated-secret-value', url));
+      expect(await until(() => logs.find(l => l.includes('output: said')))).toBe('connector-sidecar: connector=fx output: said [redacted]');
+    } finally {
+      await live.close();
+      process.env.GATEWAY_MCP_TOKEN_ENV_PATH = connectedEnv;
+    }
+  });
+
+  it('reports the lines it suppressed when the output ends', async () => {
+    const once = new SidecarSupervisor({ runtimeRoot: tmpDir, backoffMs: [60_000], stopGraceMs: 500, log: line => logs.push(line) });
+    try {
+      once.reconcile({ fx: sidecarEntry(fixtureSpec({ FLOOD: '130' })) });
+      await until(() => logs.some(l => l.includes('connector=fx exited')));
+      await new Promise(r => setTimeout(r, 100));
+      expect(logs.filter(l => l.includes('suppressed'))).toEqual(['connector-sidecar: connector=fx output: 10 line(s) suppressed']);
+    } finally {
+      await once.close();
+    }
+  });
+
+  it('forgets the process group record of a sidecar that crashed', async () => {
+    const once = new SidecarSupervisor({ runtimeRoot: tmpDir, backoffMs: [60_000], stopGraceMs: 500, log: line => logs.push(line) });
+    try {
+      once.reconcile({ fx: sidecarEntry(fixtureSpec()) });
+      const url = await until(() => once.urlOf('fx'));
+      const record = path.join(tmpDir, 'sidecars', 'fx', 'pgid');
+      expect(fs.existsSync(record)).toBe(true);
+      await fetch(new URL('/exit', url));
+      await until(() => once.statusOf('fx')?.state === 'crashed');
+      expect(fs.existsSync(record)).toBe(false);
+    } finally {
+      await once.close();
+    }
   });
 });
 
