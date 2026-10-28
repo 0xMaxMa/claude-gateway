@@ -24,7 +24,7 @@ import * as net from 'net';
 import * as os from 'os';
 import * as path from 'path';
 import type { CustomConnectorEntry } from './types';
-import { extractPlaceholders, hasAllSecrets, isStreamableHttpType, customSecretKey } from './custom';
+import { extractPlaceholders, hasAllSecrets, isStreamableHttpType, customSecretKey, isValidConnectorId } from './custom';
 import { onSecretsWritten, readTokenEnv } from './token-env';
 import { isUvCommand, resolveUvCommand } from './uv-runtime';
 
@@ -160,6 +160,10 @@ export class SidecarSupervisor {
     const desired = new Map<string, SidecarSpec | { error: string }>();
     let tokenEnv: Record<string, string> | undefined;
     for (const [id, entry] of Object.entries(entries ?? {})) {
+      if (!isValidConnectorId(id)) {
+        this.options.log(`connector-sidecar: invalid persisted connector id rejected`);
+        continue;
+      }
       if (!entry || entry.paused === true || !entry.config || typeof entry.config !== 'object') continue;
       const parsed = parseSidecarSpec(entry.config);
       if (parsed && isConnected(id, entry, tokenEnv ??= readTokenEnv())) desired.set(id, parsed);
@@ -303,6 +307,7 @@ export class SidecarSupervisor {
   }
 
   private workDir(id: string): string {
+    if (!isValidConnectorId(id)) throw new Error('invalid connector id for sidecar directory');
     return path.join(this.options.runtimeRoot, 'sidecars', id);
   }
 
@@ -363,7 +368,7 @@ export class SidecarSupervisor {
     if (!spec) return;
     const key = sidecar.key;
     sidecar.phase = { kind: 'starting' };
-    let child: ChildProcess;
+    let child: ChildProcess | undefined;
     let port: number;
     try {
       const command = isUvCommand(spec.command)
@@ -389,9 +394,11 @@ export class SidecarSupervisor {
         fs.writeFileSync(path.join(cwd, PGID_FILE), JSON.stringify({ pgid: child.pid, command, args: spec.args.join(' ') }), { mode: 0o600 });
       }
     } catch (err) {
+      if (child?.pid !== undefined) await this.stop(child);
       this.failed(sidecar, key, (err as Error).message);
       return;
     }
+    if (!child) return;
     sidecar.phase = { kind: 'starting', child, port };
     this.pipeOutput(sidecar, child);
     let exited = false;
@@ -527,14 +534,23 @@ export class SidecarSupervisor {
     };
     for (const stream of [child.stdout, child.stderr]) {
       let partial = '';
+      let omitted = false;
       stream?.on('data', (chunk: Buffer) => {
-        const parts = (partial + chunk.toString('utf8')).split('\n');
-        partial = parts.pop() ?? '';
-        if (partial.length > MAX_LOG_LINE) { emit(partial); partial = ''; }
-        for (const part of parts) emit(part);
+        const parts = chunk.toString('utf8').split('\n');
+        for (const [index, part] of parts.entries()) {
+          if (!omitted) {
+            partial += part;
+            if (partial.length > MAX_LOG_LINE) { partial = ''; omitted = true; }
+          }
+          if (index < parts.length - 1) {
+            emit(omitted ? '[line omitted: exceeds 2000 characters]' : partial);
+            partial = '';
+            omitted = false;
+          }
+        }
       });
       stream?.on('end', () => {
-        emit(partial);
+        emit(omitted ? '[line omitted: exceeds 2000 characters]' : partial);
         partial = '';
         if (suppressed) this.options.log(`${prefix} output: ${suppressed} line(s) suppressed`);
         suppressed = 0;
@@ -620,8 +636,7 @@ function listProcesses(): Promise<Array<{ pid: number; pgid: number; command: st
  * MCP server answers a bare GET with 405 or 401) AND every process listening on the
  * port is in the sidecar's process group.
  *
- * What this does not cover: a host without lsof skips the ownership check, so there
- * any HTTP server that wins the port race passes; a process that binds the port after
+ * What this does not cover: a process that binds the port after
  * the sidecar became ready and the sidecar released it; and anything the sidecar's
  * own command starts in its group.
  */
@@ -648,11 +663,24 @@ function answersHttp(port: number, mcpPath: string): Promise<boolean> {
   });
 }
 
-/** True when every process listening on `port` is in process group `pgid`; also true when lsof is not installed. */
+/** True when every process listening on `port` is in process group `pgid`; missing inspection fails closed. */
 function listenerInGroup(port: number, pgid: number): Promise<boolean> {
   return new Promise(resolve => {
     execFile('lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-Fp'], (err, stdout) => {
-      if ((err as NodeJS.ErrnoException | null)?.code === 'ENOENT') { resolve(true); return; }
+      if ((err as NodeJS.ErrnoException | null)?.code === 'ENOENT' && process.platform === 'linux') {
+        execFile('ss', ['-H', '-ltnp', `( sport = :${port} )`], (ssError, ssOutput) => {
+          if (ssError) { resolve(false); return; }
+          const rows = ssOutput.trim().split('\n').filter(Boolean);
+          if (!rows.length || rows.some(row => !/\bpid=\d+\b/.test(row))) { resolve(false); return; }
+          const listeners = rows.flatMap(row => [...row.matchAll(/\bpid=(\d+)\b/g)].map(match => Number(match[1])));
+          listProcesses().then(
+            processes => resolve(listeners.length > 0 && listeners.every(pid => processes.some(p => p.pid === pid && p.pgid === pgid))),
+            () => resolve(false),
+          );
+        });
+        return;
+      }
+      if (err) { resolve(false); return; }
       const listeners = stdout.split('\n').filter(line => line.startsWith('p')).map(line => Number(line.slice(1)));
       if (!listeners.length) { resolve(false); return; }
       listProcesses().then(

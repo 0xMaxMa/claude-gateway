@@ -35,6 +35,10 @@ if (process.env.USED_PORTS) {
   fs.appendFileSync(process.env.USED_PORTS, process.env.PORT + '\\n');
 }
 if (process.env.LONG_LINE) process.stderr.write('x'.repeat(1995) + process.env.LONG_LINE + '\\n');
+if (process.env.SPLIT_SECRET) {
+  process.stderr.write('x'.repeat(1999) + process.env.SPLIT_SECRET.slice(0, 4));
+  setTimeout(() => process.stderr.write(process.env.SPLIT_SECRET.slice(4) + '\\n'), 25);
+}
 if (process.env.FLOOD) { for (let i = 0; i < Number(process.env.FLOOD); i++) process.stderr.write('flood ' + i + '\\n'); return; }
 if (process.env.NEVER_LISTEN) { setInterval(() => {}, 1000); return; }
 const server = http.createServer((req, res) => {
@@ -48,7 +52,7 @@ const server = http.createServer((req, res) => {
   });
 });
 server.listen(Number(process.env.PORT), '127.0.0.1');
-process.stderr.write('fixture: Authorization: Bearer leaked-in-a-log-line\\n');
+if (!process.env.SPLIT_SECRET) process.stderr.write('fixture: Authorization: Bearer leaked-in-a-log-line\\n');
 `;
 
 /** Starts a child in its process group (as uvx starts python), records its pid, then exits. */
@@ -433,11 +437,39 @@ describe('SidecarSupervisor', () => {
     process.env.GATEWAY_MCP_TOKEN_ENV_PATH = tokenEnv;
     try {
       supervisor.reconcile({ fx: sidecarEntry(fixtureSpec({ LONG_LINE: secret })) });
-      const line = await until(() => logs.find(l => l.includes('output: xxx')));
-      expect({ leaked: line.includes('ya29'), tail: line.slice(-6) }).toEqual({ leaked: false, tail: 'x[reda' });
+      const line = await until(() => logs.find(l => l.includes('line omitted: exceeds')));
+      expect(line).toBe('connector-sidecar: connector=fx output: [line omitted: exceeds 2000 characters]');
     } finally {
       process.env.GATEWAY_MCP_TOKEN_ENV_PATH = connectedEnv;
     }
+  });
+
+  it('does not emit either half of a secret split across long output chunks', async () => {
+    const tokenEnv = path.join(tmpDir, 'split-masking.env');
+    const secret = 'unique-secret-split-across-chunks';
+    fs.writeFileSync(tokenEnv, `CUSTOM__fx__access_token=${secret}\n`);
+    process.env.GATEWAY_MCP_TOKEN_ENV_PATH = tokenEnv;
+    try {
+      supervisor.reconcile({ fx: sidecarEntry(fixtureSpec({ SPLIT_SECRET: secret })) });
+      await readyUrl('fx');
+      await until(() => logs.some(line => line.includes('line omitted: exceeds')));
+      await new Promise(r => setTimeout(r, 100));
+      expect(logs.join('\n')).not.toContain(secret.slice(0, 4));
+      expect(logs.join('\n')).not.toContain(secret.slice(4));
+    } finally {
+      process.env.GATEWAY_MCP_TOKEN_ENV_PATH = connectedEnv;
+    }
+  });
+
+  it('does not remove a directory outside sidecars for a malformed persisted id', async () => {
+    const victim = path.join(tmpDir, 'victim');
+    fs.mkdirSync(victim, { recursive: true });
+    fs.writeFileSync(path.join(victim, 'marker'), 'keep');
+    supervisor.reconcile({ '../victim': { ...sidecarEntry(fixtureSpec()), secretNames: [] } });
+    await new Promise(r => setTimeout(r, 100));
+    supervisor.reconcile({});
+    await new Promise(r => setTimeout(r, 100));
+    expect(fs.readFileSync(path.join(victim, 'marker'), 'utf8')).toBe('keep');
   });
 
   it('does not log a start for a command that cannot be spawned', async () => {
@@ -569,6 +601,67 @@ describe('a stop queued in the same tick as a failed spawn', () => {
     const stopping = (supervisor as unknown as { stopping: Map<unknown, unknown> }).stopping.size;
     const closed = await Promise.race([supervisor.close().then(() => 'closed'), new Promise(r => setTimeout(() => r('hung'), 400))]);
     expect({ state, stopping, closed }).toEqual({ state: 'ready', stopping: 0, closed: 'closed' });
+  });
+});
+
+describe('sidecar failure boundaries', () => {
+  afterEach(() => {
+    jest.dontMock('child_process');
+    jest.dontMock('fs');
+    jest.resetModules();
+  });
+
+  it('does not trust an HTTP listener when lsof is unavailable', async () => {
+    jest.resetModules();
+    jest.doMock('child_process', () => {
+      const actual = jest.requireActual('child_process') as typeof import('child_process');
+      return { ...actual, execFile: ((file: string, args: string[], callback: (...values: unknown[]) => void) => {
+        if (file === 'lsof') { callback(Object.assign(new Error('missing'), { code: 'ENOENT' }), ''); return; }
+        return (actual.execFile as unknown as (...values: unknown[]) => unknown)(file, args, callback);
+      }) };
+    });
+    const { SidecarSupervisor } = require('../../src/connectors/sidecar') as typeof import('../../src/connectors/sidecar');
+    const supervisor = new SidecarSupervisor({ runtimeRoot: fs.mkdtempSync(path.join(tmpDir, 'lsof-')), stopGraceMs: 500, log: () => {} });
+    let foreign: http.Server | undefined;
+    try {
+      supervisor.reconcile({ fx: sidecarEntry(fixtureSpec({ NEVER_LISTEN: '1' })) });
+      const pid = await until(() => supervisor.statusOf('fx')?.pid);
+      expect(pid).toBeGreaterThan(0);
+      const port = await until(() => (supervisor as unknown as { sidecars: Map<string, { phase: { port?: number } }> }).sidecars.get('fx')?.phase.port);
+      foreign = http.createServer((_req, res) => res.end('{}'));
+      await new Promise<void>(resolve => foreign!.listen(port, '127.0.0.1', resolve));
+      await new Promise(r => setTimeout(r, 350));
+      expect(supervisor.urlOf('fx')).toBeUndefined();
+    } finally {
+      await supervisor.close();
+      if (foreign) await new Promise<void>(resolve => foreign!.close(() => resolve()));
+    }
+  });
+
+  it('kills a spawned child if writing its group record fails', async () => {
+    let spawnedPid: number | undefined;
+    jest.resetModules();
+    jest.doMock('child_process', () => {
+      const actual = jest.requireActual('child_process') as typeof import('child_process');
+      return { ...actual, spawn: (...args: Parameters<typeof actual.spawn>) => {
+        const child = actual.spawn(...args); spawnedPid = child.pid; return child;
+      } };
+    });
+    jest.doMock('fs', () => {
+      const actual = jest.requireActual('fs') as typeof import('fs');
+      return { ...actual, writeFileSync: ((file: fs.PathOrFileDescriptor, ...args: unknown[]) => {
+        if (typeof file === 'string' && path.basename(file) === 'pgid') throw new Error('record write failed');
+        return (actual.writeFileSync as (...values: unknown[]) => void)(file, ...args);
+      }) };
+    });
+    const { SidecarSupervisor } = require('../../src/connectors/sidecar') as typeof import('../../src/connectors/sidecar');
+    const supervisor = new SidecarSupervisor({ runtimeRoot: tmpDir, backoffMs: [60_000], stopGraceMs: 500, log: () => {} });
+    try {
+      supervisor.reconcile({ fx: sidecarEntry(fixtureSpec()) });
+      await until(() => supervisor.statusOf('fx')?.state === 'crashed');
+      expect(spawnedPid).toBeDefined();
+      await until(() => !alive(spawnedPid));
+    } finally { await supervisor.close(); }
   });
 });
 
