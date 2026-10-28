@@ -332,6 +332,87 @@ services:
 `.trim();
         expect(() => parseAppYaml(y, dir)).not.toThrow();
       });
+
+      it('accepts a boolean isolate_memory and rejects anything else (#601)', () => {
+        const y = (value: string) => `
+apiVersion: apps.getpod.ai/v1
+name: my-app
+version: 1.0.0
+services:
+  web:
+    image: nginx:1.25
+  agent:
+    path: ./agent
+    name: my-agent-bot
+    isolate_memory: ${value}
+`.trim();
+        expect(() => parseAppYaml(y('true'), dir)).not.toThrow();
+        expect(() => parseAppYaml(y('false'), dir)).not.toThrow();
+        for (const bad of ['"true"', 'yes-please', '1', '{ enabled: true }']) {
+          expect(() => parseAppYaml(y(bad), dir)).toThrow('"isolate_memory" must be true or false');
+        }
+        // The pre-rename key is an unknown field like any other, never a silent no-op.
+        expect(() => parseAppYaml(y('true').replace('isolate_memory', 'multi_tenant'), dir))
+          .toThrow('invalid field "multi_tenant" — only "path", "name", "isolate_memory", "disable_archive" and "env" are allowed');
+      });
+
+      it('accepts a boolean disable_archive and rejects anything else (#609)', () => {
+        const y = (value: string) => `
+apiVersion: apps.getpod.ai/v1
+name: my-app
+version: 1.0.0
+services:
+  web:
+    image: nginx:1.25
+  agent:
+    path: ./agent
+    name: my-agent-bot
+    disable_archive: ${value}
+`.trim();
+        expect(() => parseAppYaml(y('true'), dir)).not.toThrow();
+        expect(() => parseAppYaml(y('false'), dir)).not.toThrow();
+        for (const bad of ['"true"', 'yes-please', '1', '{ enabled: true }']) {
+          expect(() => parseAppYaml(y(bad), dir)).toThrow('"disable_archive" must be true or false');
+        }
+      });
+
+      it('rejects an agent path that is the app dir or leaves it (#618)', () => {
+        const y = (p: string) => `
+apiVersion: apps.getpod.ai/v1
+name: my-app
+version: 1.0.0
+services:
+  web:
+    image: nginx:1.25
+  agent:
+    path: "${p}"
+    name: my-agent-bot
+`.trim();
+        for (const ok of ['./agent', 'agent/', 'a/../agent']) expect(() => parseAppYaml(y(ok), dir)).not.toThrow();
+        for (const bad of ['.', './', '..', '../other', 'agent/../..', '/etc']) {
+          expect(() => parseAppYaml(y(bad), dir)).toThrow('"path" must be a directory inside the app, such as ./agent');
+        }
+      });
+
+      it('accepts env as a list of variable names and rejects anything else (#618)', () => {
+        const y = (value: string) => `
+apiVersion: apps.getpod.ai/v1
+name: my-app
+version: 1.0.0
+services:
+  web:
+    image: nginx:1.25
+  agent:
+    path: ./agent
+    name: my-agent-bot
+    env: ${value}
+`.trim();
+        expect(() => parseAppYaml(y('[AGENT_API_TOKEN]'), dir)).not.toThrow();
+        expect(() => parseAppYaml(y('[]'), dir)).not.toThrow();
+        for (const bad of ['AGENT_API_TOKEN', '[AGENT_API_TOKEN=x]', '["1TOKEN"]', '[1]', '{ AGENT_API_TOKEN: x }', '[A, A]']) {
+          expect(() => parseAppYaml(y(bad), dir)).toThrow('"env" must be a list of distinct environment variable names');
+        }
+      });
     });
   });
 
@@ -837,6 +918,62 @@ services:
       expect(result.agentDeclaration).toEqual({
         path: './agent',
         name: 'agent-note-bot',
+      });
+    });
+
+    it('carries isolate_memory: true into agentDeclaration.isolateMemory and nothing else (#601)', () => {
+      expect(generate(yamlWithAgent + '\n    isolate_memory: true', 'agent-note').agentDeclaration)
+        .toEqual({ path: './agent', name: 'agent-note-bot', isolateMemory: true });
+      expect(generate(yamlWithAgent + '\n    isolate_memory: false', 'agent-note').agentDeclaration)
+        .toEqual({ path: './agent', name: 'agent-note-bot' });
+    });
+
+    it('carries disable_archive: true into agentDeclaration.disableArchive, independent of isolate_memory (#609)', () => {
+      expect(generate(yamlWithAgent + '\n    disable_archive: true', 'agent-note').agentDeclaration)
+        .toEqual({ path: './agent', name: 'agent-note-bot', disableArchive: true });
+      expect(generate(yamlWithAgent + '\n    disable_archive: false', 'agent-note').agentDeclaration)
+        .toEqual({ path: './agent', name: 'agent-note-bot' });
+      expect(generate(yamlWithAgent + '\n    disable_archive: true\n    isolate_memory: true', 'agent-note').agentDeclaration)
+        .toEqual({ path: './agent', name: 'agent-note-bot', isolateMemory: true, disableArchive: true });
+    });
+
+    describe('env (#618)', () => {
+      const yamlWithSecrets = (agentEnv: string) => `
+apiVersion: apps.getpod.ai/v1
+name: agent-note
+version: 1.0.0
+services:
+  app:
+    image: node:20-alpine
+    environment:
+      - DB_PASSWORD
+      - NEXTAUTH_SECRET=!generate:hex:32
+      - AGENT_API_TOKEN=!generate:hex:32
+      - LOG_LEVEL=info
+  agent:
+    path: ./agent
+    name: agent-note-bot
+${agentEnv}`.trimEnd();
+
+      it('carries a declared env allowlist into agentDeclaration.env', () => {
+        expect(generate(yamlWithSecrets('    env: [AGENT_API_TOKEN, DB_PASSWORD]'), 'agent-note').agentDeclaration)
+          .toEqual({ path: './agent', name: 'agent-note-bot', env: ['AGENT_API_TOKEN', 'DB_PASSWORD'] });
+      });
+
+      it('leaves env off the declaration when none or an empty list is declared', () => {
+        expect(generate(yamlWithSecrets(''), 'agent-note').agentDeclaration)
+          .toEqual({ path: './agent', name: 'agent-note-bot' });
+        expect(generate(yamlWithSecrets('    env: []'), 'agent-note').agentDeclaration)
+          .toEqual({ path: './agent', name: 'agent-note-bot' });
+      });
+
+      it('rejects a name that is not one of the app\'s secrets', () => {
+        // LOG_LEVEL is a static compose value, never written to .env, so the
+        // agent could not receive it; a typo must not pass silently either.
+        for (const name of ['LOG_LEVEL', 'AGENT_API_TOKNE']) {
+          expect(() => generate(yamlWithSecrets(`    env: [${name}]`), 'agent-note'))
+            .toThrow(`Agent service declaration: env "${name}" is not a secret declared by another service`);
+        }
       });
     });
 

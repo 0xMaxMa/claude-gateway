@@ -1,4 +1,5 @@
 import type { ToolModule, McpToolDefinition, McpToolResult, ToolVisibility } from '../../types';
+import { resolveIsolateMediaPath } from '../shared/isolate';
 
 export class ApiModule implements ToolModule {
   id = 'api';
@@ -44,6 +45,13 @@ export class ApiModule implements ToolModule {
       return { content: [{ type: 'text', text: 'No files provided.' }] };
     }
 
+    let paths: string[];
+    try {
+      paths = files.map(resolveIsolateMediaPath);
+    } catch (err) {
+      return { content: [{ type: 'text', text: `api_reply: ${(err as Error).message}` }], isError: true };
+    }
+
     const apiUrl = process.env.GATEWAY_API_URL;
     const agentId = process.env.GATEWAY_AGENT_ID;
     const sessionId = process.env.GATEWAY_SESSION_ID;
@@ -65,7 +73,7 @@ export class ApiModule implements ToolModule {
             'Content-Type': 'application/json',
             ...(apiKey ? { 'X-Api-Key': apiKey } : {}),
           },
-          body: JSON.stringify({ files }),
+          body: JSON.stringify({ files: paths }),
           signal: AbortSignal.timeout(5000),
         },
       );

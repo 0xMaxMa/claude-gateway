@@ -13,6 +13,7 @@ import {
   MIN_RELATED_CONTAINMENT,
 } from './shared-dedup';
 import { STALE_NOTE_PREFIX } from './shared-staleness';
+import { isValidTopicSlug } from '../dreaming/episodic';
 import { resolveSharedConfig } from './config';
 import type { KnowledgeSharedConfig } from './types';
 
@@ -90,35 +91,15 @@ export function isIndexPointerOnly(content: string): boolean {
   return lines.every((l) => INDEX_POINTER_LINE_RE.test(l));
 }
 
-/** Leading verbs that make a `reason` an edit instruction rather than a topic. */
-const INSTRUCTION_VERB_RE =
-  /^(insert|append|prepend|add|put|place|move|update|replace|remove|delete|keep|group)\b/i;
-/** Anchors an edit instruction points AT — a position or a file, not a subject. */
-const EDIT_ANCHOR_RE = /\b(before|after|above|below|between|index|section|\.md)\b/i;
-
-/**
- * True when a note name reads as an instruction for editing a file rather than
- * as the name of a fact ("insert after cron config, before the pty_shell
- * section"). `reason` is prompted as free-form justification (`reviewer.ts`) but
- * issue #386 repurposed it as the shared note's identity, so such strings became
- * note names that no future occurrence of the same fact can ever match.
- *
- * Two signals are required — an imperative edit verb AND a positional/file
- * anchor — because either alone is common in legitimate names ("Add-on billing
- * is per seat", "the section header is user-visible").
- */
-export function isInstructionShapedName(name: string): boolean {
-  return INSTRUCTION_VERB_RE.test(name.trim()) && EDIT_ANCHOR_RE.test(name);
-}
-
 /**
  * A note name derived from the fact itself — the fallback when the proposal has
- * no `topic` and its `reason` reads as an editing instruction.
+ * no `topic`.
  *
- * Dropping such a promotion outright (the first cut of issue #398) silently lost
- * genuine facts whose reason merely happened to start with an edit verb, e.g.
- * "Update the deploy section after the API change". Naming from the content
- * keeps the fact; only content with nothing nameable in it is given up on.
+ * Free-form `reason` prose is never a fallback name: it is prompted as a
+ * justification, and issue #386 found reviewers writing editing instructions
+ * there ("insert after cron config, before the pty_shell section") that no later
+ * occurrence of the same fact can match. Naming from the content keeps the fact;
+ * only content with nothing nameable in it is given up on.
  */
 export function deriveNameFromContent(content: string): string | undefined {
   const firstSentence = content
@@ -137,30 +118,30 @@ export function deriveNameFromContent(content: string): string | undefined {
  * writes an `add` to local memory (K3↔K4). Returns `undefined` when the shared
  * KB is disabled or in `propose` (dry-run) mode — callers then skip promotion.
  *
- * Note identity is the proposal's `reason` (issue #386) — the SAME freeform
- * namespace `memory_shared_create`/`_update` use, not a content hash. A
- * content-hashed name (the pre-#386 scheme) meant the same recurring fact,
- * reworded slightly by the reviewer each night, hashed differently and was
- * written as a brand-new note every time — this is what created the
- * near-duplicate pileup #386 reports. Naming by `reason` instead means the
- * same recurring fact maps to the same note name across nights, landing as an
- * update. A `reason` that doesn't collide by name is also checked against the
- * shared vault's near-dup search before creating, and merged into the closest
- * match instead of creating a disconnected duplicate when one is found.
+ * Note identity is the proposal's `topic` slug — the reviewer names what the
+ * fact IS (issue #398), in the SAME freeform namespace `memory_shared_create`/
+ * `_update` use, not a content hash. A content-hashed name (the pre-#386 scheme)
+ * meant the same recurring fact, reworded slightly by the reviewer each night,
+ * hashed differently and was written as a brand-new note every time — this is
+ * what created the near-duplicate pileup #386 reports. A stable name means the
+ * same recurring fact maps to the same note across nights, landing as an
+ * update. A name that doesn't collide is also checked against the shared
+ * vault's near-dup search before creating, and merged into the closest match
+ * instead of creating a disconnected duplicate when one is found.
  *
  * Concurrency note: the name-collision check, read, and write below are not one
  * atomic operation, so two agents dreaming at the same moment and promoting
- * under the exact same `reason` can race — `shared-writer.ts` already documents
+ * under the exact same name can race — `shared-writer.ts` already documents
  * that same-file races resolve to last-write-wins, never corruption, and other
  * read-modify-write callers (e.g. `memory_shared_update`) have this same
- * property. Naming by `reason` instead of a content hash makes same-name
+ * property. Naming by topic instead of a content hash makes same-name
  * collisions between different agents more likely than the pre-#386 scheme, but
  * it's the same accepted tradeoff, not a new class of risk.
  */
 export function makeSharedPromoter(
   // No longer used for NAMING — issue #386 moved note identity off the agent id,
-  // and issue #398 moved it to the proposal's `topic` slug (falling back to
-  // `reason`, then to the fact itself), so a recurring fact maps to the same
+  // and issue #398 moved it to the proposal's `topic` slug (falling back to the
+  // fact itself), so a recurring fact maps to the same
   // shared note whichever agent dreamed it. Still carried because every declined
   // promotion is logged with the agent that proposed it.
   agentId: string,
@@ -187,16 +168,12 @@ export function makeSharedPromoter(
       return;
     }
 
-    // Identity, best first: an explicit `topic` slug (mirroring the episodic
-    // contract), then the free-form `reason`, then the fact itself. A reason that
-    // reads as an editing instruction would produce a note name no later
-    // occurrence of the same fact could match, so it is passed over — but the
-    // fact is still promoted under a content-derived name.
-    const explicit = (p.topic ?? '').trim();
+    // Identity, best first: the reviewer-declared `topic` slug (mirroring the
+    // episodic contract), then a `reason` that is itself a valid slug (a stable
+    // name across nights, #386), then the fact itself. A prose reason is never a
+    // name, so an editing instruction written there cannot become one (#629).
     const reason = p.reason.trim();
-    const name =
-      explicit ||
-      (reason && !isInstructionShapedName(reason) ? reason : deriveNameFromContent(content));
+    const name = (p.topic ?? '').trim() || (isValidTopicSlug(reason) ? reason : deriveNameFromContent(content));
     if (!name) {
       skip('no-usable-name', { reason: p.reason });
       return;

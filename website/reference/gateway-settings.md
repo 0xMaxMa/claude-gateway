@@ -40,10 +40,12 @@ hosts such as `http://host.docker.internal:10850/gateway`.
 
 In orchestration tasks, pass the original absolute file path from the active task
 workspace, an input attachment, or the current session’s media directory to
-`share_file` or `task_stage_file`. The gateway copies authorized files into session
-media automatically. The old workflow of copying to the agent-wide `media/` root
-is outside worker scope. `ARTIFACT_PATH_DENIED` identifies a path outside that
-scope; use the authorized original path rather than retrying the same path.
+`share_file`; it links the existing authorized file without copying or uploading
+its bytes. Use `task_stage_file` when the file should be delivered to the user;
+the gateway stages authorized task outputs into session media. The old workflow
+of copying to the agent-wide `media/` root is outside worker scope.
+`ARTIFACT_PATH_DENIED` identifies a path outside the task staging scope; use the
+authorized original path rather than retrying the same path.
 
 ## `gateway.oauthReturnUrl` (optional)
 
@@ -98,14 +100,18 @@ secrets. `credentialOwner` records who holds the credential and keeps it valid �
 token itself) or `external` (a control plane pushes tokens in). It is written by the
 route that creates the entry; see [Connectors API](../api/connectors.md). **Only the placeholder names are stored here** — the values live in
 `~/.claude-gateway/mcp-token.env` (mode `0600`), namespaced
-`CUSTOM__<connectorId>__<placeholderName>`, and are substituted in when a session spawns.
+`CUSTOM__<connectorId>__<placeholderName>`. They are substituted inside the gateway,
+which carries each connector's traffic through its loopback proxy or a connector
+launcher, so they are not written to the agent's MCP config files (see
+[Credential isolation](../api/connectors.md#credential-isolation)).
 Override that file's path with `GATEWAY_MCP_TOKEN_ENV_PATH`.
 
 Custom connectors are **admin-trusted but not code-reviewed** — the config is whatever
 the admin pasted. Per-agent enablement lives on the agent (`PATCH /api/v1/agents/:id`
 with `connectors`). Set an entry's `defaultEnabled: false` to require explicit
 per-agent opt-in, for example when pairing a personal browser. An omitted value
-preserves the gateway default; `true` does not override a gateway-wide opt-in policy. See
+follows the gateway default; `true` does not override a gateway-wide opt-in policy. `paused: true` (written by `PATCH /api/v1/connectors/:id`)
+keeps the connector off every agent without removing its secret. See
 [Connectors API](../api/connectors.md) for the full model, the OAuth flow, and the refresh
 behaviour.
 

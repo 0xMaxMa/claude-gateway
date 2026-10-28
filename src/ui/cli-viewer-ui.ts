@@ -21,9 +21,9 @@ import type { ChatChannel } from '../history/types';
 
 const XTERM_CSS = 'https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/css/xterm.min.css';
 const XTERM_JS = 'https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/lib/xterm.min.js';
-const TG_WEBAPP_JS = 'https://telegram.org/js/telegram-web-app.js';
+export const TG_WEBAPP_JS = 'https://telegram.org/js/telegram-web-app.js';
 
-function htmlEscape(s: string): string {
+export function htmlEscape(s: string): string {
   return s
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
@@ -32,7 +32,7 @@ function htmlEscape(s: string): string {
     .replace(/'/g, '&#39;');
 }
 
-const BASE_STYLE = `
+export const BASE_STYLE = `
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
   body {
@@ -64,7 +64,7 @@ const BASE_STYLE = `
 `;
 
 /** Shared page shell. `body` is raw HTML; `head` optional extra tags. */
-function page(title: string, style: string, body: string, head = ''): string {
+export function page(title: string, style: string, body: string, head = ''): string {
   return `<!doctype html><html lang="en"><head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">

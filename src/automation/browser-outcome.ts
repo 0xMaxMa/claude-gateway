@@ -25,8 +25,9 @@ const HINTS:Record<string,string>={
  NEW_TAB_OUT_OF_SCOPE:'Remote Browser works only in the one tab you approved, so no new tab was opened. Send the site or address (for example "เข้า google") and it opens in this tab.',
  START_URL_REQUIRED:'the tab is still blank. Send the site or address first (for example "เข้า google.com") and it opens in this tab.',
  KEY_UNSUPPORTED:'this browser extension version cannot press keys. Update the Remote Browser extension (0.3.5 or later).',
- STALE_OBSERVATION:'the page changed before the action ran. Send the command again.',
- STALE_RETRY_BUDGET:'the page kept changing. Send the command again when it settles.',
+ // The browser refuses an action made on an older reading of the page; it ran nothing. Nothing says the page was loading.
+ STALE_OBSERVATION:'the browser refused the action because the page had changed since it was read, so nothing was clicked or typed. Send the command again.',
+ STALE_RETRY_BUDGET:'the browser refused the action each time it was tried, because the page had changed since it was read, so nothing was clicked or typed. Send the command again.',
  FIELD_TEXT_REQUIRED:'no text to enter was found in the command. Put the text in quotes, for example: พิมพ์ "hello".',
  COMPLETION_CANDIDATE:'the page already appears to match; no action was needed.',
  ACTION_BUDGET:'the action limit for one command was reached. Send the next command.',

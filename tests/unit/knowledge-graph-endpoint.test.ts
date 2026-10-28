@@ -36,7 +36,7 @@ function buildApp(sharedRoot: string) {
 // Build an app whose agents-root resolves under `configDir` (via configPath), with
 // the given agent ids registered. Lets scope=agent:<id> / sources tests seed real
 // per-agent memory dirs in isolation.
-function buildAppWithAgents(sharedRoot: string, configDir: string, agentIds: string[]) {
+function buildAppWithAgents(sharedRoot: string, configDir: string, agentIds: string[], configs = new Map<string, AgentConfig>()) {
   const gatewayConfig: GatewayConfig = {
     gateway: {
       logDir: '/tmp',
@@ -48,7 +48,7 @@ function buildAppWithAgents(sharedRoot: string, configDir: string, agentIds: str
   } as unknown as GatewayConfig;
   const agents = new Map(agentIds.map((id) => [id, {} as never]));
   const configPath = path.join(configDir, 'config.json');
-  const router = new GatewayRouter(agents, new Map<string, AgentConfig>(), undefined, gatewayConfig, undefined, configPath);
+  const router = new GatewayRouter(agents, configs, undefined, gatewayConfig, undefined, configPath);
   return router.getApp();
 }
 
@@ -357,6 +357,17 @@ describe('GET /knowledge/graph', () => {
       const report = await supertest(app).get('/knowledge/dreams').set('X-Api-Key', KEY);
       const run = report.body.runs.find((r: { ts: number }) => r.ts === TS);
       expect(run.proposals[0].accepted).toBe(true);
+    });
+
+    it('409 for an agent in isolated memory mode, leaving memory and the shared KB untouched (#601)', async () => {
+      seedMemory('alpha', '# Memory\n');
+      seedAgentDreams(root, 'alpha', DREAMS, PROMOS);
+      const before = fs.readdirSync(root, { recursive: true }).sort();
+      const app = buildAppWithAgents(root, root, ['alpha'], new Map([['alpha', { id: 'alpha', isolateMemory: true } as AgentConfig]]));
+      const res = await supertest(app).post('/knowledge/dreams/apply').set('X-Api-Key', KEY).send({ agentId: 'alpha', ts: TS });
+      expect(res.status).toBe(409);
+      expect(fs.readFileSync(path.join(root, 'agents', 'alpha', 'workspace', 'MEMORY.md'), 'utf8')).toBe('# Memory\n');
+      expect(fs.readdirSync(root, { recursive: true }).sort()).toEqual(before);
     });
 
     it('is idempotent — re-accepting reports alreadyAccepted and does not double-write', async () => {

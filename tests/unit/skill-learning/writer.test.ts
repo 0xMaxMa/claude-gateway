@@ -89,6 +89,21 @@ describe('skill-learning writer.applyProposal', () => {
     expect(out).toMatchObject({ written: true, action: 'edit', name: 'learned' });
   });
 
+  it('INSTALLED GUARD: create refuses a name an installed plugin skill already uses', () => {
+    const plugin: ExistingSkill = { name: 'what-the-bug:wtb-auto-pilot', description: 'plugin auto-pilot', origin: 'user', filePath: '/plugins/wtb/SKILL.md' };
+    const out = applyProposal({ action: 'create', name: 'wtb-auto-pilot', desc: 'my copy', body: 'b' }, ctx({ existing: [plugin] }));
+    expect(out).toMatchObject({ written: false, action: 'create' });
+    expect(out.reason).toContain('installed skill');
+    expect(fs.existsSync(path.join(ws, 'skills', 'wtb-auto-pilot'))).toBe(false);
+  });
+
+  it('INSTALLED GUARD: create refuses a description an installed skill already has', () => {
+    const shared: ExistingSkill = { name: 'gateway-code-review', description: 'Full end-to-end review of a PR', origin: 'user', filePath: '/shared/SKILL.md' };
+    const out = applyProposal({ action: 'create', name: 'pr-review-loop', desc: '  full END-to-end review of a PR ', body: 'b' }, ctx({ existing: [shared] }));
+    expect(out).toMatchObject({ written: false, action: 'create' });
+    expect(out.reason).toContain('gateway-code-review');
+  });
+
   it('rejects an invalid name', () => {
     const out = applyProposal({ action: 'create', name: 'Bad Name!', desc: 'd', body: 'b' }, ctx());
     expect(out.written).toBe(false);
@@ -118,6 +133,48 @@ describe('skill-learning writer.applyProposal', () => {
     expect(out.written).toBe(false);
     expect(out.reason).toMatch(/on-disk target is not origin:auto/i);
     expect(readSkill('orphan')).toContain('HAND WRITTEN'); // user content preserved
+  });
+
+  it('a pinned auto skill stays editable (pinned only means never pruned) and keeps its pin', () => {
+    const pinned = seed('kept-flow', 'auto', 'seeded', { pinned: 'true' });
+    const out = applyProposal({ action: 'edit', targetSkill: 'kept-flow', desc: 'x', body: 'new body' }, ctx({ existing: [pinned] }));
+    expect(out.written).toBe(true);
+    expect(readSkill('kept-flow')).toContain('new body');
+    expect(extractFrontmatter(readSkill('kept-flow'))!.frontmatter['pinned']).toBe(true);
+  });
+
+  it('PROVENANCE GUARD: never writes through a symlinked skill dir, even one that says origin:auto', () => {
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'sl-writer-outside-'));
+    try {
+      fs.writeFileSync(path.join(outside, 'SKILL.md'), '---\nname: linked\ndescription: "d"\norigin: auto\n---\n\nOUTSIDE\n', 'utf-8');
+      fs.mkdirSync(path.join(ws, 'skills'), { recursive: true });
+      fs.symlinkSync(outside, path.join(ws, 'skills', 'linked'));
+      const existing: ExistingSkill[] = [{ name: 'linked', description: 'd', origin: 'auto', filePath: path.join(ws, 'skills', 'linked', 'SKILL.md') }];
+
+      const out = applyProposal({ action: 'edit', targetSkill: 'linked', desc: 'd', body: 'b' }, ctx({ existing }));
+      expect(out.written).toBe(false);
+      expect(out.reason).toMatch(/provenance guard/i);
+      expect(fs.readFileSync(path.join(outside, 'SKILL.md'), 'utf-8')).toContain('OUTSIDE');
+    } finally {
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('a leftover skill dir without SKILL.md (interrupted write) does not block the name forever', () => {
+    fs.mkdirSync(path.join(ws, 'skills', 'half-written'), { recursive: true });
+    fs.writeFileSync(path.join(ws, 'skills', 'half-written', 'SKILL.md.tmp'), 'partial', 'utf-8');
+    const out = applyProposal({ action: 'create', name: 'half-written', desc: 'd', body: 'b' }, ctx({ existing: [] }));
+    expect(out.written).toBe(true);
+    expect(readSkill('half-written')).toContain('origin: auto');
+  });
+
+  it('PROVENANCE GUARD: never claims an existing directory of user files without SKILL.md', () => {
+    fs.mkdirSync(path.join(ws, 'skills', 'common'), { recursive: true });
+    fs.writeFileSync(path.join(ws, 'skills', 'common', 'helper.sh'), 'echo mine', 'utf-8');
+    const out = applyProposal({ action: 'create', name: 'common', desc: 'd', body: 'b' }, ctx({ existing: [] }));
+    expect(out.written).toBe(false);
+    expect(out.reason).toMatch(/provenance guard/i);
+    expect(fs.existsSync(path.join(ws, 'skills', 'common', 'SKILL.md'))).toBe(false);
   });
 
   it('create still succeeds when the target path is free', () => {

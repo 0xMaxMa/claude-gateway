@@ -82,6 +82,9 @@ The default compatible path is `/v1/jev/evaluate`. A base ending in `/v1` or the
 | `maxQueueSize` | `16` | Bounded number waiting for a slot |
 | `maxInputBytes` | `131072` | UTF-8 JSON request size; excess input is rejected |
 | `maxQuestions` | `64` | Maximum question count; no silent truncation |
+| `images.enabled` | Off | Image input (TypeSafe `TypeSafe-Danger-Zone-Images` preview): `assets` and Box questions. See [Image decisions](#image-decisions-on-jev-beta) |
+| `images.model` | `jev-1.14.0` | Model for requests that carry an image or a Box question; text requests keep `model`. Box needs 1.14 or later |
+| `images.maxImageBytes` | 16 MiB | Per-image byte cap (images are not counted in `maxInputBytes`) |
 
 Each agent can set `jev.enabled: false` to narrow global permission. An agent cannot expand the global allowlist. Existing task/ticket/agent access checks still apply. An evaluation grants no additional access to another agent's tasks, memory or browser sessions.
 
@@ -767,6 +770,68 @@ those, or when the Mac answers `RAW_INPUT_DISABLED` before the first action, the
 same goal runs on Accessibility. This needs a helper and relay with the raw
 input contract (getpod-computer-use #82) and the getpod app switch
 **Allow mouse and keyboard control (beta)**, which is off by default.
+
+### Image decisions on Jev (beta)
+
+With the Jev backend serving Computer Use and `gateway.jev.images.enabled: true`,
+vision mode (`mode: vision` or `hybrid`) is decided by Jev on the screenshot
+instead of the model above. Everything else is the same loop: the helper,
+receipts, refusals, the impact question before each action, the user's
+confirmation, and the Accessibility fallback.
+
+```json
+{
+  "gateway": {
+    "jev": { "enabled": true, "provider": "typesafe", "model": "jev-1.13.0", "images": { "enabled": true } },
+    "computerUse": { "mode": "hybrid" }
+  }
+}
+```
+
+Each step sends one request to `images.model` (`jev-1.14.0` by default): the
+window screenshot and typed questions for the next step (click, type, key,
+scroll, done or give up) and all of its arguments.
+
+- `hybrid` (recommended): Accessibility controls with bounds are drawn on the
+  screenshot with numbered marks (Set-of-Mark) and listed; Jev picks a control by
+  its number. A Box question locates targets the list cannot name (canvas,
+  unlabelled icons).
+- `vision`: the screenshot only; every target is a Box.
+- A Box click is refined on a 400-pixel crop and then checked with a red dot
+  drawn at the final point; a dot that is not on the target clicks nothing.
+- Typing clicks the field, selects its text (`cmd+a`) when it is a listed text
+  field that is not empty (never after a Box click, where the focus is unknown),
+  and types text taken verbatim from the goal; a key is pressed the counted
+  number of times. Each of these runs only after the previous one completed and
+  passes the impact question on its own; a run that returns control after each
+  action, or reaches its action limit, finishes the decision first.
+- Scrolling moves one screen (80% of the window) or several.
+- Sensitive controls are painted out before the image is encoded. When one
+  cannot be painted out (it has no bounds, or the observation was truncated and
+  may have left it out), that step sends no screenshot: Jev decides on the
+  listed controls alone, and the log line says `withheld`. Everything else on
+  screen is sent.
+- Images are scaled into the provider limits (PNG or JPEG, 280 to 1568 pixels a
+  side); Box answers are mapped back to screenshot coordinates.
+- Repeating the step that just changed the screen asks Jev whether the goal
+  needs it again; if not, the run ends as reached. A step that twice changed
+  nothing is not tried a third time (`NO_PROGRESS`).
+- The log records one `computer_jev_vision_decision` line per step with the
+  decision, timings and request count, never screenshots or screen text.
+
+Measured on Linux with Chromium standing in for the helper (52 fixture tasks): see
+`scripts/experiments/jev-vision/RESULTS.md`. It has not been run on a Mac yet; the
+helper's scroll unit is assumed to be about 50 pixels a notch.
+
+Remote Browser tasks use the same switch: with `images.enabled`, each Jev
+decision also carries the approved tab's screenshot (`page_screenshot`, scaled
+into the limits), so Jev sees the page as well as its element list. The
+extension reports no element geometry and clicks by element reference, so the
+browser uses neither marks nor Box clicks. A step with a sensitive field in view,
+or with in-view elements left out of a truncated observation, before or right after
+the capture, sends no screenshot
+(trace reason `SCREENSHOT_SKIPPED_SENSITIVE`); a failed
+capture continues on text (`SCREENSHOT_UNAVAILABLE`).
 
 #### Mac acceptance test
 

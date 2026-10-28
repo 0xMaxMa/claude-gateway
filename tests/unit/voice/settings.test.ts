@@ -190,6 +190,8 @@ test('restricted model catalog permission does not hide usable voices', async ()
     expect(response.body.models).toEqual(expect.arrayContaining([expect.objectContaining({model_id:'scribe_v2_realtime',realtime:true}),expect.objectContaining({model_id:'scribe_v2',voice_messages:true,conversation:false})]));
     expect(response.body.warnings[0]).toContain('models_read');
     expect(response.body.models).toContainEqual(expect.objectContaining({model_id:'eleven_v3_conversational',catalog_source:'supported_defaults'}));
+    expect(response.body.models).toContainEqual(expect.objectContaining({model_id:'eleven_v4_turbo',catalog_source:'supported_defaults'}));
+    expect(response.body.models).toContainEqual(expect.objectContaining({model_id:'eleven_v4',catalog_source:'supported_defaults'}));
   } finally { choices.mockRestore(); fetchModels.mockRestore(); }
 });
 
@@ -312,4 +314,46 @@ test.each(['upstream','upstream:elevenlabs'])('catalog accepts %s and returns th
     expect(response.body.models).toEqual(expect.arrayContaining([expect.objectContaining({provider:'elevenlabs',model_id:'elevenlabs/eleven_v3',source:'byok'})]));
     expect(choices).toHaveBeenCalledWith({provider:'upstream:elevenlabs',voiceId:''});
   }finally{choices.mockRestore();upstream.mockRestore();fetcher.mockRestore();}
+});
+
+test('saving an echoed settings payload does not pin live/narrate defaults, and live edits merge', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'voice-live-')), path = join(dir, 'config.json');
+  const selected = { enabled: true, tts: { provider: 'elevenlabs', model: 'eleven_v3', voiceId: '' }, stt: { provider: 'elevenlabs', model: 'scribe_v2_realtime' }, notes: { enabled: false } };
+  writeFileSync(path, JSON.stringify({ gateway: { orchestration: true }, agents: [{ id: 'a', voice: selected }] }));
+  const configs = new Map([['a', { id: 'a', voice: structuredClone(selected), orchestration: effectiveOrchestration({}, true) } as AgentConfig]]);
+  const app = express(); app.use(express.json()); app.use(voiceSettingsRouter(configs, new Map(), [{ id: 'owner', key: 'key', agents: ['a'], write: true }], path));
+  const patch = (body: unknown) => request(app).patch('/v1/agents/a/voice-settings').set('Authorization', 'Bearer key').send(body as object);
+  const saved = () => JSON.parse(readFileSync(path, 'utf8')).agents[0].voice;
+  try {
+    const echoed = (await request(app).get('/v1/agents/a/voice-settings').set('Authorization', 'Bearer key')).body.voice;
+    expect(echoed.live.fastAck).toBe(true);
+    expect((await patch(echoed)).status).toBe(200);
+    expect(saved()).not.toHaveProperty('live');
+    expect(saved()).not.toHaveProperty('narrate');
+    expect((await patch({ live: { fastAck: false } })).status).toBe(200);
+    expect((await patch({ live: { fastAckAfterMs: 2000 } })).body.voice.live).toMatchObject({ fastAck: false, fastAckAfterMs: 2000 });
+    expect(saved().live).toEqual({ fastAck: false, fastAckAfterMs: 2000 });
+    const again = (await request(app).get('/v1/agents/a/voice-settings').set('Authorization', 'Bearer key')).body.voice;
+    expect((await patch(again)).status).toBe(200);
+    expect(saved().live).toEqual({ fastAck: false, fastAckAfterMs: 2000 });
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('live.vad edits persist only the changed fields and merge across saves', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'voice-vad-')), path = join(dir, 'config.json');
+  const selected = { enabled: true, tts: { provider: 'elevenlabs', model: 'eleven_v3', voiceId: '' }, stt: { provider: 'elevenlabs', model: 'scribe_v2_realtime' }, notes: { enabled: false } };
+  writeFileSync(path, JSON.stringify({ gateway: { orchestration: true }, agents: [{ id: 'a', voice: selected }] }));
+  const configs = new Map([['a', { id: 'a', voice: structuredClone(selected), orchestration: effectiveOrchestration({}, true) } as AgentConfig]]);
+  const app = express(); app.use(express.json()); app.use(voiceSettingsRouter(configs, new Map(), [{ id: 'owner', key: 'key', agents: ['a'], write: true }], path));
+  const patch = (body: unknown) => request(app).patch('/v1/agents/a/voice-settings').set('Authorization', 'Bearer key').send(body as object);
+  const saved = () => JSON.parse(readFileSync(path, 'utf8')).agents[0].voice;
+  try {
+    expect((await patch({ live: { vad: { minLevel: 0.03 } } })).status).toBe(200);
+    expect((await patch({ live: { vad: { ratio: 4.5 } } })).body.voice.live.vad).toMatchObject({ minLevel: 0.03, ratio: 4.5, startMs: 120 });
+    expect(saved().live).toEqual({ vad: { minLevel: 0.03, ratio: 4.5 } });
+    const echoed = (await request(app).get('/v1/agents/a/voice-settings').set('Authorization', 'Bearer key')).body.voice;
+    expect((await patch(echoed)).status).toBe(200);
+    expect(saved().live).toEqual({ vad: { minLevel: 0.03, ratio: 4.5 } });
+    expect((await patch({ live: { vad: { minLevel: -1 } } })).status).toBe(400);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

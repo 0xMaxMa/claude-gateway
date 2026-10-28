@@ -44,3 +44,6 @@ test('daily quota needs structured per-day evidence, not a generic RESOURCE_EXHA
   expect(describeVoiceError(providerVoiceError('TTS', 429, payload('GenerateRequestsPerMinutePerProject')))).toMatchObject({ category: 'quota_or_rate_limit' });
   expect(describeVoiceError(providerVoiceError('TTS', 429, { error: { status: 'RESOURCE_EXHAUSTED' } }))).toMatchObject({ category: 'quota_or_rate_limit' });
 });
+test('an empty transcript is recognized as no speech, not an unknown failure', () => {
+  expect(describeVoiceError('EMPTY_TRANSCRIPT')).toEqual({ category: 'no_speech', message: 'No speech was recognized. Please speak again.', retryable: true });
+});

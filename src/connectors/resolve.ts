@@ -10,6 +10,7 @@ import type { AgentConfig, CustomConnectorEntry } from '../types';
 import { type ConnectorStatus } from './types';
 import { parseCounter, readTokenEnv } from './token-env';
 import { customSecretKey, substitutePlaceholders } from './custom';
+import { secretExposureFields } from './exposure';
 import {
   refreshTransientCountSecretKey,
   refreshFailCountSecretKey,
@@ -17,6 +18,23 @@ import {
   refreshTokenSecretKey,
   expiresAtSecretKey,
 } from './oauth-refresh-sweep';
+
+/**
+ * Whether connector `id` is enabled for an agent whose per-agent map is
+ * `agentConnectors`. An explicit per-agent flag wins; otherwise the gateway default
+ * applies unless the connector itself opts out. This is the one rule both
+ * resolution and GET /v1/connectors/:id/agents use, so they cannot disagree.
+ * Pausing is a separate gate (see resolveEnabledConnectors) and is not part of it.
+ */
+export function isConnectorEnabledFor(
+  agentConnectors: AgentConfig['connectors'],
+  id: string,
+  entry: Pick<CustomConnectorEntry, 'defaultEnabled'> | undefined,
+  defaultEnabled = true,
+): boolean {
+  const own = agentConnectors && Object.prototype.hasOwnProperty.call(agentConnectors, id) ? agentConnectors[id] : undefined;
+  return own?.enabled ?? (defaultEnabled && entry?.defaultEnabled !== false);
+}
 
 /**
  * Build the mcpServers entries for every connector that is (a) in customConnectors,
@@ -36,6 +54,9 @@ import {
  * including agents whose chat users are not the person who connected it. Opting in
  * per agent is the safer posture for that deployment, so it is available — as a
  * deliberate choice, not a silent change of meaning for existing installs.
+ *
+ * Per connector, an entry's own `defaultEnabled: false` opts it in regardless.
+ * A `paused` entry resolves for no agent at all.
  */
 export function resolveEnabledConnectors(
   agentConfig: Pick<AgentConfig, 'connectors'>,
@@ -51,10 +72,12 @@ export function resolveEnabledConnectors(
   // for an id that resolves to nothing — a "changed" fingerprint that restarts every
   // session on the box, forever, since it never matches what a spawn recorded.
   const out: Record<string, unknown> = Object.create(null);
-  const isEnabled = (id: string): boolean => enabled[id]?.enabled ?? (defaultEnabled && customConnectors[id]?.defaultEnabled !== false);
 
   for (const [id, entry] of Object.entries(customConnectors)) {
-    if (!isEnabled(id)) continue; // opted out (or not opted in)
+    // Paused before any per-agent check: an admin's pause applies to every agent,
+    // whatever its own flag says.
+    if (entry?.paused === true) continue;
+    if (!isConnectorEnabledFor(enabled, id, entry, defaultEnabled)) continue; // opted out (or not opted in)
 
     try {
       // Null-prototype for the same reason token-env.ts's parse() uses one: the
@@ -171,7 +194,9 @@ export function listConnectorStatus(
         repoUrl: entry.sourceUrl,
         ...(entry.resourcesPath ? { resourcesPath: entry.resourcesPath } : {}),
         ...(entry.defaultEnabled !== undefined ? { defaultEnabled: entry.defaultEnabled } : {}),
+        ...(entry.paused === true ? { paused: true } : {}),
         ...(refresh ? { refresh } : {}),
+        ...secretExposureFields(id, entry),
       } as ConnectorStatus;
     } catch (err) {
       // Same per-entry isolation resolveEnabledConnectors uses above, and for a

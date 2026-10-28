@@ -34,6 +34,12 @@ jest.mock('child_process', () => {
   });
   return { ...real, execFile, spawn };
 });
+// An isolated app agent executes in its conversation's sandbox (#609); only the name matters here.
+jest.mock('../../../src/apps/conversation-sandbox', () => {
+  const actual = jest.requireActual('../../../src/apps/conversation-sandbox');
+  const name = (agent: any, conversation: any) => actual.sandboxContainerName(agent, conversation);
+  return { ...actual, sandboxPool: { ensure: jest.fn(async (agent: any, conversation: any) => name(agent, conversation)), acquire: jest.fn(async (agent: any, conversation: any) => ({ container: name(agent, conversation), release: jest.fn() })) } };
+});
 jest.mock('os', () => {
   const real = jest.requireActual('os');
   return { ...real, homedir: () => process.env.TEST_HOME ?? real.homedir() };
@@ -45,6 +51,8 @@ import { join } from 'path';
 import { SessionProcess } from '../../../src/session/process';
 import type { AgentConfig, GatewayConfig } from '../../../src/types';
 import type { RuntimeProfile } from '../../../src/session/runtime-profile';
+import { chatMemoryDir } from '../../../src/agent/workspace-loader';
+import { sandboxContainerName } from '../../../src/apps/conversation-sandbox';
 
 // ~200 KB of Thai: three bytes per character, so the 64 KiB pipe chunks that carry the
 // setup exec's stdin split characters, and a decode per chunk would corrupt the prompt.
@@ -71,11 +79,13 @@ afterEach(() => {
   rmSync(root, { recursive: true, force: true });
 });
 
-function session(profile: Partial<RuntimeProfile> = {}): SessionProcess {
-  const agent = { id: 'a', type: 'app-agent', container: 'app-test', workspace, description: 'fixture', env: '', claude: { model: 'fixture', extraFlags: [] } } as unknown as AgentConfig;
+function session(profile: Partial<RuntimeProfile> = {}, chat?: { chatId: string }): SessionProcess {
+  // A worker of an isolated agent arrives with its conversation's sandbox already resolved by its driver.
+  const container = chat && profile.role === 'worker' ? 'app-test-c-' + 'a'.repeat(20) : 'app-test';
+  const agent = { id: 'a', type: 'app-agent', container, workspace, description: 'fixture', env: '', claude: { model: 'fixture', extraFlags: [] }, ...(chat ? { isolateMemory: true } : {}) } as unknown as AgentConfig;
   const gateway = { gateway: { headless: true, timezone: 'UTC', logDir: join(root, 'logs') }, agents: [agent] } as GatewayConfig;
   const store = { getContextReset: () => undefined, loadSession: async () => [], loadTelegramSession: async () => [] } as any;
-  return new SessionProcess('session:c', 'api', agent, gateway, store, undefined, { role: 'agent', mcpConfigPath: join(root, 'mcp.json'), overlay: OVERLAY, capacityReserved: true, ...profile } as RuntimeProfile);
+  return new SessionProcess('session:c', chat ? 'telegram' : 'api', agent, gateway, store, chat?.chatId, { role: 'agent', mcpConfigPath: join(root, 'mcp.json'), overlay: OVERLAY, capacityReserved: true, ...profile } as RuntimeProfile);
 }
 
 const posix = process.platform === 'win32' ? test.skip : test;
@@ -97,6 +107,39 @@ posix('the prompt is written by the docker exec that creates the attempt, so a s
   await sp.stop();
   expect(existsSync(file)).toBe(false);
   expect(existsSync(file.replace('system-prompt.md', 'ticket.json'))).toBe(false);
+});
+
+posix('an isolated app agent gets its own chat memory after the container CLAUDE.md, with container paths (#601)', async () => {
+  for (const [chatId, memory] of [['111', 'CHAT-A-MEMORY'], ['222', 'CHAT-B-MEMORY']]) {
+    mkdirSync(chatMemoryDir(workspace, 'telegram', chatId), { recursive: true });
+    writeFileSync(join(chatMemoryDir(workspace, 'telegram', chatId), 'MEMORY.md'), memory);
+  }
+  const sp = session({}, { chatId: '111' });
+  await sp.start();
+  const prompt = JSON.parse(execs[1].input).prompt as string;
+  expect(prompt.startsWith(CONTEXT)).toBe(true);
+  expect(prompt).toContain('CHAT-A-MEMORY');
+  expect(prompt).not.toContain('CHAT-B');
+  expect(prompt).toContain(join(chatMemoryDir('/workspace', 'telegram', '111'), 'MEMORY.md'));
+  expect(prompt).not.toContain(workspace);
+  expect(launches[0].args).toContain('CLAUDE_CODE_DISABLE_AUTO_MEMORY=1');
+  // It runs in its conversation's sandbox, never the shared app container (#609).
+  expect(launches[0].args).toContain(sandboxContainerName({ id: 'a', container: 'app-test' }, { source: 'telegram', chatId: '111' }));
+  expect(launches[0].args).not.toContain('app-test');
+  await sp.stop();
+});
+
+posix.each([false, true])('a container worker keeps the context its task driver composed (isolate mode %s)', async isolated => {
+  // The driver already read the container CLAUDE.md and appended the task's own
+  // conversation's memory and read-only rule; the worker session is an api session
+  // keyed by its attempt, so recomposing here would name a chat nobody owns.
+  const sp = session({ role: 'worker', context: 'DRIVER-CONTEXT memory-of-the-task read-only-rule' }, isolated ? { chatId: undefined as unknown as string } : undefined);
+  await sp.start();
+  expect(execs.some(exec => exec.script.includes('/workspace/CLAUDE.md'))).toBe(false);
+  const prompt = JSON.parse(execs[0].input).prompt as string;
+  expect(prompt).toBe(`DRIVER-CONTEXT memory-of-the-task read-only-rule\n\n${OVERLAY}`);
+  expect(prompt).not.toContain('CHAT MEMORY');
+  await sp.stop();
 });
 
 posix.each([

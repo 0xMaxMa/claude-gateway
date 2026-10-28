@@ -193,3 +193,44 @@ describe('POST /api/v1/agents/:agentId/skills/install — SSRF protection', () =
     });
   }
 });
+
+describe('skill writes refresh the running agent through its workspace recomposer', () => {
+  let workspace: string;
+  beforeEach(() => { workspace = makeTmpWorkspace(); });
+  afterEach(() => { fs.rmSync(workspace, { recursive: true, force: true }); });
+
+  function appWith(runner: object) {
+    const config: AgentConfig = {
+      id: AGENT_ID, description: 'Test agent', workspace, env: '', telegram: { botToken: 'tok' },
+      claude: { model: 'claude-sonnet-4-6', dangerouslySkipPermissions: true, extraFlags: [] },
+    };
+    const app = express();
+    app.use(express.json());
+    app.use('/api', createSkillsRouter(new Map([[AGENT_ID, config]]), ALL_KEYS, new Map([[AGENT_ID, runner as never]])));
+    return app;
+  }
+  const body = { name: 'my-skill', description: 'test', content: 'hello', scope: 'workspace' };
+
+  it('recomposes CLAUDE.md and the registry (keeping hidden auto skills hidden) instead of a bare reload', async () => {
+    const runner = { recomposeWorkspace: jest.fn(async () => true), setSkillRegistry: jest.fn(), getSkillRegistry: () => ({ skills: new Map() }) };
+    const res = await supertest.default(appWith(runner)).post(`/api/v1/agents/${AGENT_ID}/skills`).set(authHeader(WRITE_KEY)).send(body);
+    expect(res.status).toBe(201);
+    expect(runner.recomposeWorkspace).toHaveBeenCalledTimes(1);
+    expect(runner.setSkillRegistry).not.toHaveBeenCalled();
+  });
+
+  it('without a recomposer, the reloaded registry keeps the hidden set of skills still installed', async () => {
+    fs.mkdirSync(path.join(workspace, 'skills', 'auto-a'), { recursive: true });
+    fs.writeFileSync(path.join(workspace, 'skills', 'auto-a', 'SKILL.md'), '---\nname: auto-a\ndescription: "a"\norigin: auto\n---\nbody\n');
+    const setSkillRegistry = jest.fn();
+    const runner = {
+      recomposeWorkspace: async () => false,
+      setSkillRegistry,
+      getSkillRegistry: () => ({ skills: new Map(), hiddenUntilUsed: new Set(['auto-a', 'gone']) }),
+    };
+    const res = await supertest.default(appWith(runner)).post(`/api/v1/agents/${AGENT_ID}/skills`).set(authHeader(WRITE_KEY)).send(body);
+    expect(res.status).toBe(201);
+    expect(setSkillRegistry).toHaveBeenCalledTimes(1);
+    expect([...setSkillRegistry.mock.calls[0][0].hiddenUntilUsed]).toEqual(['auto-a']);
+  });
+});

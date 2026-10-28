@@ -13,7 +13,7 @@ import { taskDirective } from './task-directive';
 import { normalizeTaskRevisions } from './task-directive';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { taskFailure } from './failure';
+import { taskFailure, shutdownFailure } from './failure';
 import { WorkerPool } from './pool';
 import { createHash, randomUUID } from 'crypto';
 import { OrchestrationStore, LISTED_TASK_SQL, boundedText, payloadHash } from '../store';
@@ -22,6 +22,7 @@ import { MAX_INTAKE_INPUTS } from '../conversation-intake';
 import { CommandContext, OrchestrationError, TaskSnapshot, TaskRevision, TaskAttempt, TaskResult, WorkerOutcome, TERMINAL_TASK_STATES, ChangeMode, PublicTaskSnapshot, publicTask } from '../types';
 import type { Effort } from '../../agent/model-registry';
 import { SUBAGENT_MAX_DEPTH } from '../subagent-tool-schemas';
+import { markRestartRecovery, restartResumable, resumeAfterRestart } from '../restart-resume';
 
 /** Parent states a subagent runs under; any other parent can neither start nor wait for one. */
 export const RUNNING_PARENT: readonly string[] = ['starting', 'running', 'interrupting'];
@@ -647,6 +648,7 @@ export class TaskService {
     // Retrying an unconfirmed stall stop ("Retry cleanup") finishes the supervisor's
     // stop; it must not turn that stall into a user/agent cancellation.
     const retriesStall = task.state === 'needs_reconciliation' && task.cancellation?.requestedBy === 'supervisor';
+    delete task.restartRecovery; // A stop is final: the stranded worker is cleaned up, never resumed.
     if (!retriesStall) task.cancellation = { requestedBy, requestedAt: Date.now() };
     delete task.queuedCommands;
     task.state = task.activeAttemptId || (task.gatewayTarget?.adapter==='computer' && task.gatewayDispatch) ? 'cancel_requested' : 'cancelled';
@@ -864,6 +866,7 @@ export class TaskService {
       if (task.state !== 'starting') throw new OrchestrationError('STATE_CONFLICT');
       attempt.state = 'running'; attempt.startedAt = Date.now(); attempt.processIdentity = identity;
       task.state = 'running'; task.appliedRevision = attempt.revision;
+      if (task.restartResume) task.restartResume.pending = false;
       if(task.executionControl?.revision===attempt.revision)task.executionControl.phase='applied';
       this.store.saveAttempt(attempt); this.store.saveTask(task, task.stateVersion);
       this.store.appendEvent(task.conversationId, 'task.revision_applied', { revision: attempt.revision }, task.taskId);
@@ -1083,11 +1086,17 @@ export class TaskService {
         outcome = { type: 'failed', failure: { code: 'WORKER_BLOCKED', message: task.workflow!.checkpoint.findings.filter(f => f.status === 'open').map(f => f.summary).join('\n').slice(0, 4096), observedAt: Date.now() } };
       }
       const stalled = task.state === 'cancel_requested' ? this.stalledFailure(task, outcome.type !== 'unknown') : undefined;
+      const restartInterrupted = (outcome.type === 'failed' || outcome.type === 'stopped') && outcome.failure?.code === 'GATEWAY_SHUTDOWN' && restartResumable(task);
       if (outcome.type !== 'completed' && outcome.type !== 'paused') {
         attempt.failure = stalled ?? outcome.failure ?? taskFailure(undefined, outcome.type === 'stopped' ? 'WORKER_STOPPED' : 'WORKER_FAILED');
         task.failure = attempt.failure;
       } else { delete task.failure; }
-      if (outcome.type === 'unknown') { if(task.executionControl?.phase==='pending')task.executionControl.phase='blocked'; attempt.state = 'unknown'; task.state = 'needs_reconciliation'; }
+      if (outcome.type === 'unknown') {
+        if(task.executionControl?.phase==='pending')task.executionControl.phase='blocked';
+        // A shutdown whose stop could not be confirmed resumes once the next gateway stops that worker.
+        if (outcome.failure?.code === 'GATEWAY_SHUTDOWN') markRestartRecovery(task);
+        attempt.state = 'unknown'; task.state = 'needs_reconciliation';
+      }
       else {
         attempt.state = 'ended'; task.activeAttemptId = undefined;
         if (outcome.type === 'completed') attempt.result = outcome.result;
@@ -1097,6 +1106,7 @@ export class TaskService {
         else if(task.executionControl?.phase==='pending'&&task.executionControl.action==='pause'){task.state='waiting_input';task.executionControl.phase='paused';delete task.failure;}
         else if (task.state === 'interrupting' || task.revision > attempt.revision) task.state = 'queued';
         else if(waitingForCommand){task.state='waiting_input';task.latestProgress={source:'runtime',observedAt:Date.now(),text:task.gatewayTarget?.adapter==='computer'&&outcome.computerReport?computerOutcomeText(outcome.computerReport):task.gatewayTarget?.adapter==='browser'&&outcome.browserReport?browserOutcomeText(outcome.browserReport):'Waiting for your next command.'};}
+        else if (restartInterrupted) this.resumeAfterRestart(task, attempt);
         else task.state = outcome.type === 'completed' ? 'completed' : 'failed';
         if (task.state === 'completed' && outcome.type === 'completed') task.result = outcome.result;
         // The device session ended with this round (a reached computer goal): the
@@ -1121,9 +1131,11 @@ export class TaskService {
       }
       if (refusals?.length) this.store.appendEvent(task.conversationId, 'task.provider_refusal', { attemptId, refusals }, task.taskId);
       if (outcome.type !== 'unknown') this.pool.release(task.taskId, outcome.type === 'completed' || outcome.type === 'paused');
+      // A resume brief belongs only to the next attempt of a re-queued task.
+      if (task.restartResume && task.state !== 'queued') task.restartResume.pending = false;
       this.store.saveAttempt(attempt); this.store.saveTask(task, task.stateVersion);
       if (task.state === 'queued') this.store.enqueue('schedule', `schedule:${task.taskId}:${task.stateVersion}`, { taskId: task.taskId });
-      else if (TERMINAL_TASK_STATES.has(task.state) || task.state === 'needs_reconciliation' || (waitingForCommand&&task.state==='waiting_input'&&task.automationController!=='user'&&task.executionControl?.phase!=='paused') || (waitingForCommand&&agentGoalRunParked(task))) this.notify(task);
+      else if (TERMINAL_TASK_STATES.has(task.state) || (task.state === 'needs_reconciliation' && !task.restartRecovery) || (waitingForCommand&&task.state==='waiting_input'&&task.automationController!=='user'&&task.executionControl?.phase!=='paused') || (waitingForCommand&&agentGoalRunParked(task))) this.notify(task);
       return task;
     });
   }
@@ -1314,6 +1326,39 @@ export class TaskService {
       this.store.enqueue('schedule',`schedule:${task.taskId}:${task.stateVersion}`,{taskId});
       return task;
     },taskId);
+  }
+  /** No failure report is sent for a resume: that report turn could only ask the user to continue. */
+  private resumeAfterRestart(task: TaskSnapshot, attempt: TaskAttempt, lastProgressHint?: string): boolean {
+    const resumed = resumeAfterRestart(task, attempt, lastProgressHint);
+    if (resumed) this.cancelSubagents(task);
+    return resumed;
+  }
+  /** Scheduler-only: settle a worker that restart recovery could not prove had stopped. */
+  resolveRestartRecovery(attemptId: string, generation: number, stopped: boolean): void {
+    this.store.transaction(() => {
+      const attempt = this.store.attempt(attemptId), task = attempt && this.store.task(attempt.taskId);
+      if (!attempt || !task || attempt.generation !== generation || task.activeAttemptId !== attemptId || task.state !== 'needs_reconciliation' || !task.restartRecovery) throw new OrchestrationError('STALE_ATTEMPT');
+      const hint = task.restartRecovery.lastProgress;
+      delete task.restartRecovery;
+      if (!stopped) {
+        // Never run the same work twice: an unproven stop keeps the existing reconciliation state.
+        const message = 'Cannot verify that the worker from before the gateway restart has stopped, so the task was not resumed automatically. Stopping the task retries cleanup; existing files and prior effects are retained.';
+        task.failure = { code: 'CLEANUP_UNCONFIRMED', message, observedAt: Date.now() };
+        task.latestProgress = { source: 'runtime', observedAt: Date.now(), text: message };
+        this.store.saveTask(task, task.stateVersion);
+        this.store.appendEvent(task.conversationId, 'task.restart_recovered', { stopped, state: task.state }, task.taskId);
+        this.notify(task);
+        return;
+      }
+      attempt.state = 'ended'; attempt.failure = task.failure = shutdownFailure();
+      task.activeAttemptId = undefined;
+      this.pool.release(task.taskId, false);
+      const resumed = this.resumeAfterRestart(task, attempt, hint);
+      this.store.saveAttempt(attempt); this.store.saveTask(task, task.stateVersion);
+      this.store.appendEvent(task.conversationId, 'task.restart_recovered', { stopped, state: task.state }, task.taskId);
+      if (resumed) this.store.enqueue('schedule', `schedule:${task.taskId}:${task.stateVersion}`, { taskId: task.taskId });
+      else this.notify(task);
+    });
   }
   /** Offline operator workflow only; not exposed through conversation tools.
    * Caller holds the instance lock and has checked liveness/side effects. */

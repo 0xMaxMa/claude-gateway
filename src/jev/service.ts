@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
-import { JevConfig, JevConnection, JevContext, JevError, JevErrorCode, JevEvaluationEvent, JevRequest, JevResult } from './types';
+import { JEV_IMAGE_MODEL, JevConfig, JevConnection, JevContext, JevError, JevErrorCode, JevEvaluationEvent, JevRequest, JevResult } from './types';
 import { validateJevConfig, validateJevRequest, validateJevResponse } from './validation';
 import { JEV_DEFAULT_API_KEY_ENV } from './child-env';
 
@@ -85,6 +85,9 @@ export class JevService {
     if (context.signal?.aborted) abort();
     if (timeout <= 0) { expired = true; abort(); }
     let acquired = false;
+    // Validation admitted images only behind config.images.enabled; they go to the image model.
+    const images = request.assets !== undefined || Object.values(request.questions).some(q => q.type === 'box');
+    const model = images ? config.images?.model ?? JEV_IMAGE_MODEL : config.model!;
     let result: JevResult | undefined;
     let failure: JevError | undefined;
     try {
@@ -96,8 +99,8 @@ export class JevService {
       const endpoint = jevEndpoint(connection, config.provider);
       const response = await this.abortable((this.options.fetch ?? fetch)(endpoint, {
         method: 'POST', redirect: 'error', signal: controller.signal,
-        headers: { authorization: `Bearer ${connection.apiKey}`, 'content-type': 'application/json', 'x-request-id': wireRequestId },
-        body: JSON.stringify({ model: config.model, state: request.state, questions: request.questions, ...(config.provider === 'upstream' ? { request_id: wireRequestId } : {}) }),
+        headers: { authorization: `Bearer ${connection.apiKey}`, 'content-type': 'application/json', 'x-request-id': wireRequestId, ...(images ? { 'TypeSafe-Danger-Zone-Images': 'true' } : {}) },
+        body: JSON.stringify({ model, state: request.state, questions: request.questions, ...(request.assets ? { assets: request.assets } : {}), ...(config.provider === 'upstream' ? { request_id: wireRequestId } : {}) }),
       }), controller.signal);
       if (!response.ok) {
         let code: JevErrorCode = response.status === 401 ? 'AUTHENTICATION_FAILED' : response.status === 403 ? 'ACCESS_DENIED' : response.status === 402 ? 'QUOTA_EXCEEDED' : response.status === 429 ? 'RATE_LIMITED' : response.status === 409 ? 'REQUEST_CONFLICT' : response.status === 504 ? 'DEADLINE_EXCEEDED' : response.status === 404 ? 'MODEL_UNAVAILABLE' : response.status === 400 || response.status === 413 || response.status === 422 ? 'INVALID_REQUEST' : 'PROVIDER_UNAVAILABLE';
@@ -115,7 +118,7 @@ export class JevService {
         throw new JevError(code, code==='OUTCOME_UNKNOWN'?'Jev outcome and charges require reconciliation. Do not retry automatically.':`Jev evaluation failed (HTTP ${response.status}).`, { status: response.status, ...metadata });
       }
       const raw = await this.abortable(this.readResponse(response), controller.signal);
-      result = { ...validateJevResponse(raw, request, config.model!, wireRequestId), requestId };
+      result = { ...validateJevResponse(raw, request, model, wireRequestId), requestId };
       this.authorized(context);
       if (controller.signal.aborted) throw new JevError('CANCELLED', 'Jev evaluation cancelled.');
       return result;
@@ -125,7 +128,7 @@ export class JevService {
     } finally {
       clearTimeout(timer); context.signal?.removeEventListener('abort', abort);
       if (acquired) { this.active--; this.drain(); }
-      try { this.options.onEvaluation?.({ requestId, principalId: context.principalId, consumer: context.consumer, agentId: context.agentId, sessionId: context.sessionId, taskId: context.taskId, requestedModel: config.model!, model: result?.model, startedAt, elapsedMs: Date.now() - startedAt, outcome: failure ? 'failed' : 'completed', errorCode: failure?.code, validationReason: failure?.metadata.validationReason, usage: result?.usage, billing: result?.billing }); } catch { /* Accounting observers cannot change an already-issued inference outcome. */ }
+      try { this.options.onEvaluation?.({ requestId, principalId: context.principalId, consumer: context.consumer, agentId: context.agentId, sessionId: context.sessionId, taskId: context.taskId, requestedModel: model, model: result?.model, startedAt, elapsedMs: Date.now() - startedAt, outcome: failure ? 'failed' : 'completed', errorCode: failure?.code, validationReason: failure?.metadata.validationReason, usage: result?.usage, billing: result?.billing }); } catch { /* Accounting observers cannot change an already-issued inference outcome. */ }
     }
   }
   private authorized(context: JevContext): void {

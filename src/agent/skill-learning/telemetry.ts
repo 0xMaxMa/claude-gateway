@@ -48,7 +48,7 @@ export function signalsFromTurns(rows: TurnMetricRow[]): SessionSignals {
     if (r.toolCalls > toolCalls) toolCalls = r.toolCalls;
     if (r.recoveryFired) recoveryFired = true;
   }
-  return { toolCalls, recoveryFired, userCorrection: false };
+  return { toolCalls, recoveryFired };
 }
 
 /** Signed offset (ms) of `timezone` relative to UTC at instant `now`. +ve = ahead of UTC. */

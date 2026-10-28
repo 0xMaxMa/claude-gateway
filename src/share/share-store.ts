@@ -3,6 +3,7 @@ import * as path from 'path';
 import { createHash, randomBytes, randomInt } from 'crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { MediaStore } from '../history/media-store';
+import { HistoryDB } from '../history/db';
 
 /**
  * Share bridge — SQLite-backed store for short-lived public image shares
@@ -124,9 +125,10 @@ export function detectImageMime(header: Buffer): 'image/png' | 'image/jpeg' | 'i
  * safe: an `image` share whose file became a PDF still 404s, and an `any` share
  * whose file became HTML still 404s.
  */
-export type ShareAllowKind = 'image' | 'any' | 'audio';
+export type ShareAllowKind = 'image' | 'any' | 'audio' | 'file';
+export type ShareRootKind = 'media' | 'workspace';
 
-export const SHARE_ALLOW_KINDS: readonly ShareAllowKind[] = ['image', 'any', 'audio'];
+export const SHARE_ALLOW_KINDS: readonly ShareAllowKind[] = ['image', 'any', 'audio', 'file'];
 
 export function isShareAllowKind(v: unknown): v is ShareAllowKind {
   return typeof v === 'string' && (SHARE_ALLOW_KINDS as readonly string[]).includes(v);
@@ -161,25 +163,42 @@ export function detectAudioMime(header: Buffer): 'audio/mpeg' | 'audio/mp4' | nu
 
 /** Pick the sniffer that matches a share's allow-kind. */
 export function mimeDetectorFor(allow: ShareAllowKind): (header: Buffer) => string | null {
-  return allow === 'audio' ? detectAudioMime : allow === 'any' ? detectShareMime : detectImageMime;
+  switch (allow) {
+    case 'audio': return detectAudioMime;
+    case 'any': return detectShareMime;
+    case 'file': return (header) => detectShareMime(header) ?? detectAudioMime(header) ?? 'application/octet-stream';
+    default: return detectImageMime;
+  }
+}
+
+function canonicalWorkspaceRoot(workspaceDir: string): string {
+  const stat = fs.lstatSync(workspaceDir);
+  if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('workspace root is not a real directory');
+  const realRoot = fs.realpathSync(workspaceDir);
+  const realParent = fs.realpathSync(path.dirname(workspaceDir));
+  if (path.dirname(realRoot) !== realParent || path.basename(realRoot) !== path.basename(workspaceDir)) {
+    throw new Error('workspace root escaped its agent directory');
+  }
+  return realRoot;
 }
 
 export type ValidatedShareFile = {
-  /** Path relative to the agent's media root — the ONLY path form persisted (§12.8). */
+  /** Path relative to the authorized root — absolute paths are never persisted. */
   relativePath: string;
+  rootKind: ShareRootKind;
   size: number;
   mime: string;
 };
 
 /**
  * Validate a local ref (absolute or media-relative path) for sharing (§12):
- * canonicalize, require containment in the agent's media root, reject symlink
+ * canonicalize, require containment in an authorized root, reject symlink
  * escapes, require a regular file, validate magic bytes and the per-file cap.
- * Returns only the media-root-relative path — client-supplied absolute paths
+ * Returns only a root-relative path — client-supplied absolute paths
  * are never persisted. Throws ShareError with a stable code.
  *
  * `allow` defaults to 'image' so every existing caller keeps today's behaviour;
- * only a caller that has explicitly opted into documents passes 'any' (#444).
+ * only a caller that has explicitly opted into documents/files widens the detector.
  */
 export function validateShareFile(
   agentsBaseDir: string,
@@ -187,22 +206,38 @@ export function validateShareFile(
   ref: string,
   maxFileBytes: number = DEFAULT_MAX_FILE_BYTES,
   allow: ShareAllowKind = 'image',
+  allowedDirs?: string[],
+  workspaceDir?: string,
 ): ValidatedShareFile {
   const root = MediaStore.agentMediaRoot(agentsBaseDir, agentId);
   let resolved: string;
+  let rootKind: ShareRootKind = 'media';
   try {
     if (path.isAbsolute(ref)) {
-      // Absolute input (e.g. the path generate_image returned): containment +
-      // symlink checks mirror MediaStore.resolvePath.
       const abs = path.resolve(ref);
-      if (!abs.startsWith(root + path.sep)) throw new Error('outside media root');
       resolved = fs.existsSync(abs) ? fs.realpathSync(abs) : abs;
-      if (!resolved.startsWith(root + path.sep)) throw new Error('outside media root');
+      const mediaRoot = fs.existsSync(root) ? fs.realpathSync(root) : path.resolve(root);
+      const mediaRelative = path.relative(mediaRoot, resolved);
+      if (mediaRelative && !mediaRelative.startsWith('..') && !path.isAbsolute(mediaRelative)) {
+        rootKind = 'media';
+      } else if (workspaceDir) {
+        const realWorkspace = canonicalWorkspaceRoot(workspaceDir);
+        const workspaceRelative = path.relative(realWorkspace, resolved);
+        if (!workspaceRelative || workspaceRelative.startsWith('..') || path.isAbsolute(workspaceRelative)) {
+          throw new Error('outside authorized roots');
+        }
+        rootKind = 'workspace';
+      } else {
+        throw new Error('outside media root');
+      }
     } else {
       resolved = MediaStore.resolvePath(agentsBaseDir, agentId, ref);
     }
   } catch {
     throw new ShareError('invalid_path', 'path is outside the agent media root');
+  }
+  if (allowedDirs && (rootKind !== 'media' || !isInsideAnyDir(resolved, allowedDirs))) {
+    throw new ShareError('invalid_path', "path is outside this session's media directory");
   }
   let stat: fs.Stats;
   try {
@@ -232,11 +267,52 @@ export function validateShareFile(
         : 'only PNG, JPEG and WebP can be shared',
     );
   }
-  const relativePath = path.relative(root, resolved);
-  if (relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
+  const allowedRoot = rootKind === 'workspace' ? canonicalWorkspaceRoot(workspaceDir!) : (fs.existsSync(root) ? fs.realpathSync(root) : path.resolve(root));
+  const relativePath = path.relative(allowedRoot, resolved);
+  if (!relativePath || relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
     throw new ShareError('invalid_path', 'path is outside the agent media root');
   }
-  return { relativePath, size: stat.size, mime };
+  return { relativePath, rootKind, size: stat.size, mime };
+}
+
+/** Resolve a stored root-relative share while rechecking symlink containment. */
+export function resolveShareFile(agentsBaseDir: string, agentId: string, rootKind: ShareRootKind, relativePath: string): string {
+  if (rootKind === 'media') return MediaStore.resolvePath(agentsBaseDir, agentId, relativePath);
+  const root = path.join(agentsBaseDir, agentId, 'workspace');
+  const realRoot = canonicalWorkspaceRoot(root);
+  const candidate = path.resolve(realRoot, relativePath);
+  const candidateRelative = path.relative(realRoot, candidate);
+  if (!candidateRelative || candidateRelative.startsWith('..') || path.isAbsolute(candidateRelative)) throw new Error('outside workspace root');
+  const realFile = fs.realpathSync(candidate);
+  const rel = path.relative(realRoot, realFile);
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) throw new Error('outside workspace root');
+  return realFile;
+}
+
+/**
+ * Media dirs one session owns (#609): `api-<sessionId>` (API sessions and
+ * orchestration task output) and, for a channel session, `<channel>-<chatId>`
+ * where its inbound media lands. The chat comes from the session's history
+ * rows, so a session with no user message yet owns only its api dir.
+ */
+export function sessionMediaDirs(agentsBaseDir: string, agentId: string, sessionId: string): string[] {
+  const root = MediaStore.agentMediaRoot(agentsBaseDir, agentId);
+  const dirs = [path.join(root, `api-${sessionId}`)];
+  const [first] = HistoryDB.forAgent(agentsBaseDir, agentId).getUserMessagesAfter(sessionId, 0, 1);
+  if (first && first.source !== 'api' && first.source !== 'ui') dirs.push(path.join(root, first.chatId));
+  return dirs.filter((dir) => path.dirname(dir) === root);
+}
+
+/** True when `file` sits strictly inside one of `dirs`, both compared by realpath. */
+export function isInsideAnyDir(file: string, dirs: string[]): boolean {
+  let real: string;
+  try { real = fs.realpathSync(file); } catch { real = path.resolve(file); }
+  return dirs.some((dir) => {
+    let realDir: string;
+    try { realDir = fs.realpathSync(dir); } catch { return false; }
+    const rel = path.relative(realDir, real);
+    return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
+  });
 }
 
 export type MintedShare = {
@@ -253,6 +329,7 @@ export type ShareRow = {
   agentId: string;
   sessionId: string;
   relativePath: string;
+  rootKind: ShareRootKind;
   purpose: string;
   /** What this share was minted to carry. Serving re-sniffs the file and uses
    *  this only to pick the detector — never as a cached mime (#444). */
@@ -315,6 +392,7 @@ export class ShareStore {
         agent_id      TEXT NOT NULL,
         session_id    TEXT NOT NULL,
         relative_path TEXT NOT NULL,
+        root_kind     TEXT NOT NULL DEFAULT 'media',
         purpose       TEXT NOT NULL,
         created_at    INTEGER NOT NULL,
         expires_at    INTEGER NOT NULL,
@@ -349,6 +427,9 @@ export class ShareStore {
     // allowed carry image-only shares, and 'image' is exactly their existing
     // behaviour, so the default backfills them correctly.
     const shareCols = this.db.prepare(`PRAGMA table_info(file_shares)`).all() as Array<{ name: string }>;
+    if (!shareCols.some((c) => c.name === 'root_kind')) {
+      this.db.exec(`ALTER TABLE file_shares ADD COLUMN root_kind TEXT NOT NULL DEFAULT 'media'`);
+    }
     if (!shareCols.some((c) => c.name === 'allow_kind')) {
       this.db.exec(`ALTER TABLE file_shares ADD COLUMN allow_kind TEXT NOT NULL DEFAULT 'image'`);
     }
@@ -483,6 +564,7 @@ export class ShareStore {
     agentId: string;
     sessionId: string;
     relativePath: string;
+    rootKind?: ShareRootKind;
     dedupeRef: string;
     purpose: string;
     ttlSeconds: number;
@@ -500,9 +582,9 @@ export class ShareStore {
     const shareId = `shr_${randomBytes(9).toString('base64url')}`;
     const expiresAtMs = now + a.ttlSeconds * 1000;
     this.db.prepare(
-      `INSERT INTO file_shares (id, token_hash, agent_id, session_id, relative_path, purpose, created_at, expires_at, allow_kind)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(shareId, tokenHash, a.agentId, a.sessionId, a.relativePath, a.purpose, now, expiresAtMs, allowKind);
+      `INSERT INTO file_shares (id, token_hash, agent_id, session_id, relative_path, root_kind, purpose, created_at, expires_at, allow_kind)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(shareId, tokenHash, a.agentId, a.sessionId, a.relativePath, a.rootKind ?? 'media', a.purpose, now, expiresAtMs, allowKind);
     this.mintCache.set(key, { shareId, token, expiresAtMs, deduped: false, mintedAtMs: now });
     this.pruneMintCache(now);
     return { shareId, token, expiresAtMs, deduped: false };
@@ -513,7 +595,7 @@ export class ShareStore {
     if (!SHARE_TOKEN_RE.test(token)) return null;
     const tokenHash = createHash('sha256').update(token).digest();
     const row = this.db.prepare(
-      `SELECT id, agent_id, session_id, relative_path, purpose, allow_kind
+      `SELECT id, agent_id, session_id, relative_path, root_kind, purpose, allow_kind
        FROM file_shares
        WHERE token_hash = ? AND revoked_at IS NULL AND expires_at > ?`,
     ).get(tokenHash, Date.now()) as
@@ -522,6 +604,7 @@ export class ShareStore {
           agent_id: string;
           session_id: string;
           relative_path: string;
+          root_kind: string | null;
           purpose: string;
           allow_kind: string | null;
         }
@@ -532,6 +615,7 @@ export class ShareStore {
       agentId: row.agent_id,
       sessionId: row.session_id,
       relativePath: row.relative_path,
+      rootKind: row.root_kind === 'workspace' ? 'workspace' : 'media',
       purpose: row.purpose,
       // Anything unrecognised (or a legacy NULL) falls back to the strictest
       // kind — an unknown value must never widen what a share can serve.

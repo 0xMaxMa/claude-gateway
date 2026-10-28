@@ -340,6 +340,23 @@ describe('dreaming: DreamingManager wires the compactor (#337)', () => {
     expect(fs.existsSync(path.join(ws, ARCHIVE_REL_PATH))).toBe(true);
   });
 
+  it('C-17b: disableArchive (#609) never compacts — nothing may leave MEMORY.md without memory_search', async () => {
+    const ws = mkWs({ 'MEMORY.md': MIXED });
+    const before = fs.readFileSync(path.join(ws, 'MEMORY.md'), 'utf8');
+    const mgr = new DreamingManager({
+      db: activeDb(NOW),
+      agentId: 'a',
+      workspaceDir: ws,
+      globalCfg: { mode: 'auto' },
+      spawnFn: emptyReviewer,
+      disableArchive: true,
+    });
+    const res = await mgr.dreamOnce(NOW);
+    expect(res.compactedCount ?? 0).toBe(0);
+    expect(fs.readFileSync(path.join(ws, 'MEMORY.md'), 'utf8')).toBe(before);
+    expect(fs.existsSync(path.join(ws, 'memory', 'archive'))).toBe(false);
+  });
+
   it('C-18: propose mode never compacts (memory is not mutated)', async () => {
     const ws = mkWs({ 'MEMORY.md': MIXED });
     const before = fs.readFileSync(path.join(ws, 'MEMORY.md'), 'utf8');

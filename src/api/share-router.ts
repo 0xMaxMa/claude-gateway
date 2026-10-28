@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
-import { createApiAuthMiddleware, canAccessAgent } from './auth';
+import { createApiAuthMiddleware, canAccessAgent, isAdmin } from './auth';
 import { isValidAgentId, isValidSessionId } from './router';
 import { MediaStore } from '../history/media-store';
 import { ApiKey } from '../types';
@@ -14,6 +14,8 @@ import {
   shareEnv,
   shareLimitsFromEnv,
   validateShareFile,
+  resolveShareFile,
+  sessionMediaDirs,
   DEFAULT_SHARE_TTL_SECONDS,
 } from '../share/share-store';
 import { computeSessionImageCatalog } from '../share/session-image-catalog';
@@ -81,6 +83,7 @@ function rfc8187(value: string): string {
  *  the browser renders from `file://`, running whatever script follows the PDF
  *  magic (reflected file download). The extension must describe the bytes. */
 const EXT_FOR_MIME: Record<string, string> = { 'application/pdf': 'pdf', 'audio/mpeg': 'mp3', 'audio/mp4': 'm4a' };
+const SAFE_OPAQUE_EXTENSIONS = new Set(['iso', 'zip', 'tar', 'gz', 'xz', 'bz2', '7z', 'rar', 'docx', 'xlsx', 'pptx', 'odt', 'ods', 'odp', 'txt', 'csv', 'tsv', 'log', 'md', 'yaml', 'yml', 'toml', 'ini', 'conf', 'db', 'sqlite', 'bin', 'dat', 'dcm', 'nii', 'nrrd', 'parquet', 'jsonl', 'mp4', 'mkv', 'webm', 'wav', 'flac', 'aac']);
 
 /**
  * Build the `Content-Disposition` for a non-image share (#444). The basename
@@ -89,16 +92,12 @@ const EXT_FOR_MIME: Record<string, string> = { 'application/pdf': 'pdf', 'audio/
  * alone rules out the CR/LF that would split the header — and the real name
  * rides along percent-encoded in `filename*`.
  */
-export function attachmentDisposition(basename: string, mime: string): string {
-  const ext = EXT_FOR_MIME[mime];
-  // Drop whatever extension the agent picked, ALWAYS — the sniffed one replaces
-  // it, and when the mime maps to no extension the name simply ships without
-  // one. Keeping the agent's extension in that case would be the RFD hole this
-  // function exists to close: an unmapped mime is precisely the case where we
-  // cannot vouch for what the bytes are, so it must fail closed, not fall back
-  // to the attacker-chosen `.html`. (No unmapped mime reaches here today —
-  // images are served inline and PDF is the only other allowlisted type — so
-  // this is the guard for whatever gets allowlisted next.)
+export function attachmentDisposition(basename: string, mime: string, preserveOpaqueExtension = false): string {
+  const originalExt = path.extname(basename).slice(1).toLowerCase();
+  const ext = EXT_FOR_MIME[mime] ?? (preserveOpaqueExtension && SAFE_OPAQUE_EXTENSIONS.has(originalExt) ? originalExt : undefined);
+  // Known formats use an extension derived from their sniffed MIME. Opaque
+  // downloads may retain a passive extension (e.g. .iso), but active or
+  // executable extensions are always dropped.
   const suffix = ext ? `.${ext}` : '';
   const rawStem = basename.replace(/\.[^./\\]*$/, '');
   // Cap the STEM, so the extension survives truncation — a 4 KB agent-chosen
@@ -199,10 +198,10 @@ export function createSharesPublicRouter(
     // (fstat regular-file + size + magic) to shrink the TOCTOU window (§12.10).
     let fd: number | undefined;
     try {
-      const abs = MediaStore.resolvePath(agentsBaseDir, share.agentId, share.relativePath);
+      const abs = resolveShareFile(agentsBaseDir, share.agentId, share.rootKind, share.relativePath);
       fd = fs.openSync(abs, 'r');
       const stat = fs.fstatSync(fd);
-      if (!stat.isFile() || stat.size > limits.maxFileBytes) throw new Error('invalid file');
+      if (!stat.isFile() || (share.allowKind !== 'file' && stat.size > limits.maxFileBytes)) throw new Error('invalid file');
       const header = Buffer.alloc(12);
       fs.readSync(fd, header, 0, 12, 0);
       // Always re-sniff. The share row records the ALLOW-KIND it was minted
@@ -215,10 +214,11 @@ export function createSharesPublicRouter(
 
       // Explicitly authorized audio is playable inline and supports iOS byte
       // probes/seeking. Documents remain downloads; MIME is still revalidated.
-      const isImage = mime.startsWith('image/'), isAudio = mime === 'audio/mpeg' || mime === 'audio/mp4';
-      let start = 0, end = stat.size - 1, status = 200;
-      if (isAudio) res.set('Accept-Ranges', 'bytes');
-      if (isAudio && req.method === 'GET' && req.headers.range && !req.headers['if-range']) {
+      const isImage = mime.startsWith('image/'), isAudio = share.allowKind === 'audio' && (mime === 'audio/mpeg' || mime === 'audio/mp4');
+      let start = 0, end = Math.max(0, stat.size - 1), status = 200;
+      const supportsRanges = isAudio || share.allowKind === 'file';
+      if (supportsRanges) res.set('Accept-Ranges', 'bytes');
+      if (supportsRanges && req.method === 'GET' && req.headers.range && !req.headers['if-range']) {
         const ranges = req.range(stat.size, { combine: true });
         if (ranges === -1) {
           fs.closeSync(fd); fd = undefined;
@@ -233,8 +233,8 @@ export function createSharesPublicRouter(
       }
       res.status(status).set({
         'Content-Type': mime,
-        'Content-Length': String(end - start + 1),
-        'Content-Disposition': isImage || isAudio ? 'inline' : attachmentDisposition(path.basename(share.relativePath), mime),
+        'Content-Length': String(stat.size === 0 ? 0 : end - start + 1),
+        'Content-Disposition': isImage || isAudio ? 'inline' : attachmentDisposition(path.basename(share.relativePath), mime, share.allowKind === 'file'),
         'X-Content-Type-Options': 'nosniff',
         'Cache-Control': 'private, no-store',
       });
@@ -243,7 +243,9 @@ export function createSharesPublicRouter(
         res.end();
       } else {
         // createReadStream owns the fd from here (autoClose defaults true).
-        const stream = fs.createReadStream('', { fd, start, end });
+        const stream = stat.size === 0
+          ? fs.createReadStream('', { fd })
+          : fs.createReadStream('', { fd, start, end });
         stream.on('error', () => {
           try { res.destroy(); } catch { /* already gone */ }
         });
@@ -268,10 +270,15 @@ export function createSharesPrivateRouter(
   agentsBaseDir: string,
   publicBaseUrl?: string | (() => string | undefined),
   limitsOverride?: ShareLimits,
+  isIsolatedAgent: (agentId: string) => boolean = () => false,
 ): Router {
   const router = Router();
   const auth = createApiAuthMiddleware(apiKeys);
   const limits = limitsOverride ?? shareLimitsFromEnv();
+  // isolate_memory agents serve unrelated end users from one media root, so a
+  // session may only share or register files from its own media dirs (#609).
+  const sessionScope = (agentId: string, sessionId: string): string[] | undefined =>
+    isIsolatedAgent(agentId) ? sessionMediaDirs(agentsBaseDir, agentId, sessionId) : undefined;
   const defaultTtl = (() => {
     const n = Number(shareEnv('CODEX_TTL_SECONDS'));
     return Number.isFinite(n) && n > 0 ? Math.floor(n) : DEFAULT_SHARE_TTL_SECONDS;
@@ -279,13 +286,14 @@ export function createSharesPrivateRouter(
 
   /**
    * POST /api/v1/shares — mint one or more shares (§10).
-   * Body: { agent_id, session_id, purpose?, ttl_seconds?, allow_documents?, refs: [{artifact_id}|{path}] }
+   * Body: { agent_id, session_id, purpose?, ttl_seconds?, allow_documents?, allow_all_files?, refs: [{artifact_id}|{path}] }
    * Response: { items: [{ share_id, token, url?, expires_at }] } — order preserved.
    * `token` is always present (host-agnostic capability); `url` is a convenience
    * built from `gateway.publicUrl` and is omitted when that is unset — callers
    * with their own public base (e.g. LINE) build the URL from `token`.
-   * `allow_documents` widens the allowlist to PDF for THIS request only and is
-   * recorded on each minted row (#444); without it a PDF is still 415.
+   * `allow_documents` widens the allowlist to PDF for THIS request only (#444).
+   * `allow_all_files` is reserved for the explicit share_file tool and opts a
+   * path into arbitrary-file downloads under the authorized roots.
    */
   router.post('/v1/shares', auth, (req: Request, res: Response) => {
     const apiKey = (req as AuthedRequest).apiKey;
@@ -295,6 +303,7 @@ export function createSharesPrivateRouter(
       purpose?: unknown;
       ttl_seconds?: unknown;
       allow_documents?: unknown;
+      allow_all_files?: unknown;
       refs?: unknown;
     };
     const agentId = typeof body.agent_id === 'string' ? body.agent_id.trim() : '';
@@ -324,7 +333,12 @@ export function createSharesPrivateRouter(
       res.status(400).json({ error: 'allow_documents must be a boolean' });
       return;
     }
-    const allowKind: ShareAllowKind = body.allow_documents === true ? 'any' : 'image';
+    if (body.allow_all_files !== undefined && typeof body.allow_all_files !== 'boolean') {
+      res.status(400).json({ error: 'allow_all_files must be a boolean' });
+      return;
+    }
+    const allowAllFiles = body.allow_all_files === true;
+    const allowKind: ShareAllowKind = allowAllFiles ? 'file' : body.allow_documents === true ? 'any' : 'image';
     const refs = body.refs;
     if (!Array.isArray(refs) || refs.length === 0) {
       res.status(400).json({ error: 'refs must be a non-empty array' });
@@ -342,6 +356,7 @@ export function createSharesPrivateRouter(
     type Resolved = {
       dedupeRef: string;
       relativePath: string;
+      rootKind: 'media' | 'workspace';
       size: number;
       allowKind: ShareAllowKind;
       taskId?: string;
@@ -350,6 +365,7 @@ export function createSharesPrivateRouter(
     };
     const resolved: Resolved[] = [];
     const seen = new Set<string>();
+    const allowedDirs = sessionScope(agentId, sessionId);
     let totalBytes = 0;
     for (const raw of refs as unknown[]) {
       if (typeof raw !== 'object' || raw === null) {
@@ -382,7 +398,16 @@ export function createSharesPrivateRouter(
       }
       let validated;
       try {
-        validated = validateShareFile(agentsBaseDir, agentId, candidatePath, limits.maxFileBytes, allowKind);
+        const workspaceDir = allowAllFiles && !isIsolatedAgent(agentId) ? path.join(agentsBaseDir, agentId, 'workspace') : undefined;
+        validated = validateShareFile(
+          agentsBaseDir,
+          agentId,
+          candidatePath,
+          allowAllFiles ? Number.MAX_SAFE_INTEGER : limits.maxFileBytes,
+          allowKind,
+          allowedDirs,
+          workspaceDir,
+        );
       } catch (err) {
         if (err instanceof ShareError) {
           res.status(errStatus(err.code)).json({ error: err.message, code: err.code });
@@ -391,7 +416,7 @@ export function createSharesPrivateRouter(
         res.status(400).json({ error: 'invalid ref', code: 'invalid_path' });
         return;
       }
-      if (!dedupeRef) dedupeRef = `path:${validated.relativePath}`;
+      if (!dedupeRef) dedupeRef = `path:${validated.rootKind}:${validated.relativePath}`;
       // Identical refs within one request are legitimate (e.g. line_image mints
       // the same file for both originalContentUrl and previewImageUrl when no
       // separate preview is given) — let store.mintShare's own dedupeRef
@@ -405,6 +430,7 @@ export function createSharesPrivateRouter(
       resolved.push({
         dedupeRef,
         relativePath: validated.relativePath,
+        rootKind: validated.rootKind,
         size: validated.size,
         // Persist the kind this ref ACTUALLY validated as, not the request's
         // ceiling. `allow_documents` is the caller's permission to include a
@@ -421,7 +447,7 @@ export function createSharesPrivateRouter(
         priorPrompt,
       });
     }
-    if (totalBytes > limits.maxTotalBytes) {
+    if (!allowAllFiles && totalBytes > limits.maxTotalBytes) {
       res.status(413).json({ error: `total reference size exceeds ${limits.maxTotalBytes} bytes`, code: 'total_size_exceeded' });
       return;
     }
@@ -431,6 +457,7 @@ export function createSharesPrivateRouter(
         agentId,
         sessionId,
         relativePath: r.relativePath,
+        rootKind: r.rootKind,
         dedupeRef: r.dedupeRef,
         purpose,
         ttlSeconds,
@@ -461,13 +488,17 @@ export function createSharesPrivateRouter(
   /**
    * DELETE /api/v1/shares/:shareId — revoke (§10). Only a key with
    * access to the owning agent (or admin) may revoke; anything else is a
-   * uniform 404 so share ids are not confirmable cross-tenant.
+   * uniform 404 so share ids are not confirmable cross-tenant. For an
+   * isolate_memory agent a non-admin key must also name the owning session
+   * (`?session_id=`).
    */
   router.delete('/v1/shares/:shareId', auth, (req: Request, res: Response) => {
     const apiKey = (req as AuthedRequest).apiKey;
     const shareId = req.params.shareId ?? '';
     const owner = store.getShareOwner(shareId);
-    if (!owner || !canAccessAgent(apiKey, owner.agentId)) {
+    const sameSession = req.query.session_id === owner?.sessionId;
+    if (!owner || !canAccessAgent(apiKey, owner.agentId)
+      || (isIsolatedAgent(owner.agentId) && !isAdmin(apiKey) && !sameSession)) {
       res.status(404).json({ error: 'share not found' });
       return;
     }
@@ -522,6 +553,7 @@ export function createSharesPrivateRouter(
       : undefined;
 
     const items: Array<{ artifact_id: string; artifact_ref: string; index: number; path: string }> = [];
+    const allowedDirs = sessionScope(agentId, sessionId);
     for (let index = 0; index < (files as string[]).length; index++) {
       const file = (files as string[])[index]!;
       let validated;
@@ -529,7 +561,7 @@ export function createSharesPrivateRouter(
         // Deliberately NOT widened by #444: this registry feeds the session
         // IMAGE catalog (generate_image refs, "the second image"), so it takes
         // the default 'image' allow-kind and a PDF here is still a 415.
-        validated = validateShareFile(agentsBaseDir, agentId, file, limits.maxFileBytes);
+        validated = validateShareFile(agentsBaseDir, agentId, file, limits.maxFileBytes, 'image', allowedDirs);
       } catch (err) {
         const code = err instanceof ShareError ? err.code : 'invalid_path';
         res.status(errStatus(code)).json({ error: err instanceof Error ? err.message : 'invalid file', code });

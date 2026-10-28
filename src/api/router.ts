@@ -18,8 +18,10 @@ import { agentsDirForConfig } from '../config/agent-env';
 import { withConfigWriteLock, writeConfigAtomic } from '../config/config-write-lock';
 import { createApiAuthMiddleware, canAccessAgent, canWriteAgent, isAdmin } from './auth';
 import { MediaStore } from '../history/media-store';
+import { isInsideAnyDir, sessionMediaDirs } from '../share/share-store';
 import { HistoryDB, MAX_HISTORY_LIMIT } from '../history/db';
 import { isChatChannel } from '../history/types';
+import { readTelegramAccess as readTelegramAccessFile, telegramStateDir, type TelegramAccess } from '../telegram/access';
 import { wizardStore } from './wizard-state';
 import { getPendingSenders, clearPendingSender } from './pending-senders';
 import { buildGenerationPrompt, parseGeneratedFiles, buildRewriteDescriptionPrompt } from '../agent/create-agent-prompts';
@@ -601,6 +603,15 @@ export function createApiRouter(
     newId?: string,
   ): Promise<void> {
     return withConfigWriteLock(cfgPath, () => writeAgentsToConfigImpl(cfgPath, mutate, newId));
+  }
+
+  // An isolate_memory agent serves many unrelated end users, and the key a
+  // conversation can reach is agent-scoped, so routes that read or message an
+  // arbitrary chat need an admin key for such agents (#609).
+  function denyCrossChatForIsolated(apiKey: ApiKey, agentId: string, res: Response): boolean {
+    if (isAdmin(apiKey) || agentConfigs.get(agentId)?.isolateMemory !== true) return false;
+    res.status(403).json({ error: `Agent '${agentId}' uses isolate_memory: cross-chat access requires an admin key` });
+    return true;
   }
 
   /**
@@ -1236,92 +1247,11 @@ export function createApiRouter(
   }
 
   function getTelegramStateDir(agentId: string): string {
-    const agentsBase = getAgentsBaseDir();
-    const cfg = agentConfigs.get(agentId);
-    const workspace = cfg?.workspace
-      ? (cfg.workspace.startsWith('~') ? path.join(os.homedir(), cfg.workspace.slice(1)) : cfg.workspace)
-      : path.join(agentsBase, agentId, 'workspace');
-    return path.join(workspace, '.telegram-state');
+    return telegramStateDir(agentConfigs.get(agentId)?.workspace, getAgentsBaseDir(), agentId);
   }
 
-  type TelegramAccess = {
-    dmPolicy: 'open' | 'allowlist' | 'disabled';
-    // Orthogonal pairing toggle (mirrors LINE). Meaningful only when
-    // dmPolicy === 'allowlist'. Kept in sync with the runtime shape in
-    // mcp/tools/telegram/pure.ts (migrateAccess).
-    pairing: boolean;
-    allowFrom: string[];
-    // Group tier (mirrors LINE): flat allowlist + single mention gate.
-    groupPolicy: 'open' | 'allowlist' | 'disabled';
-    groupAllowlist: string[];
-    requireMention: boolean;
-    // Migration-only artifact — mirrors pure.ts Access — keep in sync. Never
-    // written by any endpoint; only preserved so a pre-split group's per-user
-    // restriction survives being read+written back through this API.
-    legacyGroupAllowFrom?: Record<string, string[]>;
-    pending: Record<string, { senderId: string; chatId: string; createdAt: number; expiresAt: number; replies: number; kind?: 'dm' | 'group' }>;
-  };
-
   function readTelegramAccess(agentId: string): TelegramAccess {
-    const accessFile = path.join(getTelegramStateDir(agentId), 'access.json');
-    try {
-      const raw = fs.readFileSync(accessFile, 'utf8');
-      const parsed = JSON.parse(raw) as {
-        dmPolicy?: string;
-        pairing?: boolean;
-        allowFrom?: string[];
-        groups?: Record<string, { requireMention?: boolean; allowFrom?: string[] }>;
-        groupPolicy?: string;
-        groupAllowlist?: string[];
-        requireMention?: boolean;
-        legacyGroupAllowFrom?: Record<string, string[]>;
-        pending?: TelegramAccess['pending'];
-      };
-      // Migrate the legacy 4-value dmPolicy (pairing folded in) to the split
-      // model. SECURITY: a legacy 'allowlist' file was locked down → pairing:false
-      // (an absent pairing on an existing file means pre-split); 'pairing' → mint on.
-      // Mirrors migrateAccess() in mcp/tools/telegram/pure.ts — keep in sync.
-      const legacy = parsed.dmPolicy;
-      let dmPolicy: TelegramAccess['dmPolicy'];
-      let pairing: boolean;
-      if (legacy === 'pairing') {
-        dmPolicy = 'allowlist';
-        pairing = true;
-      } else {
-        dmPolicy = (legacy as TelegramAccess['dmPolicy']) ?? 'allowlist';
-        pairing = parsed.pairing ?? false;
-      }
-      // Group tier: flatten legacy per-group `groups` map to a flat allowlist,
-      // behavior-preserving (groups were closed-by-default). Mirrors pure.ts.
-      // A group's per-user `allowFrom` override has no flat-model equivalent,
-      // but it's a real restriction — preserve it (mirrors
-      // deriveLegacyGroupAllowFrom in pure.ts, keep in sync) rather than
-      // silently dropping it and widening the group to every member.
-      const groupAllowlist = parsed.groupAllowlist ?? Object.keys(parsed.groups ?? {});
-      const groupPolicy = (parsed.groupPolicy as TelegramAccess['groupPolicy']) ?? 'allowlist';
-      const requireMention = parsed.requireMention ?? true;
-      let legacyGroupAllowFrom = parsed.legacyGroupAllowFrom;
-      if (!legacyGroupAllowFrom && parsed.groups) {
-        const derived: Record<string, string[]> = {};
-        for (const [groupId, g] of Object.entries(parsed.groups)) {
-          if (g.allowFrom && g.allowFrom.length > 0) derived[groupId] = [...g.allowFrom];
-        }
-        if (Object.keys(derived).length > 0) legacyGroupAllowFrom = derived;
-      }
-      return {
-        dmPolicy,
-        pairing,
-        allowFrom: parsed.allowFrom ?? [],
-        groupPolicy,
-        groupAllowlist,
-        requireMention,
-        legacyGroupAllowFrom,
-        pending: parsed.pending ?? {},
-      };
-    } catch {
-      // Brand-new agent (no file): closed base + pairing on (capture owner id).
-      return { dmPolicy: 'allowlist', pairing: true, allowFrom: [], groupPolicy: 'allowlist', groupAllowlist: [], requireMention: true, pending: {} };
-    }
+    return readTelegramAccessFile(getTelegramStateDir(agentId));
   }
 
   function writeTelegramAccess(agentId: string, access: TelegramAccess): void {
@@ -2075,9 +2005,11 @@ export function createApiRouter(
         // Shape only, not existence: enablement is stored per agent and read back
         // by id, so an id that can't be a connector id is an entry nothing will
         // ever match — it just accumulates in config.json. Existence is
-        // deliberately NOT required; enablement defaults to opt-out, so
-        // pre-setting `{enabled: false}` for a connector nobody has added yet is a
-        // legitimate way to keep it off an agent from the moment it appears.
+        // deliberately NOT required: an entry can still default to opt-out (one
+        // stored before POST /custom defaulted to opt-in, or one pushed via
+        // /oauth/receive), so pre-setting `{enabled: false}` for a connector nobody
+        // has added yet is a legitimate way to keep it off an agent from the moment
+        // it appears.
         if (!isValidConnectorId(id)) {
           res.status(400).json({ error: `Invalid connector id '${id}'` });
           return;
@@ -3821,6 +3753,7 @@ export function createApiRouter(
       res.status(403).json({ error: `API key has no access to agent '${agentId}'` });
       return;
     }
+    if (denyCrossChatForIsolated(apiKey, agentId, res)) return;
     const runner = agentRunners.get(agentId);
     if (!runner) {
       res.status(404).json({ error: `Agent '${agentId}' not found` });
@@ -3842,6 +3775,7 @@ export function createApiRouter(
       res.status(403).json({ error: `API key has no access to agent '${agentId}'` });
       return;
     }
+    if (denyCrossChatForIsolated(apiKey, agentId, res)) return;
     const runner = agentRunners.get(agentId);
     if (!runner) {
       res.status(404).json({ error: `Agent '${agentId}' not found` });
@@ -3872,6 +3806,7 @@ export function createApiRouter(
       res.status(403).json({ error: `API key has no access to agent '${agentId}'` });
       return;
     }
+    if (denyCrossChatForIsolated(apiKey, agentId, res)) return;
     const runner = agentRunners.get(agentId);
     if (!runner) {
       res.status(404).json({ error: `Agent '${agentId}' not found` });
@@ -3943,6 +3878,7 @@ export function createApiRouter(
       res.status(403).json({ error: `API key has no access to agent '${agentId}'` });
       return;
     }
+    if (denyCrossChatForIsolated(apiKey, agentId, res)) return;
     const runner = agentRunners.get(agentId);
     if (!runner) {
       res.status(404).json({ error: `Agent '${agentId}' not found` });
@@ -3974,6 +3910,7 @@ export function createApiRouter(
       res.status(403).json({ error: `API key has no access to agent '${agentId}'` });
       return;
     }
+    if (denyCrossChatForIsolated(apiKey, agentId, res)) return;
     const runner = agentRunners.get(agentId);
     if (!runner) {
       res.status(404).json({ error: `Agent '${agentId}' not found` });
@@ -4032,6 +3969,7 @@ export function createApiRouter(
       res.status(403).json({ error: `API key has no access to agent '${agentId}'` });
       return;
     }
+    if (denyCrossChatForIsolated(apiKey, agentId, res)) return;
     const runner = agentRunners.get(agentId);
     if (!runner) {
       res.status(404).json({ error: `Agent '${agentId}' not found` });
@@ -4112,17 +4050,21 @@ export function createApiRouter(
         res.status(400).json({ error: 'files must be an array of strings' });
         return;
       }
-      // Validate all paths stay within the agent's media directory
+      // Validate all paths stay within the agent's media directory, through
+      // realpath so a symlink cannot point outside it. An isolate_memory agent
+      // is further held to this session's own media dirs (#609).
       const agentsBaseDir = runner.getAgentsBaseDir();
-      const mediaRoot = path.join(agentsBaseDir, agentId, 'media') + path.sep;
+      const allowedDirs = agentConfigs.get(agentId)?.isolateMemory === true
+        ? sessionMediaDirs(agentsBaseDir, agentId, sessionId)
+        : [MediaStore.agentMediaRoot(agentsBaseDir, agentId)];
       const validFiles: string[] = [];
       for (const f of files as string[]) {
         const real = path.resolve(f);
-        if (!real.startsWith(mediaRoot)) {
+        if (!isInsideAnyDir(real, allowedDirs)) {
           res.status(400).json({ error: `File path outside media directory: ${f}` });
           return;
         }
-        validFiles.push(real);
+        validFiles.push(fs.existsSync(real) ? fs.realpathSync(real) : real);
       }
       runner.addApiAttachments(sessionId, validFiles);
       res.json({ ok: true, count: validFiles.length });
@@ -4245,13 +4187,13 @@ export function createApiRouter(
       res.status(403).json({ error: `API key has no access to agent '${agentId}'` });
       return;
     }
+    const wildcardParam = (req.params as Record<string, string>)['0'] ?? '';
     const runner = agentRunners.get(agentId);
     if (!runner) {
       res.status(404).json({ error: `Agent '${agentId}' not found` });
       return;
     }
 
-    const wildcardParam = (req.params as Record<string, string>)['0'] ?? '';
     const agentsBaseDir = runner.getAgentsBaseDir();
     let absPath: string;
     try {
@@ -4260,6 +4202,14 @@ export function createApiRouter(
       res.status(400).json({ error: 'Invalid path' });
       return;
     }
+    // The media root holds every conversation's files (#609). An API client addresses
+    // its own sessions (`api-<session>`, as in the reply attachment URLs it is handed);
+    // any other file of an isolated agent needs an admin key. Judged on the resolved
+    // file, so neither `..` nor a symlink in a session directory leads elsewhere.
+    const mediaRoot = MediaStore.agentMediaRoot(agentsBaseDir, agentId);
+    const root = fs.existsSync(mediaRoot) ? fs.realpathSync(mediaRoot) : mediaRoot;
+    const [session] = path.relative(root, absPath).split(path.sep);
+    if (!(session?.startsWith('api-') && path.relative(root, absPath).split(path.sep).length > 1) && denyCrossChatForIsolated(apiKey, agentId, res)) return;
     if (!fs.existsSync(absPath)) {
       res.status(404).json({ error: 'Not found' });
       return;

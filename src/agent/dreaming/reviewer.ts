@@ -61,7 +61,7 @@ MEMORY TIERS — route each op by what it is:
 - EPISODIC task-log (a record of what HAPPENED: completed work, PR/issue status, dated events) → tier "episodic". NEVER put task-log in MEMORY.md.
 - Litmus: "standing context for future unrelated sessions?" → MEMORY.md. "a record of a thing that happened?" → episodic.
 For an EPISODIC op use exactly: {"op":"add","tier":"episodic","topic":"<lowercase-kebab-slug>","content":"...","reason":"...","score":0.0-1.0,"recallCount":N}. topic MUST match ^[a-z0-9-]{1,64}$. Episodic ops are always "add" (never replace/remove). Durable ops keep the "file" form above (no "tier" needed).
-On a durable "add", also set "topic" to a short kebab-slug naming the FACT itself (e.g. "deploy-requires-manual-bootstrap"), matching ^[a-z0-9-]{1,64}$. It names what the fact IS, so the same fact earns the same slug on a later night; "reason" stays free-form and must NOT be an editing instruction like "insert after the cron section".`;
+Every durable "add" MUST set "topic" to a short kebab-slug naming the FACT itself (e.g. "deploy-requires-manual-bootstrap"), matching ^[a-z0-9-]{1,64}$. It names what the fact IS, so the same fact earns the same slug on a later night. "reason" stays free-form justification; it is not a name.`;
 
 function buildPrompt(input: DreamReviewerInput): string {
   const overBudget =

@@ -101,6 +101,8 @@ describe('DELETE /api/v1/agents/:id/skills/:name reconciles skill_stats', () => 
     };
     const stubRunner = {
       getHistoryDb: () => db,
+      recomposeWorkspace: async () => false,
+      getSkillRegistry: () => ({ skills: new Map() }),
       setSkillRegistry: () => {},
     } as unknown as AgentRunner;
     const WRITE_KEY: ApiKey = { key: 'sk-write', write: true, agents: [AGENT_ID] };

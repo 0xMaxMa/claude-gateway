@@ -4,6 +4,8 @@
  * not code — see CustomConnectorEntry's doc comment in connectors/types.ts.
  */
 
+import type { CustomConnectorEntry } from './types';
+
 const PLACEHOLDER_RE = /\{([a-zA-Z_][a-zA-Z0-9_]*)\}/g;
 
 /**
@@ -155,4 +157,60 @@ export const MAX_CONNECTOR_ID_LENGTH = 64;
 
 export function isValidConnectorId(id: string): boolean {
   return id.length <= MAX_CONNECTOR_ID_LENGTH && CONNECTOR_ID_RE.test(id);
+}
+
+/**
+ * How a secret-bearing connector reaches an agent without its secret being written
+ * into an agent-readable file (#635):
+ *
+ *   'none'     No secret; the entry is written as configured.
+ *   'proxy'    An HTTP entry. The file points Claude Code's own HTTP transport at the
+ *              gateway's loopback proxy, which adds `url`/`headers` (connectors/proxy.ts).
+ *   'launch'   A stdio or SSE entry. The file holds a stdio launcher that streams the
+ *              MCP session to a gateway-spawned bridge, which receives the resolved
+ *              entry over a pipe (mcp/connector-launcher.mjs, mcp/connector-bridge.ts).
+ *   'exposed'  Still written resolved, exactly as before #635: the entry has a field
+ *              only Claude Code itself can act on (`headersHelper` runs a command whose
+ *              headers it adds per request, `oauth` starts its own sign-in against the
+ *              entry's url), or a transport the gateway cannot carry (`ws`). Either
+ *              field breaks behind the proxy even without a placeholder: the helper's
+ *              headers would be dropped there, and sign-in would target the proxy URL.
+ *
+ * A placeholder in any other field is resolved in the gateway and that field is left
+ * out of the agent-facing entry; no transport the gateway drives reads it.
+ */
+export type ConnectorSecretRoute = 'none' | 'proxy' | 'launch' | 'exposed';
+
+const CLIENT_ONLY_FIELDS = ['headersHelper', 'oauth'];
+
+export function connectorSecretRoute(entry: CustomConnectorEntry | undefined): ConnectorSecretRoute {
+  if (!entry || !Array.isArray(entry.secretNames) || !entry.secretNames.length) return 'none';
+  const config = entry.config;
+  if (!config || typeof config !== 'object') return 'exposed';
+  if (CLIENT_ONLY_FIELDS.some(field => config[field] !== undefined)) return 'exposed';
+  if (isStreamableHttpType(config.type)) return 'proxy';
+  if (config.type === 'sse') return 'launch';
+  if ((config.type === undefined || config.type === 'stdio') && typeof config.command === 'string') return 'launch';
+  return 'exposed';
+}
+
+/** Fields the gateway drives each transport with; never copied into an agent-facing entry. */
+const TRANSPORT_FIELDS = ['type', 'command', 'args', 'env', 'cwd', 'url', 'headers'];
+
+/** The configured fields an agent-facing entry keeps (enabled_tools, timeout, ...):
+ * everything except the transport fields and any field holding a placeholder. The
+ * unresolved config holds `{placeholder}`s, never secrets, so nothing here is one. */
+export function agentFacingFields(config: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(config).filter(([field, value]) =>
+    !TRANSPORT_FIELDS.includes(field) && !extractPlaceholders(value).length));
+}
+
+/** The streamable-HTTP transport, under either name a pasted mcpServers entry uses. */
+export function isStreamableHttpType(type: unknown): boolean {
+  return type === 'http' || type === 'streamable-http';
+}
+
+/** True when resolving this connector still writes its secret into an agent-readable file. */
+export function exposesSecretToAgent(entry: CustomConnectorEntry): boolean {
+  return connectorSecretRoute(entry) === 'exposed';
 }

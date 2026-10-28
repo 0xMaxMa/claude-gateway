@@ -1,5 +1,6 @@
 import { stripMarkdownPreservingUrls } from '../agent/line-pure';
 import { describeVoiceError } from '../voice/errors';
+import { MANAGED_VOICE_QUOTA_EXHAUSTED } from '../voice/managed-quota';
 import { resolveTelegramReplyFormat } from '../telegram/markdown';
 import { chunkText, htmlToPlain } from '../telegram/chunks';
 import { orderLineRequest } from '../shared/line-request-order';
@@ -88,6 +89,7 @@ export function channelSender(config: AgentConfig | (() => AgentConfig), request
 export function speechFailureNotice(code: string): string {
   const diagnostic = describeVoiceError(code);
   const messages: Record<string, [string, string]> = {
+    managed_credit: ['Voice reply unavailable: voice credit is used up', 'Text replies continue until the credit resets or is topped up'],
     quota: ['Voice quota exhausted', 'Try again after the quota resets'],
     daily_quota: ['Voice quota exhausted', 'Try again after the quota resets'],
     quota_or_rate_limit: ['Voice rate limit or quota reached', 'Check provider usage'],
@@ -229,16 +231,21 @@ export class DeliveryOutbox {
           }
           this.store.run('UPDATE deliveries SET state=?,provider_message_id=?,updated_at=? WHERE id=?', result.state, result.state === 'delivered' ? result.providerId ?? null : null, Date.now(), id);
           this.store.run('UPDATE outbox SET state=?,last_error=? WHERE id=?', result.state === 'delivered' ? 'completed' : result.state, result.state === 'delivered' ? null : result.message ? `${result.code}: ${result.message}` : result.code, row.id);
-          if (delivery.modality === 'speech' && result.state === 'failed' && result.speechSynthesisFailed) {
+          const speech = delivery.modality === 'speech' ? JSON.parse(String(delivery.delivered_text)) as SpeechDelivery : undefined;
+          if (speech && result.state === 'delivered' && String(speech.provider).startsWith('managed:')) this.store.clearVoiceCreditNotices();
+          if (delivery.modality === 'text' && result.state === 'failed') this.store.releaseVoiceCreditNotice(String(delivery.response_id));
+          if (speech && result.state === 'failed' && result.speechSynthesisFailed) {
             const key = `speech-failure:${id}`;
+            // An empty managed wallet fails every reply until it is topped up: say so once per chat.
             if (!this.store.get('SELECT id FROM outbox WHERE dedup_key=?', key)) {
-              const noticeId = randomUUID();
-              const diagnostic = describeVoiceError(result.code);
-              const text = speechFailureNotice(result.code);
-              this.store.run('INSERT INTO deliveries VALUES(?,?,?,?,?,?,?,?,?,?)', noticeId, delivery.response_id, null, delivery.binding_id, 'text', 'pending', null, text, null, Date.now());
-              this.store.enqueue('delivery', key, { deliveryId: noticeId, textFormat: 'text', speechFailureFor: id });
-              const speech = JSON.parse(String(delivery.delivered_text)) as SpeechDelivery;
-              console.warn(JSON.stringify({ ts: new Date().toISOString(), level: 'warn', event: 'Speech synthesis failed', agentId: this.store.agentId, channel: binding.channel, referenceId: id, provider: speech.provider, model: speech.model, code: result.code, ...diagnostic }));
+              const notify = result.code !== MANAGED_VOICE_QUOTA_EXHAUSTED
+                || this.store.claimVoiceCreditNotice(String(binding.channel), String(binding.chat_id), String(binding.thread_key), 'tts', String(delivery.response_id));
+              if (notify) {
+                const noticeId = randomUUID();
+                this.store.run('INSERT INTO deliveries VALUES(?,?,?,?,?,?,?,?,?,?)', noticeId, delivery.response_id, null, delivery.binding_id, 'text', 'pending', null, speechFailureNotice(result.code), null, Date.now());
+                this.store.enqueue('delivery', key, { deliveryId: noticeId, textFormat: 'text', speechFailureFor: id });
+              }
+              console.warn(JSON.stringify({ ts: new Date().toISOString(), level: 'warn', event: 'Speech synthesis failed', agentId: this.store.agentId, channel: binding.channel, referenceId: id, provider: speech.provider, model: speech.model, code: result.code, notified: notify, ...describeVoiceError(result.code) }));
             }
           }
         });

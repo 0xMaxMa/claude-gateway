@@ -30,5 +30,5 @@ export function taskFailure(error: unknown, fallback = 'WORKER_FAILED'): TaskFai
   return {code, message: scrubText(message, secrets).slice(0,2048), observedAt: Date.now(), ...(inventory ? {inventory} : {})};
 }
 export function shutdownFailure(): TaskFailure {
-  return {code:'GATEWAY_SHUTDOWN',message:'Gateway shutdown interrupted this worker. This is not a finding about the issue. Inspect existing changes before continuing; do not blindly repeat side effects.',observedAt:Date.now()};
+  return {code:'GATEWAY_SHUTDOWN',message:'Gateway shutdown interrupted this worker. This is not a finding about the issue. The gateway resumes the task automatically after the restart; the resumed attempt verifies existing changes first and does not blindly repeat side effects.',observedAt:Date.now()};
 }

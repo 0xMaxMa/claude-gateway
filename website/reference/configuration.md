@@ -44,6 +44,7 @@ Website checks validate JSON syntax only; they do not compare fields or types ag
 | `gateway.memory`, `gateway.knowledge`, `gateway.dreaming` | Memory budget, indexing, consolidation |
 | `gateway.sessionCompaction` / `agents[].sessionCompaction` | Optional nightly native session compaction; see [memory settings](./memory-settings.md#nightly-session-compaction) |
 | `gateway.skillLearning` | Automatic skill review and limits |
+| `agents[].isolateMemory` | Per-conversation `USER.md`/`MEMORY.md` for a host agent that serves many unrelated senders. An app agent gets it from its `app.yaml` instead; see [memory settings](./memory-settings.md#isolated-memory-mode) |
 
 Fresh configurations and the server fallback bind to `127.0.0.1`. Migration preserves older externally reachable deployments by pinning `0.0.0.0` when needed; check your actual configuration after upgrading. A public URL does not itself configure a reverse proxy or make a loopback server reachable.
 
@@ -96,6 +97,11 @@ active runs check authorization before further actions. The shared
 `gateway.jev.features.computerSteps.enabled` (default `false`) runs an explicit
 user step list on one desktop lease without a parent-agent turn between steps.
 See [Step-by-step commands](../guide/jev.md#step-by-step-commands).
+`gateway.jev.images.enabled` (default `false`) lets Jev decide on screenshots:
+with `gateway.computerUse.mode` `hybrid` or `vision`, each desktop step is one
+Jev request on the window screenshot (pinned to `gateway.jev.images.model`,
+default `jev-1.14.0`), and Remote Browser decisions also carry the tab
+screenshot. See [Image decisions on Jev](../guide/jev.md#image-decisions-on-jev-beta).
 
 ### Remote Browser direct commands via Jev
 

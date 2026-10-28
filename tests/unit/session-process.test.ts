@@ -83,6 +83,12 @@ jest.mock('child_process', () => ({
   }),
 }));
 
+// A legacy app-agent's container is probed with `docker exec`; tests decide the answer.
+jest.mock('../../src/session/container-connectors', () => ({
+  ...jest.requireActual('../../src/session/container-connectors'),
+  prepareContainerLaunch: jest.fn(async () => undefined),
+}));
+
 // ── Imports (after mocks) ─────────────────────────────────────────────────────
 
 import { SessionProcess, resolveMaxHistoryMessages, MAX_HISTORY_MESSAGES } from '../../src/session/process';
@@ -539,6 +545,12 @@ describe('SessionProcess', () => {
       secretNames: ['access_token'],
       credentialOwner: 'external' as const,
     };
+    // What the agent-readable file holds for an HTTP connector (#635).
+    const proxiedGithub = {
+      type: 'http',
+      url: expect.stringMatching(/\/internal\/mcp\/connectors\/github$/),
+      headers: { Authorization: expect.stringMatching(/^Bearer [A-Za-z0-9_-]{43}$/) },
+    };
 
     it.each(['host-worker'] as const)('managed %s loads connectors into the actual CLI config and removes secrets at stop', async role => {
       gatewayConfig.gateway.customConnectors = { github: githubCustomConnector };
@@ -558,23 +570,28 @@ describe('SessionProcess', () => {
       expect(servers.github.args[0]).toContain('lazy-connector.ts');
       const connectorPath=servers.github.args[1];
       const upstream=JSON.parse(fs.readFileSync(connectorPath,'utf8'));
-      expect(upstream.headers.Authorization).toBe('Bearer fixture-old');
+      // #635: the file holds a loopback proxy handle, the secret stays in the gateway.
+      expect(JSON.stringify(upstream)).not.toContain('fixture-old');
+      expect(upstream.url).toMatch(/\/internal\/mcp\/connectors\/github$/);
+      const resolvedGithub={...githubCustomConnector.config,headers:{Authorization:'Bearer fixture-old'}};
       expect(fs.statSync(connectorPath).mode & 0o777).toBe(0o600);
       expect(servers.gateway.command).toBe('fixture-bridge');
       expect(fs.statSync(configPath).mode & 0o777).toBe(0o600);
-      expect(sp.connectorConfigChanged('github',upstream)).toBe(false);
+      expect(sp.connectorConfigChanged('github',resolvedGithub)).toBe(false);
       expect(sp.isSpawnedConnectorTool('mcp__github__list_issues')).toBe(true);
       expect(sp.isSpawnedConnectorTool('mcp__unknown__list_issues')).toBe(false);
       expect(sp.isSpawnedConnectorTool('mcp__github__')).toBe(false);
       expect(sp.isSpawnedConnectorTool('mcp__github_other__list_issues')).toBe(false);
-      expect(sp.connectorConfigChanged('github',{...upstream,headers:{Authorization:'Bearer fixture-new'}})).toBe(true);
+      expect(sp.connectorConfigChanged('github',{...resolvedGithub,headers:{Authorization:'Bearer fixture-new'}})).toBe(true);
       expect(sp.connectorConfigChanged('github',undefined)).toBe(true);
       await sp.stop();expect(fs.existsSync(configPath)).toBe(false);expect(fs.existsSync(connectorPath)).toBe(false);
       expect(fs.existsSync(ticket)).toBe(true);
       fs.writeFileSync(TOKEN_ENV, 'CUSTOM__github__access_token=fixture-new\n');
       const next=makeSp('managed-next','api',agentConfig,gatewayConfig,sessionStore,undefined,profile);
       const fresh=(next as any).writeMcpConfig();
-      expect(JSON.parse(fs.readFileSync(JSON.parse(fs.readFileSync(fresh,'utf8')).mcpServers.github.args[1],'utf8')).headers.Authorization).toBe('Bearer fixture-new');
+      const freshEntry=JSON.parse(fs.readFileSync(JSON.parse(fs.readFileSync(fresh,'utf8')).mcpServers.github.args[1],'utf8'));
+      expect(freshEntry.url).toMatch(/\/internal\/mcp\/connectors\/github$/);
+      expect(next.connectorConfigChanged('github',{...resolvedGithub,headers:{Authorization:'Bearer fixture-new'}})).toBe(false);
       agentConfig.connectors={github:{enabled:false}};
       expect(JSON.parse(fs.readFileSync((next as any).writeMcpConfig(),'utf8')).mcpServers.github).toBeUndefined();
     });
@@ -609,13 +626,132 @@ describe('SessionProcess', () => {
       await sp.start();
 
       const servers = readMcpConfig();
-      expect(servers.github).toEqual({
-        type: 'http',
-        url: 'https://api.githubcopilot.com/mcp/',
-        headers: { Authorization: 'Bearer ghp_inject' },
-      });
+      expect(servers.github).toEqual(proxiedGithub);
       // gateway server always still present
       expect(servers.gateway).toBeDefined();
+    });
+
+    // #635: the agent, and every tool or shell command it runs, can read the
+    // files under its workspace, so the connector credential must be in none of
+    // them. The entry is a loopback proxy handle, revoked when the session stops.
+    it('connector secret never lands in an agent-readable file; the entry is a revocable proxy handle', async () => {
+      fs.writeFileSync(TOKEN_ENV, 'CUSTOM__github__access_token=ghp_secret_635\n', { mode: 0o600 });
+      gatewayConfig.gateway.customConnectors = { github: githubCustomConnector };
+      const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+      await sp.start();
+
+      const walk = (dir: string): string[] => fs.readdirSync(dir, { withFileTypes: true })
+        .flatMap(e => e.isDirectory() ? walk(path.join(dir, e.name)) : [path.join(dir, e.name)]);
+      const files = walk(agentConfig.workspace);
+      expect(files.some(f => f.endsWith('mcp-config.json'))).toBe(true);
+      for (const file of files) expect(fs.readFileSync(file, 'utf8')).not.toContain('ghp_secret_635');
+
+      const entry = readMcpConfig().github as { type: string; url: string; headers: { Authorization: string } };
+      expect(entry.type).toBe('http');
+      expect(entry.url).toMatch(/^http:\/\/[^/]+\/internal\/mcp\/connectors\/github$/);
+      const grant = entry.headers.Authorization.replace(/^Bearer /, '');
+
+      const express = require('express');
+      const request = require('supertest');
+      const { createConnectorProxyRouter } = require('../../src/connectors/proxy');
+      const app = express().use(createConnectorProxyRouter());
+      // A live grant for a connector it was not minted for: 403, not 401.
+      expect((await request(app).post('/internal/mcp/connectors/other').set('authorization', `Bearer ${grant}`)).status).toBe(403);
+      await sp.stop();
+      expect((await request(app).post('/internal/mcp/connectors/other').set('authorization', `Bearer ${grant}`)).status).toBe(401);
+    });
+
+    // #635: stdio and SSE connectors, whose secrets sit in env/args/headers, launch
+    // through the gateway too, so no workspace file holds those secrets either.
+    it('stdio and SSE connector secrets never land in an agent-readable file; the entry is a revocable launcher', async () => {
+      fs.writeFileSync(TOKEN_ENV, 'CUSTOM__local__key=stdio_secret_635\nCUSTOM__legacy__key=sse_secret_635\n', { mode: 0o600 });
+      gatewayConfig.gateway.customConnectors = {
+        local: { label: 'Local', config: { command: 'npx', args: ['-y', 'local-mcp', '--key', '{key}'], env: { LOCAL_KEY: '{key}' } }, secretNames: ['key'], credentialOwner: 'static' },
+        legacy: { label: 'Legacy', config: { type: 'sse', url: 'https://legacy.example/sse', headers: { Authorization: 'Bearer {key}' } }, secretNames: ['key'], credentialOwner: 'static' },
+      } as any;
+      const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+      await sp.start();
+
+      const walk = (dir: string): string[] => fs.readdirSync(dir, { withFileTypes: true })
+        .flatMap(e => e.isDirectory() ? walk(path.join(dir, e.name)) : [path.join(dir, e.name)]);
+      for (const file of walk(agentConfig.workspace)) {
+        expect(fs.readFileSync(file, 'utf8')).not.toContain('stdio_secret_635');
+        expect(fs.readFileSync(file, 'utf8')).not.toContain('sse_secret_635');
+      }
+      const servers = readMcpConfig() as Record<string, { command: string; args: string[]; env: Record<string, string> }>;
+      for (const id of ['local', 'legacy']) {
+        expect(servers[id].command).toBe(process.execPath);
+        expect(servers[id].args).toEqual([expect.stringMatching(/mcp\/connector-launcher\.mjs$/)]);
+        expect(servers[id].env.GATEWAY_CONNECTOR_URL).toMatch(new RegExp(`/internal/mcp/connectors/${id}/stdio$`));
+      }
+      // Restart detection still sees the resolved entry.
+      expect(sp.connectorConfigChanged('local', { command: 'npx', args: ['-y', 'local-mcp', '--key', 'stdio_secret_635'], env: { LOCAL_KEY: 'stdio_secret_635' } })).toBe(false);
+
+      const { handleConnectorUpgrade } = require('../../src/connectors/proxy');
+      const launch = (grant: string): string => {
+        let reply = '';
+        const socket = { on: () => socket, write: (s: string) => { reply += s; }, end: (s: string) => { reply += s; }, destroy: () => {} };
+        handleConnectorUpgrade({ url: '/internal/mcp/connectors/other/stdio', headers: { upgrade: 'gateway-connector-stdio', authorization: `Bearer ${grant}` }, socket: { remoteAddress: '127.0.0.1' } }, socket, Buffer.alloc(0));
+        return reply.split('\r\n')[0];
+      };
+      const grant = servers.local.env.GATEWAY_CONNECTOR_GRANT;
+      expect(launch(grant)).toBe('HTTP/1.1 403 Forbidden');
+      await sp.stop();
+      expect(launch(grant)).toBe('HTTP/1.1 401 Unauthorized');
+    });
+
+    // A legacy app-agent's CLI runs inside its container, where the gateway's loopback
+    // proxy is unreachable: connectors launch through a socket in the mounted workspace.
+    it('app-agent sessions launch connectors through the workspace socket', async () => {
+      fs.writeFileSync(TOKEN_ENV, 'CUSTOM__github__access_token=ghp_container\n', { mode: 0o600 });
+      gatewayConfig.gateway.customConnectors = { github: githubCustomConnector };
+      const hostDir = path.join(agentConfig.workspace, '.gateway-connectors');
+      fs.mkdirSync(hostDir, { recursive: true });
+      const { prepareContainerLaunch } = require('../../src/session/container-connectors');
+      prepareContainerLaunch.mockResolvedValueOnce({ container: 'fixture-container', hostDir, containerDir: '/workspace/.gateway-connectors', bridgeCode: '' });
+      const appAgent = makeAgentConfig({ workspace: agentConfig.workspace, type: 'app-agent', container: 'fixture-container' });
+      const sp = makeSp('chat:111', 'telegram', appAgent, gatewayConfig, sessionStore);
+      await sp.start();
+      const entry = readMcpConfig().github as { command: string; args: string[]; env: Record<string, string> };
+      expect(entry.command).toBe('node');
+      expect(entry.args).toEqual(['/workspace/.gateway-connectors/connector-launcher.mjs']);
+      expect(entry.env.GATEWAY_CONNECTOR_PATH).toBe('/internal/mcp/connectors/github/stdio');
+      const socketFile = path.join(hostDir, path.basename(entry.env.GATEWAY_CONNECTOR_SOCKET));
+      expect(fs.existsSync(socketFile)).toBe(true);
+      expect(JSON.stringify(readMcpConfig())).not.toContain('ghp_container');
+      await sp.stop();
+      expect(fs.existsSync(socketFile)).toBe(false);
+    });
+
+    // A container that cannot run the launcher (no Node) keeps the direct entry,
+    // exactly as before #635, rather than losing its connectors.
+    it('app-agent sessions keep the direct connector entry', async () => {
+      fs.writeFileSync(TOKEN_ENV, 'CUSTOM__github__access_token=ghp_container\n', { mode: 0o600 });
+      gatewayConfig.gateway.customConnectors = { github: githubCustomConnector };
+      const appAgent = makeAgentConfig({ workspace: agentConfig.workspace, type: 'app-agent', container: 'fixture-container' });
+      const sp = makeSp('chat:111', 'telegram', appAgent, gatewayConfig, sessionStore);
+      await sp.start();
+      expect(readMcpConfig().github).toEqual({ ...githubCustomConnector.config, headers: { Authorization: 'Bearer ghp_container' } });
+      await sp.stop();
+    });
+
+    // A session that gives up after MAX_RESTARTS is dropped by the runner without
+    // stop(), so the grant its config still names must die with it.
+    it('a permanently failed session revokes its connector grant', async () => {
+      fs.writeFileSync(TOKEN_ENV, 'CUSTOM__github__access_token=ghp_failed\n', { mode: 0o600 });
+      gatewayConfig.gateway.customConnectors = { github: githubCustomConnector };
+      const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+      await sp.start();
+      const grant = (readMcpConfig().github as { headers: { Authorization: string } }).headers.Authorization;
+      const request = require('supertest');
+      const app = require('express')().use(require('../../src/connectors/proxy').createConnectorProxyRouter());
+      const probe = () => request(app).post('/internal/mcp/connectors/other').set('authorization', grant);
+      expect((await probe()).status).toBe(403);
+      const priv = sp as unknown as { restartCount: number; scheduleRestart: () => void };
+      priv.restartCount = 3;
+      priv.scheduleRestart();
+      expect((await probe()).status).toBe(401);
+      await sp.stop();
     });
 
     it('enabled but no token → github entry omitted', async () => {
@@ -643,11 +779,7 @@ describe('SessionProcess', () => {
       gatewayConfig.gateway.customConnectors = { github: githubCustomConnector };
       const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
       await sp.start();
-      expect(readMcpConfig().github).toEqual({
-        type: 'http',
-        url: 'https://api.githubcopilot.com/mcp/',
-        headers: { Authorization: 'Bearer ghp_default' },
-      });
+      expect(readMcpConfig().github).toEqual(proxiedGithub);
     });
 
     // A connector id is a slug of a label the admin typed; nothing stops it
@@ -772,7 +904,7 @@ describe('SessionProcess', () => {
         gatewayConfig.gateway.customConnectors = { github: githubCustomConnector };
         const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
         await sp.start();
-        expect(readMcpConfig().github).toEqual(resolvedGithub);
+        expect(readMcpConfig().github).toEqual(proxiedGithub);
         return sp;
       }
 

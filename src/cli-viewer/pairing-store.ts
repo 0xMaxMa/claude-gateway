@@ -48,9 +48,9 @@ export interface CliPairing {
 }
 
 /** Approval window: how long the operator has to approve after `/cli`. */
-const PAIRING_TTL_MS = 3 * 60 * 1000;
+export const PAIRING_TTL_MS = 3 * 60 * 1000;
 /** Viewer session lifetime once unlocked. Short — re-run `/cli` to renew. */
-const ACCESS_TTL_MS = 30 * 60 * 1000;
+export const ACCESS_TTL_MS = 30 * 60 * 1000;
 
 export interface CreatedPairing {
   pairingId: string;

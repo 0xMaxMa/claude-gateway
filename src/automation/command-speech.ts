@@ -22,6 +22,7 @@ const THAI:Record<string,string>={
  NO_SUPPORTED_ACTION:'ไม่เจอปุ่ม {command} บนหน้าจอ',
  CONFIRM:'จะกด {target} ใช่ไหม',
  SCREEN_CHANGING:'หน้าจอกำลังเปลี่ยน ลองพูดใหม่อีกครั้ง',
+ STALE:'หน้าจอเปลี่ยนก่อนจะได้ทำ {command} เลยยังไม่ได้ทำอะไร ลองพูดใหม่อีกครั้ง',
  PARTIAL:'กดได้ {done} จาก {planned} แล้วหยุด',
  UNKNOWN:'ไม่แน่ใจว่า {command} ทำไปแล้วหรือยัง ดูหน้าจอก่อนสั่งใหม่',
  NEW_TAB:'เปิดแท็บใหม่ไม่ได้ บอกชื่อเว็บแทน',
@@ -36,6 +37,7 @@ const ENGLISH:Record<string,string>={
  NO_SUPPORTED_ACTION:'Could not find {command} on the screen.',
  CONFIRM:'Press {target}?',
  SCREEN_CHANGING:'The screen was changing. Please say it again.',
+ STALE:'The screen changed before {command} could run, so nothing was done. Please say it again.',
  PARTIAL:'Pressed {done} of {planned}, then stopped.',
  UNKNOWN:'Not sure whether {command} ran. Check the screen before saying it again.',
  NEW_TAB:'A new tab cannot be opened here. Say the site name instead.',
@@ -48,7 +50,9 @@ const ENGLISH:Record<string,string>={
 };
 const KIND:Record<string,string>={
  NO_SUPPORTED_ACTION:'NO_SUPPORTED_ACTION',SEQUENCE_TARGET_MISSING:'NO_SUPPORTED_ACTION',CONFIRMATION_REQUIRED:'CONFIRM',
- UI_NOT_READY:'SCREEN_CHANGING',STALE_OBSERVATION:'SCREEN_CHANGING',ACTION_CONTEXT_CHANGED:'SCREEN_CHANGING',STALE_RETRY_BUDGET:'SCREEN_CHANGING',WAIT_BUDGET:'SCREEN_CHANGING',
+ UI_NOT_READY:'SCREEN_CHANGING',ACTION_CONTEXT_CHANGED:'SCREEN_CHANGING',
+ // Refused as made on an older reading: nothing ran. Not "still changing" (the agent heard "still loading").
+ STALE_OBSERVATION:'STALE',STALE_RETRY_BUDGET:'STALE',WAIT_BUDGET:'SCREEN_CHANGING',
  NEW_TAB_OUT_OF_SCOPE:'NEW_TAB',START_URL_REQUIRED:'START_URL',
  TARGET_OBSCURED:'OBSCURED',NAVIGATION_UNRESOLVED:'NAVIGATION',UNCLEAR:'UNCLEAR',
 };

@@ -9,7 +9,6 @@ const cfg = (over: Partial<ResolvedSkillLearningCfg> = {}): ResolvedSkillLearnin
 const sig = (over: Partial<SessionSignals> = {}): SessionSignals => ({
   toolCalls: 0,
   recoveryFired: false,
-  userCorrection: false,
   ...over,
 });
 const budget = (over: Partial<DailyBudget> = {}): DailyBudget => ({ spent: 0, cap: 20, ...over });
@@ -36,16 +35,9 @@ describe('skill-learning trigger.shouldReview', () => {
     });
   });
 
-  it('fires on user-correction', () => {
-    expect(shouldReview(sig({ userCorrection: true }), cfg({ minToolCalls: 99 }), budget())).toEqual({
-      review: true,
-      reason: 'user-correction',
-    });
-  });
-
-  it('tool-calls reason wins over recovery + correction (deterministic priority)', () => {
+  it('tool-calls reason wins over recovery (deterministic priority)', () => {
     expect(
-      shouldReview(sig({ toolCalls: 10, recoveryFired: true, userCorrection: true }), cfg({ minToolCalls: 5 }), budget()),
+      shouldReview(sig({ toolCalls: 10, recoveryFired: true }), cfg({ minToolCalls: 5 }), budget()),
     ).toEqual({ review: true, reason: 'tool-calls' });
   });
 

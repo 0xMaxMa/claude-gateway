@@ -154,6 +154,7 @@ describe('share_file MCP module', () => {
         path: 'media/session-1/report.pdf',
       });
       expect(calls[0]!.body!.allow_documents).toBe(true);
+      expect(calls[0]!.body!.allow_all_files).toBe(true);
     });
 
     test('gateway error code is surfaced', async () => {

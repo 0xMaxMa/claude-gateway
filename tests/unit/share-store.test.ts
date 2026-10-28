@@ -360,6 +360,39 @@ describe('file share store', () => {
       expect(codeOf(() => validate(`${SESSION}/sneaky.png`))).toBe('invalid_path');
     });
 
+    test('accepts arbitrary files under the workspace and persists only a relative path', () => {
+      const workspace = path.join(baseDir, AGENT, 'workspace');
+      fs.mkdirSync(workspace, { recursive: true });
+      const file = path.join(workspace, 'disk.iso');
+      fs.writeFileSync(file, Buffer.from('not an image format'));
+      const result = validateShareFile(baseDir, AGENT, file, Number.MAX_SAFE_INTEGER, 'file', undefined, workspace);
+      expect(result.rootKind).toBe('workspace');
+      expect(result.relativePath).toBe('disk.iso');
+      expect(result.mime).toBe('application/octet-stream');
+    });
+
+    test('rejects workspace traversal and symlink escapes after workspace authorization', () => {
+      const workspace = path.join(baseDir, AGENT, 'workspace');
+      fs.mkdirSync(workspace, { recursive: true });
+      const outside = path.join(baseDir, 'outside.iso');
+      fs.writeFileSync(outside, 'outside');
+      fs.symlinkSync(outside, path.join(workspace, 'escape.iso'));
+      const verify = (ref: string) => validateShareFile(baseDir, AGENT, ref, Number.MAX_SAFE_INTEGER, 'file', undefined, workspace);
+      expect(codeOf(() => verify(path.join(workspace, '..', '..', 'outside.iso')))).toBe('invalid_path');
+      expect(codeOf(() => verify(path.join(workspace, 'escape.iso')))).toBe('invalid_path');
+    });
+
+    test('rejects a workspace root that is itself a symlink outside the agent directory', () => {
+      const agentDir = path.join(baseDir, AGENT);
+      const workspace = path.join(agentDir, 'workspace');
+      const outside = path.join(baseDir, 'external-workspace');
+      fs.mkdirSync(agentDir, { recursive: true });
+      fs.mkdirSync(outside, { recursive: true });
+      fs.writeFileSync(path.join(outside, 'secret.iso'), 'secret');
+      fs.symlinkSync(outside, workspace);
+      expect(codeOf(() => validateShareFile(baseDir, AGENT, path.join(outside, 'secret.iso'), Number.MAX_SAFE_INTEGER, 'file', undefined, workspace))).toBe('invalid_path');
+    });
+
     test('rejects directories (non-regular files)', () => {
       expect(codeOf(() => validate(SESSION))).toBe('invalid_path');
     });

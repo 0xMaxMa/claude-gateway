@@ -49,6 +49,7 @@ jest.mock('../../src/shutdown-signals', () => ({
 import { execSync } from 'child_process';
 import { readdirSync, rmSync } from 'fs';
 import { createPackagesRouter, _resetCache, _resetLock, _setLock } from '../../src/api/packages';
+import { PACKAGES, getTargetVersion, installNpmVersion } from '../../src/packages/registry';
 import { EX_TEMPFAIL, requestExitCode } from '../../src/shutdown-signals';
 
 const mockReaddirSync = readdirSync as jest.MockedFunction<typeof readdirSync>;
@@ -101,14 +102,14 @@ function mockNpmList(pkg: string, version: string) {
   });
 }
 
-function mockFetch(latestVersions: Record<string, string>) {
+// A plain version string publishes only a `latest` dist-tag (nothing promoted yet).
+function mockFetch(distTags: Record<string, string | Record<string, string>>) {
   global.fetch = jest.fn().mockImplementation((url: string) => {
-    for (const [pkg, version] of Object.entries(latestVersions)) {
-      const encoded = pkg.replace('/', '%2F');
-      if (url.includes(encoded)) {
+    for (const [pkg, tags] of Object.entries(distTags)) {
+      if (url === `https://registry.npmjs.org/-/package/${pkg.replace('/', '%2F')}/dist-tags`) {
         return Promise.resolve({
           ok: true,
-          json: () => Promise.resolve({ version }),
+          json: () => Promise.resolve(typeof tags === 'string' ? { latest: tags } : tags),
         });
       }
     }
@@ -175,7 +176,7 @@ describe('T1-T6: GET /api/v1/packages', () => {
     mockExecSync.mockReturnValue(JSON.stringify({ dependencies: { '@0xmaxma/claude-gateway': { version: '1.0.0' }, '@anthropic-ai/claude-code': { version: '1.0.0' } } }));
     const fetchMock = jest.fn().mockResolvedValue({
       ok: true,
-      json: () => Promise.resolve({ version: '1.0.0' }),
+      json: () => Promise.resolve({ latest: '1.0.0' }),
     });
     global.fetch = fetchMock as typeof fetch;
 
@@ -839,5 +840,76 @@ describe('T20-T24: claude-code native detection & update', () => {
       warning: null,
     });
     expect(ranNativeUpdate).toBe(true);
+  });
+});
+
+describe('release channel — claude-gateway follows the stable dist-tag', () => {
+  const GATEWAY = '@0xmaxma/claude-gateway';
+
+  async function gatewayInfo() {
+    const res = await request(makeApp()).get('/api/v1/packages').set('X-Api-Key', ADMIN_KEY);
+    expect(res.status).toBe(200);
+    return res.body.packages.find((p: { package: string }) => p.package === GATEWAY);
+  }
+
+  it('targets stable, not the newer latest', async () => {
+    mockNpmList(GATEWAY, '1.8.0');
+    mockFetch({ [GATEWAY]: { latest: '2.0.0', stable: '1.9.0' } });
+
+    expect(await gatewayInfo()).toMatchObject({ current: '1.8.0', target: '1.9.0', latest: '1.9.0', channel: 'stable', hasUpdate: true });
+  });
+
+  it('does not offer latest to a gateway already on stable', async () => {
+    mockNpmList(GATEWAY, '1.9.0');
+    mockFetch({ [GATEWAY]: { latest: '2.0.0', stable: '1.9.0' } });
+
+    expect(await gatewayInfo()).toMatchObject({ latest: '1.9.0', hasUpdate: false });
+  });
+
+  it('falls back to latest when nothing has been promoted to stable', async () => {
+    mockNpmList(GATEWAY, '1.8.0');
+    mockFetch({ [GATEWAY]: { latest: '2.0.0' } });
+
+    expect(await gatewayInfo()).toMatchObject({ target: '2.0.0', latest: '2.0.0', channel: 'latest', hasUpdate: true });
+  });
+
+  it('treats a non-semver dist-tag as no answer', async () => {
+    mockNpmList(GATEWAY, '1.8.0');
+    mockFetch({ [GATEWAY]: { latest: '2.0.0', stable: '1.9.0 && touch /tmp/pwned' } });
+
+    expect(await gatewayInfo()).toMatchObject({ target: null, latest: null, hasUpdate: false });
+  });
+
+  it('POST update installs exactly the stable version', async () => {
+    mockNpmList(GATEWAY, '1.8.0');
+    mockFetch({ [GATEWAY]: { latest: '2.0.0', stable: '1.9.0' } });
+
+    const res = await request(makeApp()).post('/api/v1/packages/claude-gateway/update').set('X-Api-Key', ADMIN_KEY);
+
+    expect(res.status).toBe(200);
+    expect(mockExecSync).toHaveBeenCalledWith(`npm install -g ${GATEWAY}@1.9.0`, expect.anything());
+    expect(mockExecSync).not.toHaveBeenCalledWith(expect.stringContaining('@latest'), expect.anything());
+  });
+});
+
+describe('getTargetVersion / installNpmVersion', () => {
+  it('--latest ignores stable and takes the newest release', async () => {
+    mockFetch({ '@0xmaxma/claude-gateway': { latest: '2.0.0', stable: '1.9.0' } });
+
+    await expect(getTargetVersion(PACKAGES['claude-gateway'], { latest: true })).resolves.toEqual({
+      version: '2.0.0',
+      channel: 'latest',
+    });
+  });
+
+  it('Claude Code keeps following latest', async () => {
+    mockFetch({ '@anthropic-ai/claude-code': { latest: '2.2.0', stable: '2.1.0' } });
+
+    await expect(getTargetVersion(PACKAGES['claude-code'])).resolves.toEqual({ version: '2.2.0', channel: 'latest' });
+  });
+
+  it('refuses to shell out with an invalid version', () => {
+    expect(installNpmVersion('@0xmaxma/claude-gateway', '1.0.0; rm -rf ~')).toMatch(/invalid version/);
+    expect(mockExecSync).not.toHaveBeenCalledWith(expect.stringContaining('npm install'), expect.anything());
   });
 });

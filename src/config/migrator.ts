@@ -310,6 +310,7 @@ export const MEMORY_MODE_AUTO_WARNING =
  * nothing was flipped).
  */
 function upgradeRetiredMemoryModeDefault(config: Record<string, unknown>): string[] {
+  if (!predates(config, '1.0.24')) return [];
   const gateway = config.gateway;
   if (!gateway || typeof gateway !== 'object' || Array.isArray(gateway)) return [];
   const g = gateway as Record<string, unknown>;
@@ -331,6 +332,68 @@ function upgradeRetiredMemoryModeDefault(config: Record<string, unknown>): strin
   }
 
   return changed;
+}
+
+/** Warning surfaced when a migration drops a persisted `voice.live.fastAck: false` (PR #608). */
+export const FAST_ACK_DEFAULT_WARNING =
+  'voice.live.fastAck: false was removed so live calls use the new default (on): ' +
+  'a short acknowledgement is spoken while the agent prepares its reply. ' +
+  'Set voice.live.fastAck to false for an agent to turn it off again.';
+
+/**
+ * One-time upgrade of the retired `voice.live.fastAck` default from false to
+ * true (PR #608). The voice settings PATCH used to persist an echoed settings
+ * payload verbatim, pinning the old default `fastAck: false` into agents that
+ * never chose it. Like {@link upgradeRetiredMemoryModeDefault}, this runs only
+ * when migrating a config older than the template (1.0.37), so a false set
+ * before 1.0.37 is indistinguishable from the old default and is dropped once;
+ * a false set afterwards is kept.
+ */
+function upgradeRetiredFastAckDefault(config: Record<string, unknown>): string[] {
+  if (!predates(config, '1.0.37') || !Array.isArray(config.agents)) return [];
+  const changed: string[] = [];
+  config.agents.forEach((agent: unknown, i) => {
+    const live = (agent as { voice?: { live?: Record<string, unknown> } } | null)?.voice?.live;
+    if (live && typeof live === 'object' && live.fastAck === false) {
+      delete live.fastAck;
+      changed.push(`agents[${i}].voice.live.fastAck`);
+    }
+  });
+  return changed;
+}
+
+/** Warning surfaced when a migration lowers the retired `skillLearning.maxAutoSkills: 50`. */
+export const MAX_AUTO_SKILLS_DEFAULT_WARNING =
+  'gateway.skillLearning.maxAutoSkills: 50 was lowered to the new default 20. The curator ' +
+  'archives the least-recently-used learned skills above the cap to skills/.archive/ ' +
+  '(kept 30 days; move a directory back to skills/ to restore it). Set ' +
+  'gateway.skillLearning.maxAutoSkills to keep a higher cap.';
+
+/**
+ * True when `config` was stamped before `version`. Retired-default upgrades gate
+ * on this so a later template bump never re-applies one to a value the user chose
+ * after the default changed.
+ */
+function predates(config: Record<string, unknown>, version: string): boolean {
+  return compareSemver((config.configVersion as string) ?? '0.0.0', version) < 0;
+}
+
+/**
+ * One-time upgrade of the retired `gateway.skillLearning.maxAutoSkills` default
+ * from 50 to 20. `config.template.json` wrote the literal 50 into every config,
+ * so a changed built-in default alone never reaches an existing install. Like
+ * {@link upgradeRetiredFastAckDefault}, this runs only when migrating a config
+ * older than 1.0.38: a 50 set before then is indistinguishable from the old
+ * default and is lowered once; a value set afterwards is kept, including across
+ * later template bumps.
+ * Per-agent overrides are the user's and left as-is.
+ */
+function upgradeRetiredMaxAutoSkillsDefault(config: Record<string, unknown>): string[] {
+  if (!predates(config, '1.0.38')) return [];
+  const skillLearning = (config.gateway as { skillLearning?: Record<string, unknown> } | null | undefined)?.skillLearning;
+  if (!skillLearning || typeof skillLearning !== 'object' || skillLearning.maxAutoSkills !== 50) return [];
+  skillLearning.maxAutoSkills = 20;
+  return ['gateway.skillLearning.maxAutoSkills'];
 }
 
 /**
@@ -473,6 +536,16 @@ export function detectMigration(
     added.push(...modeFields);
     warnings.push(MEMORY_MODE_AUTO_WARNING);
   }
+  const fastAckFields = upgradeRetiredFastAckDefault(configClone);
+  if (fastAckFields.length > 0) {
+    added.push(...fastAckFields);
+    warnings.push(FAST_ACK_DEFAULT_WARNING);
+  }
+  const maxAutoSkillsFields = upgradeRetiredMaxAutoSkillsDefault(configClone);
+  if (maxAutoSkillsFields.length > 0) {
+    added.push(...maxAutoSkillsFields);
+    warnings.push(MAX_AUTO_SKILLS_DEFAULT_WARNING);
+  }
 
   // Deep-merge top-level keys (except agents which need special handling)
   const templateWithoutAgents = { ...template };
@@ -480,7 +553,9 @@ export function detectMigration(
   deepMerge(configClone, templateWithoutAgents, '', added, ignorePaths);
 
   // Migrate models array by ID
-  migrateModels(configClone, template, added);
+  const retiringDefaults = compareSemver(configVersion, '1.0.38') < 0
+    && compareSemver(templateVersion, '1.0.38') >= 0;
+  const retiredModels = migrateModels(configClone, template, added, retiringDefaults);
 
   // Merge agent arrays
   if (Array.isArray(configClone.agents) && Array.isArray(template.agents)) {
@@ -493,7 +568,7 @@ export function detectMigration(
   }
 
   // Prune removed paths from agent entries
-  const removed: string[] = [];
+  const removed: string[] = [...retiredModels];
   if (removePaths.length > 0 && Array.isArray(configClone.agents)) {
     removed.push(
       ...pruneAgentPaths(configClone.agents as Array<Record<string, unknown>>, removePaths),
@@ -544,6 +619,8 @@ export function applyMigration(
 ): MigrationResult {
   const added: string[] = [];
   const warnings: string[] = [];
+  const retiringDefaults = compareSemver(String(config.configVersion ?? '0.0.0'), '1.0.38') < 0
+    && compareSemver(templateVersion, '1.0.38') >= 0;
 
   added.push(...migrateOrchestrationSettings(config));
 
@@ -567,6 +644,16 @@ export function applyMigration(
     added.push(...modeFields);
     warnings.push(MEMORY_MODE_AUTO_WARNING);
   }
+  const fastAckFields = upgradeRetiredFastAckDefault(config);
+  if (fastAckFields.length > 0) {
+    added.push(...fastAckFields);
+    warnings.push(FAST_ACK_DEFAULT_WARNING);
+  }
+  const maxAutoSkillsFields = upgradeRetiredMaxAutoSkillsDefault(config);
+  if (maxAutoSkillsFields.length > 0) {
+    added.push(...maxAutoSkillsFields);
+    warnings.push(MAX_AUTO_SKILLS_DEFAULT_WARNING);
+  }
 
   // Deep-merge top-level keys (except agents)
   const templateWithoutAgents = { ...template };
@@ -574,7 +661,7 @@ export function applyMigration(
   deepMerge(config, templateWithoutAgents, '', added, ignorePaths);
 
   // Migrate models array by ID
-  migrateModels(config, template, added);
+  const retiredModels = migrateModels(config, template, added, retiringDefaults);
 
   // Merge agent arrays
   if (Array.isArray(config.agents) && Array.isArray(template.agents)) {
@@ -587,7 +674,7 @@ export function applyMigration(
   }
 
   // Prune removed paths from agent entries
-  const removed: string[] = [];
+  const removed: string[] = [...retiredModels];
   if (removePaths && removePaths.length > 0 && Array.isArray(config.agents)) {
     removed.push(
       ...pruneAgentPaths(config.agents as Array<Record<string, unknown>>, removePaths),
@@ -681,6 +768,27 @@ const LEGACY_MODEL_ID_RENAMES: Readonly<Record<string, string>> = {
   'gpt-5.5': 'gpt-5.5[1m]',
 };
 
+// Match the Sol and Luna rows shipped by 1.0.37. Customized entries with these
+// IDs remain user-owned and must survive the 1.0.38 migration. Terra stays shipped.
+const RETIRED_MODEL_DEFAULTS: Readonly<Record<string, { label: string; alias: string; contextWindow: number }>> = {
+  'gpt-5.6-sol[1m]': { label: 'GPT 5.6 Sol', alias: 'gpt56sol', contextWindow: 1050000 },
+  'gpt-5.6-luna[1m]': { label: 'GPT 5.6 Luna', alias: 'gpt56luna', contextWindow: 1050000 },
+};
+
+const RETIRED_AGENT_REPLACEMENTS: Readonly<Record<string, string>> = {
+  'gpt-5.6-sol[1m]': 'gpt-6.1-sol[1m]',
+  'gpt-5.6-luna[1m]': 'gpt-6-luna[1m]',
+};
+
+const PRESERVE_MODEL_METADATA_IDS = new Set(['gpt-5.6-terra[1m]', 'gpt-6.1-sol[1m]']);
+
+function isRetiredDefault(model: Record<string, unknown>): boolean {
+  const expected = RETIRED_MODEL_DEFAULTS[String(model.id)];
+  return !!expected && model.label === expected.label && model.alias === expected.alias
+    && model.contextWindow === expected.contextWindow
+    && Object.keys(model).every(key => ['id', 'label', 'alias', 'contextWindow'].includes(key));
+}
+
 /**
  * Merge models from template into user config by ID.
  * Adds new models, updates alias/label/contextWindow of existing ones.
@@ -690,28 +798,38 @@ function migrateModels(
   config: Record<string, unknown>,
   template: Record<string, unknown>,
   added: string[],
-): void {
+  retireShippedDefaults = false,
+): string[] {
   const gw = config.gateway as Record<string, unknown> | undefined;
   const tgw = template.gateway as Record<string, unknown> | undefined;
-  if (!gw || !tgw) return;
+  if (!gw || !tgw) return [];
 
   const templateModels = tgw.models as Array<Record<string, unknown>> | undefined;
-  if (!templateModels || templateModels.length === 0) return;
+  if (!templateModels || templateModels.length === 0) return [];
 
   const userModels = (gw.models ?? []) as Array<Record<string, unknown>>;
   for (const model of userModels) {
     const renamedId = LEGACY_MODEL_ID_RENAMES[String(model.id)];
     if (renamedId) model.id = renamedId;
   }
-  const userMap = new Map(userModels.map((m) => [m.id as string, m]));
+  const templateIds = new Set(templateModels.map(model => String(model.id)));
+  const retiredIds = new Set<string>();
+  const keptModels = userModels.filter(model => {
+    if (!retireShippedDefaults || templateIds.has(String(model.id)) || !isRetiredDefault(model)) return true;
+    retiredIds.add(String(model.id));
+    return false;
+  });
+  const userMap = new Map(keptModels.map((m) => [m.id as string, m]));
   const merged: Array<Record<string, unknown>> = [];
 
   for (const tm of templateModels) {
     const existing = userMap.get(tm.id as string);
     if (existing) {
-      existing.alias = tm.alias;
-      existing.label = tm.label;
-      existing.contextWindow = tm.contextWindow;
+      if (!PRESERVE_MODEL_METADATA_IDS.has(String(tm.id))) {
+        existing.alias = tm.alias;
+        existing.label = tm.label;
+        existing.contextWindow = tm.contextWindow;
+      }
       merged.push(existing);
     } else {
       merged.push(structuredClone(tm));
@@ -719,13 +837,14 @@ function migrateModels(
     }
   }
 
-  for (const um of userModels) {
+  for (const um of keptModels) {
     if (!templateModels.some((tm) => tm.id === um.id)) {
       merged.push(um);
     }
   }
 
   gw.models = merged;
+  const remainingIds = new Set(merged.map(model => String(model.id)));
 
   if (Array.isArray(config.agents)) {
     for (const agent of config.agents as Array<Record<string, unknown>>) {
@@ -734,8 +853,14 @@ function migrateModels(
       const model = (claude as Record<string, unknown>).model;
       const renamedId = LEGACY_MODEL_ID_RENAMES[String(model)];
       if (renamedId) (claude as Record<string, unknown>).model = renamedId;
+      const effectiveId = String((claude as Record<string, unknown>).model);
+      if (retireShippedDefaults && effectiveId in RETIRED_AGENT_REPLACEMENTS
+        && !remainingIds.has(effectiveId)) {
+        (claude as Record<string, unknown>).model = RETIRED_AGENT_REPLACEMENTS[effectiveId];
+      }
     }
   }
+  return [...retiredIds].filter(id => !remainingIds.has(id)).map(id => `gateway.models[${id}]`);
 }
 
 // Exported for testing

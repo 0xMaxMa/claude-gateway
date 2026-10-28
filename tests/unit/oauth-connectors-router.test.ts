@@ -365,6 +365,7 @@ function gatewayOwnedStore(
     mutate: async (fn) => {
       fn(connectors as never);
     },
+    withScope: async (fn) => fn({ connectors: connectors as never, agents: [], defaultEnabled: true }).result,
     withEntry: async (id, fn) =>
       fn({
         entry: connectors[id] as never,
@@ -1068,6 +1069,7 @@ describe('createOauthCallbackRouter — a connector that changed under the flow'
       read: async () => ({}), // what a degraded read returns
       mutate: async () => {},
       withEntry: async (_id, fn) => fn({ entry: undefined, remove: () => {} }),
+      withScope: async (fn) => fn({ connectors: {}, agents: [], defaultEnabled: true }).result,
     };
 
     const res = await request(makeApp(pendingStore, store)).get(

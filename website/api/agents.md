@@ -119,7 +119,7 @@ Update an agent's display name, description, model, allow_tools flag, or connect
 
 `connectors` is the one field on this route that is admin-gated, because it is the only one that reaches a credential somebody else owns: every mutating route under [Connectors API](/api/overview#connectors-api) is admin-only, and enabling a connector here resolves that connector's secret into the agent's MCP config at spawn. Under [`gateway.connectorsDefaultEnabled: false`](/reference/configuration) a `write` key scoped to a single agent could otherwise hand that agent any token an admin had connected.
 
-Enablement is **opt-out**: a connected connector is available to every agent unless that agent explicitly sets `{"enabled": false}`. Connecting the connector at all is the security gate — see [Connectors API](/api/overview#connectors-api). A multi-owner deployment can flip this to opt-in with [`gateway.connectorsDefaultEnabled: false`](/reference/configuration).
+An agent's own flag always wins. Without one, the agent gets a connected connector unless the connector itself stores `defaultEnabled: false`, or the gateway sets [`gateway.connectorsDefaultEnabled: false`](/reference/configuration). A connector added without a scope reaches every agent; restrict it with `defaultEnabled: false` or with [`PUT /api/v1/connectors/:id/agents`](/api/connectors#put-apiv1connectorsidagents). A paused connector (`PATCH /api/v1/connectors/:id`) reaches no agent whatever this flag says.
 
 Ids are validated for **shape only, not existence** — pre-setting `{"enabled": false}` for a connector nobody has added yet is a legitimate way to keep it off an agent from the moment it appears.
 

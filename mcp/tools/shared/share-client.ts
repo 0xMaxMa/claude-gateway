@@ -9,6 +9,8 @@
  * module must not import from src/ (see tests/unit/mcp-no-src-imports.test.ts).
  */
 
+import { resolveIsolateMediaPath } from './isolate';
+
 const REQUEST_TIMEOUT_MS = 15_000;
 
 export type ShareRef = { artifact_id?: string; path?: string };
@@ -129,8 +131,18 @@ async function callGateway(
 /** Mint short-lived share URLs for local/artifact refs — order preserved. */
 export async function createShares(
   refs: ShareRef[],
-  opts: { purpose?: string; ttlSeconds?: number; allowDocuments?: boolean } = {},
+  opts: { purpose?: string; ttlSeconds?: number; allowDocuments?: boolean; allowAllFiles?: boolean } = {},
 ): Promise<ShareItem[]> {
+  // Isolate mode: a path ref must sit in this conversation's own media dir. An
+  // artifact ref is already resolved per (agent, session) by the gateway.
+  refs = refs.map((ref) => {
+    if (ref.path === undefined) return ref;
+    try {
+      return { ...ref, path: resolveIsolateMediaPath(ref.path) };
+    } catch (err) {
+      throw new ShareClientError('isolate_path_denied', (err as Error).message, 403);
+    }
+  });
   const body: Record<string, unknown> = {
     agent_id: process.env.GATEWAY_AGENT_ID,
     session_id: process.env.GATEWAY_SESSION_ID,
@@ -141,6 +153,7 @@ export async function createShares(
   // Opt-in only: image callers (line_image, generate_image refs) must keep
   // getting a hard rejection for a non-image ref.
   if (opts.allowDocuments) body.allow_documents = true;
+  if (opts.allowAllFiles) body.allow_all_files = true;
   const { status, json } = await callGateway('POST', '/api/v1/shares', body);
   if (status !== 201) {
     const code = typeof json.code === 'string' ? json.code : 'share_failed';
@@ -195,7 +208,9 @@ function extractError(
 
 /** Revoke a share by id. Throws ShareClientError on failure. */
 export async function revokeShare(shareId: string): Promise<void> {
-  const { status, json } = await callGateway('DELETE', `/api/v1/shares/${encodeURIComponent(shareId)}`);
+  // An isolated agent's share is revoked only by its own session (#609).
+  const session = process.env.GATEWAY_ISOLATE_MEMORY && process.env.GATEWAY_SESSION_ID ? `?session_id=${encodeURIComponent(process.env.GATEWAY_SESSION_ID)}` : '';
+  const { status, json } = await callGateway('DELETE', `/api/v1/shares/${encodeURIComponent(shareId)}${session}`);
   if (status !== 200) {
     const message = typeof json.error === 'string' ? json.error : `revoke failed (HTTP ${status})`;
     throw new ShareClientError('revoke_failed', message, status);

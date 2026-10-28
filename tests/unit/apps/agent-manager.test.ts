@@ -8,7 +8,8 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import yaml from 'js-yaml';
-import { AgentManager } from '../../../src/apps/agent-manager';
+import { AgentManager, applyDeclaredMemoryModes } from '../../../src/apps/agent-manager';
+import type { AgentConfig } from '../../../src/types';
 import { AppsRegistry, AppEntry } from '../../../src/apps/registry';
 
 // ── os.homedir mock (set per-test) ────────────────────────────────────────────
@@ -129,6 +130,95 @@ describe('AgentManager', () => {
       expect(typeof agentSvc['command']).toBe('string');
       expect((agentSvc['command'] as string)).toContain('sleep infinity');
       expect(agentSvc['container_name']).toBe('my-app-agent');
+    });
+
+    describe('environment (#618)', () => {
+      const APP_ENV = 'DB_PASSWORD=db-secret\nNEXTAUTH_SECRET=auth-secret\nAGENT_API_TOKEN=agent-token\n';
+
+      /** The environment compose gives the agent container: its env_file(s) plus `environment`. */
+      function resolvedAgentEnv(entry: AppEntry): Record<string, string> {
+        const compose = yaml.load(fs.readFileSync(path.join(entry.installPath, 'docker-compose.yml'), 'utf-8')) as any;
+        const svc = compose.services.agent;
+        const out: Record<string, string> = {};
+        const files = svc.env_file === undefined ? [] : [svc.env_file].flat();
+        for (const f of files) {
+          for (const line of fs.readFileSync(path.join(entry.installPath, f), 'utf-8').split('\n')) {
+            const eq = line.indexOf('=');
+            if (eq > 0) out[line.slice(0, eq)] = line.slice(eq + 1);
+          }
+        }
+        for (const e of svc.environment ?? []) out[e.split('=')[0]] = e.split('=').slice(1).join('=');
+        return out;
+      }
+
+      it('gives the agent no app secrets when app.yaml declares no env', async () => {
+        const entry = makeEntry(tmpDir);
+        fs.writeFileSync(path.join(entry.installPath, '.env'), APP_ENV);
+
+        await manager.injectAgentService(entry);
+
+        expect(resolvedAgentEnv(entry)).toEqual({});
+      });
+
+      it('gives the agent only the declared env names, from a file of its own', async () => {
+        const entry = makeEntry(tmpDir);
+        entry.agentDeclaration = { ...entry.agentDeclaration!, env: ['AGENT_API_TOKEN'] };
+        fs.writeFileSync(path.join(entry.installPath, '.env'), APP_ENV);
+
+        await manager.injectAgentService(entry);
+
+        expect(resolvedAgentEnv(entry)).toEqual({ AGENT_API_TOKEN: 'agent-token' });
+        const compose = yaml.load(fs.readFileSync(path.join(entry.installPath, 'docker-compose.yml'), 'utf-8')) as any;
+        expect(compose.services.agent.env_file).toBe('.env.agent');
+        expect(fs.statSync(path.join(entry.installPath, '.env.agent')).mode & 0o777).toBe(0o600);
+      });
+
+      it('matches a declared name with whitespace around the key', async () => {
+        const entry = makeEntry(tmpDir);
+        entry.agentDeclaration = { ...entry.agentDeclaration!, env: ['AGENT_API_TOKEN'] };
+        fs.writeFileSync(path.join(entry.installPath, '.env'), 'DB_PASSWORD=db-secret\n  AGENT_API_TOKEN=agent-token\n');
+
+        await manager.injectAgentService(entry);
+
+        expect(fs.readFileSync(path.join(entry.installPath, '.env.agent'), 'utf-8')).toBe('  AGENT_API_TOKEN=agent-token\n');
+      });
+
+      it('replaces a .env.agent symlink instead of writing through it', async () => {
+        const entry = makeEntry(tmpDir);
+        entry.agentDeclaration = { ...entry.agentDeclaration!, env: ['AGENT_API_TOKEN'] };
+        fs.writeFileSync(path.join(entry.installPath, '.env'), APP_ENV);
+        const victim = path.join(tmpDir, 'victim.json');
+        fs.writeFileSync(victim, '{"keep":true}', { mode: 0o644 });
+        fs.symlinkSync(victim, path.join(entry.installPath, '.env.agent'));
+
+        await manager.injectAgentService(entry);
+
+        expect(fs.readFileSync(victim, 'utf-8')).toBe('{"keep":true}');
+        expect(fs.statSync(victim).mode & 0o777).toBe(0o644);
+        expect(fs.lstatSync(path.join(entry.installPath, '.env.agent')).isSymbolicLink()).toBe(false);
+        expect(resolvedAgentEnv(entry)).toEqual({ AGENT_API_TOKEN: 'agent-token' });
+        expect(fs.readdirSync(entry.installPath).filter((f) => f.includes('.tmp.'))).toEqual([]);
+      });
+
+      it('refuses an agent path that is a symlink to the app dir', async () => {
+        const entry = makeEntry(tmpDir);
+        fs.rmSync(path.join(entry.installPath, 'agent'), { recursive: true });
+        fs.symlinkSync('.', path.join(entry.installPath, 'agent'));
+        fs.writeFileSync(path.join(entry.installPath, '.env'), APP_ENV);
+
+        await expect(manager.injectAgentService(entry)).rejects.toThrow('Agent path "./agent" resolves outside the app directory');
+        expect(fs.readFileSync(path.join(entry.installPath, 'docker-compose.yml'), 'utf-8')).not.toContain('agent:');
+      });
+
+      it('does not pass a line without "=" whose text starts with a declared name', async () => {
+        const entry = makeEntry(tmpDir);
+        entry.agentDeclaration = { ...entry.agentDeclaration!, env: ['AGENT_API_TOKEN'] };
+        fs.writeFileSync(path.join(entry.installPath, '.env'), 'AGENT_API_TOKENX\n' + APP_ENV);
+
+        await manager.injectAgentService(entry);
+
+        expect(fs.readFileSync(path.join(entry.installPath, '.env.agent'), 'utf-8')).toBe('AGENT_API_TOKEN=agent-token\n');
+      });
     });
 
     it('does not download or install Codex in a Claude-only agent image', async () => {
@@ -411,6 +501,142 @@ describe('AgentManager', () => {
       expect(agentEntry!['type']).toBe('app-agent');
       expect(agentEntry!['container']).toBe('my-app-agent');
       expect(agentEntry!['claudeBin']).toBe('/usr/local/bin/claude'); // actual host path, volume-mounted
+    });
+
+    // #601: an app opts its agent into isolate mode in app.yaml; only that
+    // agent's entry gets isolateMemory, and a release that drops it turns it off.
+    it('writes isolateMemory only for an app that declares it, and clears it when the declaration goes away', async () => {
+      const configPath = path.join(tmpDir, 'config.json');
+      fs.writeFileSync(configPath, JSON.stringify({ gateway: {}, agents: [{ id: 'host-agent', workspace: '/tmp/host', claude: { model: 'm' } }] }));
+      const read = () => (JSON.parse(fs.readFileSync(configPath, 'utf-8')) as { agents: Array<Record<string, unknown>> }).agents;
+
+      const isolated = makeEntry(tmpDir);
+      isolated.agentDeclaration = { ...isolated.agentDeclaration!, isolateMemory: true };
+      await manager.upsertAgent(isolated);
+      await manager.upsertAgent(makeEntry(tmpDir, 'other-app', 'other-agent'));
+      expect(Object.fromEntries(read().map((a) => [a['id'], a['isolateMemory']]))).toEqual({
+        'host-agent': undefined, 'my-agent': true, 'other-agent': undefined,
+      });
+
+      await manager.upsertAgent(makeEntry(tmpDir));
+      expect(read().find((a) => a['id'] === 'my-agent')).not.toHaveProperty('isolateMemory');
+    });
+
+    // #601: gateway start admits agents from the loaded config, and only then
+    // does reconcileAgents() rewrite config.json; the config watcher's baseline is
+    // the loaded config, so a hand-edited value would otherwise stay in effect.
+    it('applyDeclaredMemoryModes gives the loaded config the value reconcile then writes', async () => {
+      const configPath = path.join(tmpDir, 'config.json');
+      const declared = makeEntry(tmpDir);
+      declared.agentDeclaration = { ...declared.agentDeclaration!, isolateMemory: true };
+      const undeclared = makeEntry(tmpDir, 'other-app', 'other-agent');
+      const stopped = makeEntry(tmpDir, 'stopped-app', 'stopped-agent');
+      stopped.status = 'stopped';
+      const registry = new AppsRegistry(path.join(tmpDir, 'apps.json'));
+      for (const app of [declared, undeclared, stopped]) await registry.upsert(app);
+      await manager.reconcileAgents(registry);
+      // Hand edits while the gateway was down: the declared agent turned off, the others turned on.
+      const edited = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as { agents: Array<Record<string, unknown>> };
+      for (const agent of edited.agents) agent['isolateMemory'] = agent['id'] !== 'my-agent';
+      edited.agents.push({ id: 'host-agent', workspace: '/tmp/host', claude: { model: 'm' }, isolateMemory: true });
+      // A stopped app is not reconciled, so its entry keeps whatever it has.
+      edited.agents.push({ id: 'stopped-agent', type: 'app-agent', workspace: '/tmp/stopped', claude: { model: 'm' }, isolateMemory: true });
+      fs.writeFileSync(configPath, JSON.stringify(edited));
+
+      const loaded = edited.agents.map((agent) => ({ ...agent })) as unknown as AgentConfig[];
+      applyDeclaredMemoryModes(loaded, await registry.list());
+      await manager.reconcileAgents(registry);
+      const written = (JSON.parse(fs.readFileSync(configPath, 'utf-8')) as { agents: Array<Record<string, unknown>> }).agents;
+      const isolation = (agents: Array<{ id?: unknown; isolateMemory?: unknown }>) =>
+        Object.fromEntries(agents.map((a) => [a.id as string, a.isolateMemory]));
+      expect(isolation(loaded)).toEqual({ 'my-agent': true, 'other-agent': undefined, 'stopped-agent': true, 'host-agent': true });
+      expect(isolation(loaded)).toEqual(isolation(written));
+    });
+
+    // #609: disable_archive follows the same lifecycle as isolate_memory, and neither implies the other.
+    it('writes disableArchive only for an app that declares it, and clears it when the declaration goes away', async () => {
+      const configPath = path.join(tmpDir, 'config.json');
+      fs.writeFileSync(configPath, JSON.stringify({ gateway: {}, agents: [{ id: 'host-agent', workspace: '/tmp/host', claude: { model: 'm' } }] }));
+      const read = () => (JSON.parse(fs.readFileSync(configPath, 'utf-8')) as { agents: Array<Record<string, unknown>> }).agents;
+
+      const declared = makeEntry(tmpDir);
+      declared.agentDeclaration = { ...declared.agentDeclaration!, disableArchive: true };
+      await manager.upsertAgent(declared);
+      await manager.upsertAgent(makeEntry(tmpDir, 'other-app', 'other-agent'));
+      expect(Object.fromEntries(read().map((a) => [a['id'], a['disableArchive']]))).toEqual({
+        'host-agent': undefined, 'my-agent': true, 'other-agent': undefined,
+      });
+      expect(read().find((a) => a['id'] === 'my-agent')).not.toHaveProperty('isolateMemory');
+
+      await manager.upsertAgent(makeEntry(tmpDir));
+      expect(read().find((a) => a['id'] === 'my-agent')).not.toHaveProperty('disableArchive');
+    });
+
+    it('applyDeclaredMemoryModes gives the loaded config the disableArchive reconcile then writes (#609)', async () => {
+      const configPath = path.join(tmpDir, 'config.json');
+      const declared = makeEntry(tmpDir);
+      declared.agentDeclaration = { ...declared.agentDeclaration!, disableArchive: true };
+      const undeclared = makeEntry(tmpDir, 'other-app', 'other-agent');
+      const registry = new AppsRegistry(path.join(tmpDir, 'apps.json'));
+      for (const app of [declared, undeclared]) await registry.upsert(app);
+      await manager.reconcileAgents(registry);
+      // Hand edits while the gateway was down invert both.
+      const edited = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as { agents: Array<Record<string, unknown>> };
+      for (const agent of edited.agents) agent['disableArchive'] = agent['id'] !== 'my-agent';
+      fs.writeFileSync(configPath, JSON.stringify(edited));
+
+      const loaded = edited.agents.map((agent) => ({ ...agent })) as unknown as AgentConfig[];
+      applyDeclaredMemoryModes(loaded, await registry.list());
+      await manager.reconcileAgents(registry);
+      const written = (JSON.parse(fs.readFileSync(configPath, 'utf-8')) as { agents: Array<Record<string, unknown>> }).agents;
+      const archiveOff = (agents: Array<{ id?: unknown; disableArchive?: unknown }>) =>
+        Object.fromEntries(agents.map((a) => [a.id as string, a.disableArchive]));
+      expect(archiveOff(loaded)).toEqual({ 'my-agent': true, 'other-agent': undefined });
+      expect(archiveOff(loaded)).toEqual(archiveOff(written));
+    });
+
+    describe('syncMemoryModes()', () => {
+      const configPath = () => path.join(tmpDir, 'config.json');
+      const agentEntry = () =>
+        (JSON.parse(fs.readFileSync(configPath(), 'utf-8')) as { agents: Array<Record<string, unknown>> })
+          .agents.find((a) => a['id'] === 'my-agent');
+
+      it('writes the declared modes and keeps operator-edited fields', async () => {
+        const entry = makeEntry(tmpDir);
+        await manager.upsertAgent(entry);
+        const config = JSON.parse(fs.readFileSync(configPath(), 'utf-8')) as { agents: Array<Record<string, unknown>> };
+        Object.assign(config.agents.find((a) => a['id'] === 'my-agent')!, { claude: { model: 'operator-model' }, env: 'X=1' });
+        fs.writeFileSync(configPath(), JSON.stringify(config), 'utf-8');
+
+        const synced = await manager.syncMemoryModes({
+          ...entry,
+          agentDeclaration: { ...entry.agentDeclaration!, isolateMemory: true, disableArchive: true },
+        });
+
+        expect(synced).toBe(true);
+        expect(agentEntry()).toMatchObject({ isolateMemory: true, disableArchive: true, claude: { model: 'operator-model' }, env: 'X=1' });
+      });
+
+      it('removes modes the declaration no longer sets, including a hand edit', async () => {
+        const entry = makeEntry(tmpDir);
+        await manager.upsertAgent({ ...entry, agentDeclaration: { ...entry.agentDeclaration!, disableArchive: true } });
+        const config = JSON.parse(fs.readFileSync(configPath(), 'utf-8')) as { agents: Array<Record<string, unknown>> };
+        config.agents.find((a) => a['id'] === 'my-agent')!['isolateMemory'] = true;
+        fs.writeFileSync(configPath(), JSON.stringify(config), 'utf-8');
+
+        expect(await manager.syncMemoryModes(entry)).toBe(true);
+
+        expect(agentEntry()).not.toHaveProperty('isolateMemory');
+        expect(agentEntry()).not.toHaveProperty('disableArchive');
+      });
+
+      it('returns false and creates nothing when the agent is not registered', async () => {
+        const entry = makeEntry(tmpDir);
+
+        expect(await manager.syncMemoryModes(entry)).toBe(false);
+
+        expect(fs.existsSync(configPath()) ? agentEntry() : undefined).toBeUndefined();
+      });
     });
 
     it('is idempotent — calling twice does not duplicate entry', async () => {

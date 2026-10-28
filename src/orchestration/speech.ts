@@ -1,10 +1,11 @@
-import { SPOKEN_TEXT_LIMIT } from './response-schema';
+import { FOLLOW_UPS, PAYLOAD_OPENING, SPOKEN_TEXT_LIMIT, type FollowUp } from './response-schema';
 import { fenceAdjusted } from './display-stream';
+import { stripAudioTags } from '../voice/audio-tags';
 
 /** Both surfaces are generated in one inference. The field contract itself lives in the
  * invariant ORCHESTRATION_RESPONSE_SCHEMA declared on every turn; this overlay is the
  * per-turn text (below the cache breakpoint) that tells the model to fill spoken_text. */
-export const SPEECH_OVERLAY = `For this voice-enabled turn return ONLY one JSON object with exactly two string fields:
+export const SPEECH_OVERLAY = `For this voice-enabled turn return ONLY one JSON object with these two string fields, plus follow_up only when this turn's instructions ask for it:
 {"display_text":"complete answer for chat, including all useful detail", "spoken_text":"brief natural spoken answer"}.
 First understand the user's intent and conversation context. For greetings, casual conversation or a question you can answer directly, answer naturally; do not announce work or give a generic acknowledgement.
 Language: an explicit requested response language takes precedence over the language of the user's message, prior conversation, identity defaults and TTS voice style. Unless the user explicitly requests different languages for chat and audio, write spoken_text in the same language as display_text. For example, a Thai request to introduce yourself in Japanese (jp) requires both the introduction in chat and the spoken introduction in Japanese, not a Thai summary. Preserve this requested language in spoken_acknowledgement and subsequent Worker result notifications for that request. Voice selection controls vocal identity, never translation or response language.
@@ -14,13 +15,18 @@ Your final display_text for this delegation turn should agree with that contextu
 After spawning a worker, end this turn with a brief factual progress update. Do not poll or wait for that worker to finish; a separate automatic notification turn will report its persisted result.
 On an automatic task notification, report the actual result or failure without starting more work.
 Compose both in this same turn. spoken_text normally contains 1–3 short sentences, at most 600 characters.
+spoken_text answers the user's latest question or request first, then, within the same budget, briefly covers every other question display_text answers. When display_text answers a question, never speak only an acknowledgement of an earlier command. Keep a name or term the user said in Latin script spelled as written, not transliterated.
 For reviews/reports speak the conclusion, most important issue and next step; retain all findings and evidence in display_text, including the worker's severity markers, per-severity counts and verdict. Speech may omit the visual markers, but both surfaces must agree on the findings and the blocking verdict.
 Do not read code, diffs, tables, URLs or raw tool receipts aloud. For follow-up questions answer the specific point using existing task results, without re-running work unnecessarily.
 If the user explicitly requests a longer oral explanation, explain the requested part within 600 characters and offer to continue.
 Never claim a task finished before its persisted result. Both fields must agree on facts and uncertainty. Do not infer that TTS is unavailable from earlier conversation complaints: the gateway handles playback. Speak the requested answer itself rather than announcing that you wrote it in chat or speculating about playback status.`;
 /** A later voice turn in a CLI context that already holds SPEECH_OVERLAY in full: the
  * output contract and the rules most often broken stay on every turn, the rest is referenced. */
-export const SPEECH_REMINDER = `For this voice-enabled turn the full voice reply rules given earlier in this conversation still apply unchanged. Return ONLY one JSON object with "display_text" (complete answer for chat) and "spoken_text" (1–3 short natural sentences, at most 600 characters, in the same language as display_text unless the user explicitly asked otherwise). Reply in the language the user is using, or the one they explicitly requested, and describe your own work in first person in the existing persona's voice. Answer greetings and direct questions naturally without announcing work. When work is needed, include spoken_acknowledgement in your first task_spawn call. Never claim a task finished before its persisted result, and on an automatic task notification report the actual result without starting more work. Do not read code, diffs, tables, URLs or raw tool receipts aloud.`;
+export const SPEECH_REMINDER = `For this voice-enabled turn the full voice reply rules given earlier in this conversation still apply unchanged. Return ONLY one JSON object with "display_text" (complete answer for chat) and "spoken_text" (1–3 short natural sentences, at most 600 characters, in the same language as display_text unless the user explicitly asked otherwise), plus follow_up only when this turn's instructions ask for it. Reply in the language the user is using, or the one they explicitly requested, and describe your own work in first person in the existing persona's voice. Answer greetings and direct questions naturally without announcing work. spoken_text answers the latest question first and, within the same budget, briefly covers every question display_text answers, never only an acknowledgement; keep the user's Latin-script terms spelled as written. When work is needed, include spoken_acknowledgement in your first task_spawn call. Never claim a task finished before its persisted result, and on an automatic task notification report the actual result without starting more work. Do not read code, diffs, tables, URLs or raw tool receipts aloud.`;
+/** Live-call input is a realtime transcript of whatever the microphone heard, not only the user. */
+export const LIVE_VOICE_STT_NOTE = `This live voice turn is a speech-to-text transcript of the user's microphone. It can include background speech, other people's voices or misheard words. If a fragment is off-topic, implausible or contradicts the conversation, ask the user to confirm before acting on it, especially before starting tasks or making changes.`;
+/** A live-call turn whose words may get a short spoken acknowledgement (voice.live.fastAck) before the reply starts. */
+export const LIVE_VOICE_ACK_NOTE = `A short spoken acknowledgement of this request may already have played while you prepared this reply. Start spoken_text with the answer or the action itself, not another receipt such as "OK", "Sure" or "ได้ค่ะ".`;
 /** How the raw turn text resolved into the user-facing surfaces.
  * 'structured'  — display_text was read out of the declared union payload.
  * 'plain'       — no payload at all; the prose IS the reply and nothing was lost.
@@ -53,7 +59,6 @@ function objectEnd(text: string, start: number): number {
  * at most followed by one short sign-off sentence. A reply that explains the format writes it
  * into a sentence, or keeps writing after it, and must be published exactly as written. */
 const TRAILING_SIGN_OFF_LIMIT = 120;
-
 /** The span of the turn text that is an attempt to emit the declared payload, if any.
  * `body` is the JSON to parse and [start,end) is everything to remove when it turns out to
  * be unusable — the object plus the fence that wraps it. Prose before it is tolerated on its
@@ -61,7 +66,7 @@ const TRAILING_SIGN_OFF_LIMIT = 120;
  * merely quotes the format is left alone, because unwrapping one would publish the example
  * in place of the answer and stripping one would edit the answer. */
 function payloadSpan(text: string): { body: string; start: number; end: number } | undefined {
-  const matches = [...text.matchAll(/\{(?=\s*"(?:display_text|spoken_text|notify_user)"\s*:)/g)];
+  const matches = [...text.matchAll(PAYLOAD_OPENING)];
   // Only the last object can qualify: anything earlier has even more text after it.
   const opening = matches[matches.length - 1]?.index;
   if (opening === undefined) {
@@ -81,24 +86,29 @@ function payloadSpan(text: string): { body: string; start: number; end: number }
     ? { body: text.slice(opening, closed), start, end } : undefined;
 }
 
-export function splitSpeechResponse(raw: string): { display: string; spoken: string; outcome: ResponseTextOutcome } {
+export function splitSpeechResponse(raw: string): { display: string; spoken: string; outcome: ResponseTextOutcome; followUp?: FollowUp } {
   const text = raw.trim();
   // A short conversational answer is already suitable speech. Preserve its language and
   // wording; never truncate reports or read code/URLs/JSON aloud. Applied to whatever text
   // we are about to display, so a stripped payload cannot be spoken either.
   const speakable = (source: string): string => {
-    const plain = source.replace(/\*\*([^*]+)\*\*/g, '$1');
-    return plain && plain.length <= SPOKEN_TEXT_LIMIT && !/[{}\[\]`|]|https?:\/\/|^\s*#/m.test(plain) ? plain : '';
+    // Known audio tags pass the check (issue #595) and stay in the text: the TTS layer performs
+    // them or strips them per model. Any other bracket still fails it.
+    const plain = source.replace(/\*\*([^*]+)\*\*/g, '$1').trim();
+    const words = stripAudioTags(plain).trim();
+    return words && plain.length <= SPOKEN_TEXT_LIMIT && !/[{}\[\]`|]|https?:\/\/|^\s*#/m.test(words) ? plain : '';
   };
   const payload = payloadSpan(text);
   if (!payload) return { display: raw, spoken: speakable(text), outcome: 'plain' };
   let value: unknown;
   try { value = JSON.parse(payload.body); } catch { /* Truncated or invalid; degrade below. */ }
-  const fields = (value && typeof value === 'object' ? value : {}) as { display_text?: unknown; spoken_text?: unknown };
+  const fields = (value && typeof value === 'object' ? value : {}) as { display_text?: unknown; spoken_text?: unknown; follow_up?: unknown };
   if (typeof fields.display_text === 'string' && fields.display_text.trim()) {
     const spoken = typeof fields.spoken_text === 'string' ? fields.spoken_text.trim() : '';
-    // Fail closed for malformed/over-budget speech, rather than reading the full report.
-    return { display: fields.display_text, spoken: spoken.length <= SPOKEN_TEXT_LIMIT && !/```/.test(spoken) ? spoken : '', outcome: 'structured' };
+    // Fail closed for malformed/over-budget speech, rather than reading the full report, and for
+    // audio tags alone, which leave a model that does not perform them nothing to say.
+    const followUp = FOLLOW_UPS.find(value => value === fields.follow_up);
+    return { display: fields.display_text, spoken: spoken.length <= SPOKEN_TEXT_LIMIT && !/```/.test(spoken) && stripAudioTags(spoken).trim() ? spoken : '', outcome: 'structured', ...(followUp ? { followUp } : {}) };
   }
   // No usable display_text. Publishing `raw` here is what used to put the JSON object itself
   // into the user's chat, so publish the prose around it instead, and an explicit notice when
@@ -110,6 +120,17 @@ export function splitSpeechResponse(raw: string): { display: string; spoken: str
   return { display, spoken: speakable(display), outcome: value ? 'empty_display' : 'unreadable' };
 }
 
+
+/** A turn that said nothing: blank text, or a reply object whose display_text and spoken_text are
+ * empty and that holds no other field than follow_up (which a report turn may always declare). */
+export function isEmptyReply(raw: string): boolean {
+  try {
+    const value = JSON.parse(raw);
+    return Boolean(value) && typeof value.display_text === 'string' && !value.display_text.trim() &&
+      (value.spoken_text === undefined || (typeof value.spoken_text === 'string' && !value.spoken_text.trim())) &&
+      Object.keys(value).every(key => key === 'display_text' || key === 'spoken_text' || key === 'follow_up');
+  } catch { return !raw.trim(); }
+}
 
 export function speechVoiceStyle(gender?: string): string {
   if (gender !== 'female' && gender !== 'male') return '';

@@ -2,11 +2,15 @@ import { AsyncLocalStorage } from 'async_hooks';
 import { randomUUID } from 'crypto';
 import { performance } from 'perf_hooks';
 
-export type VoiceDiagnostic = { operation: 'stt' | 'tts'; operationId: string; phase: string; elapsedMs: number; responseId?: string; utteranceId?: string; httpStatus?: number; code?: string };
+/** Correlates one spoken turn across STT, the agent turn and TTS. */
+export type VoiceTraceIds = { responseId?: string; utteranceId?: string; inputId?: string };
+/** `turn` spans one user turn end to end, from the end of speech to the first audio heard. */
+export type VoiceDiagnostic = { operation: 'stt' | 'tts' | 'turn'; operationId: string; phase: string; elapsedMs: number; httpStatus?: number; code?: string } & VoiceTraceIds;
 export type VoiceDiagnosticSink = (event: VoiceDiagnostic) => void;
 const context = new AsyncLocalStorage<(phase: string, details?: { httpStatus?: number; code?: string }) => void>();
-/** Only bounded metadata is accepted: never transcript, audio, URL or credentials. */
-export function voiceTrace(operation: 'stt' | 'tts', sink?: VoiceDiagnosticSink, ids: { responseId?: string; utteranceId?: string } = {}) {
+/** Only bounded metadata is accepted: never transcript, audio, URL or credentials.
+ * `ids` is read on every event, so ids learned later in the turn are attached as they arrive. */
+export function voiceTrace(operation: VoiceDiagnostic['operation'], sink?: VoiceDiagnosticSink, ids: VoiceTraceIds = {}) {
   const started = performance.now(), operationId = randomUUID();
   const emit = (phase: string, details: { httpStatus?: number; code?: string } = {}) => {
     try { sink?.({ operation, operationId, ...ids, phase, elapsedMs: Math.round(performance.now() - started), ...details }); } catch { /* Diagnostics cannot interrupt speech. */ }

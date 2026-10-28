@@ -67,6 +67,10 @@ test.each(['next command','interrupt'])('%s: the follow-up round is dispatched w
   const elapsed=submittedAt.at(-1)!-started;
   process.stdout.write(`LATENCY ${path}: ${elapsed} ms\n`);
   expect(submittedAt.length).toBe(path==='next command'?3:2);
-  expect(elapsed).toBeLessThan(300);
+  // A regression waits for the 1 s poll (~1000 ms). The interrupt path does
+  // real SQLite work (~130 ms locally) and reached 301 ms on a loaded CI
+  // runner, so the bound must separate "no poll wait" from "poll wait", not
+  // measure raw host speed.
+  expect(elapsed).toBeLessThan(700);
  }finally{await controller.close();store.close();rmSync(root,{recursive:true,force:true});}
 });

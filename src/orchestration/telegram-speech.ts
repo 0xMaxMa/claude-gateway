@@ -7,7 +7,6 @@ import { ttsProvider } from '../voice/providers/registry';
 
 /** Preserve normalized provider codes, never raw exceptions or credentials. */
 export function speechSynthesisFailure(error: unknown): DeliveryOutcome {
-  if (error instanceof VoiceError && error.code === 'MANAGED_VOICE_QUOTA_EXHAUSTED') return { state: 'failed', code: error.code };
   return { state: 'failed', code: error instanceof VoiceError ? error.code : 'TTS_SYNTHESIS_FAILED', speechSynthesisFailed: true };
 }
 
