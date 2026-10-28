@@ -315,6 +315,17 @@ export class TaskBridge {
                 if(!field&&a.field_text!==undefined)throw new OrchestrationError('INVALID_INPUT','field_text is only for a pending missing-field question.');
                 result=this.tasks.answer(context,a.task_id,a.question_id,field?a.field_text:a.answer,a.browser_fields,a.computer_inputs);break;
               }
+              case 'device_shell': {
+                this.tasks.store.assertMember(context.conversationId, context.principalId);
+                if (!context.execute) deny('READ_ONLY_TURN');
+                const adapter = this.gatewayAdapters.get('computer');
+                if (this.container || !this.computerEnabled?.() || !adapter?.shell) throw new OrchestrationError('COMPUTER_NOT_ALLOWED');
+                const cancelled = this.cancellations.get(token!);
+                if (!cancelled) deny('TICKET_INVALID_OR_REVOKED');
+                result = await this.cancelOnDisconnect(response, cancelled.signal, signal => adapter.shell!(context, a, signal));
+                if (this.scopes.get(token!) !== scope) deny('TICKET_INVALID_OR_REVOKED');
+                this.tasks.store.assertMember(context.conversationId, context.principalId); break;
+              }
               default: throw new OrchestrationError('TOOL_DENIED');
             }
             if (mutation) scope.onMutationResult?.(context.actionId, true);
@@ -456,10 +467,13 @@ export class TaskBridge {
     const workerMemory = Boolean(worker?.task.capabilities.writeMemory && worker.conversation.source !== 'api');
     const jevEnabled = Boolean(this.jevEnabled?.());
     const browserEnabled = Boolean(this.browserEnabled?.());
+    const deviceShellEnabled = scope.role === 'agent' && !this.container && Boolean(this.computerEnabled?.()) && Boolean(this.gatewayAdapters.get('computer')?.shell);
     writeFileSync(ticketPath, JSON.stringify({ url: this.url, token, ...(this.container ? { socket: this.url, tools: containerTaskTools(scope.role, jevEnabled, browserEnabled, Boolean(this.computerEnabled?.())) } : {}) }), { mode: 0o600, flag: 'wx' });
     writeFileSync(mcpConfigPath, JSON.stringify({ mcpServers: { gateway: { command: 'bun', args: [resolve(__dirname, '../../mcp/server.ts')], env: {
       GATEWAY_JEV_ENABLED: jevEnabled ? 'true' : '',
       GATEWAY_CAPABILITY_CATALOG: scope.role === 'agent' && scope.capabilities ? 'true' : '',
+      // device_shell is declared only when Computer Use is allowed; fixed for this MCP process (cached tool prefix).
+      GATEWAY_COMPUTER_ENABLED: deviceShellEnabled ? 'true' : '',
       GATEWAY_ORCHESTRATION_ROLE: scope.role, GATEWAY_ORCHESTRATION_TICKET_FILE: ticketPath,
       GATEWAY_WORKSPACE_DIR: workspace, GATEWAY_SHARED_KB_DIR: sharedKbDir, GATEWAY_ISOLATE_MEMORY: this.isolateMemory() ? '1' : '', GATEWAY_DISABLE_ARCHIVE: this.disableArchive() ? '1' : '',
       GATEWAY_RECORD_RETRIEVALS: this.recordRetrievals ? '1' : '',
@@ -491,7 +505,7 @@ export class TaskBridge {
     const writeMemory = workerMemory || (scope.role === 'agent' && scope.context.writeMemory && this.tasks.store.get('SELECT source FROM conversations WHERE id=?', scope.context.conversationId)?.source !== 'api');
     const personaContext = scope.role === 'agent' && !this.isolateMemory() ? `This agent persona workspace: ${JSON.stringify(this.container ? '/workspace' : workspace)}.` : '';
     const sourceRules = `${personaContext}\n${writeMemory ? `Channel memory updates use scoped memory tools. ${SECRET_RULES}` : API_SOURCE_RULES}\n${this.isolateMemory() ? SHARED_PERSONA_RULES : IDENTITY_EDIT_RULES}`;
-    return { profile: { role: scope.role, jevEnabled, browserEnabled, checkpointCommand, containerExecution: Boolean(this.container), mcpConfigPath, overlay: `${scope.role === 'agent' ? AGENT_OVERLAY : WORKER_OVERLAY}\n\n${sourceRules}` },
+    return { profile: { role: scope.role, jevEnabled, browserEnabled, deviceShellEnabled, checkpointCommand, containerExecution: Boolean(this.container), mcpConfigPath, overlay: `${scope.role === 'agent' ? AGENT_OVERLAY : WORKER_OVERLAY}\n\n${sourceRules}` },
       revoke: () => { this.cancellations.get(token)?.abort(); this.cancellations.delete(token); this.scopes.delete(token); if (scope.role === 'worker') this.files?.releaseCaptured(scope.attemptId); } };
   }
   async close(): Promise<void> {
