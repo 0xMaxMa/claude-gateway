@@ -7,12 +7,12 @@ const {runComputerUse}=require('../../../src/automation/computer-use');
 
 // Pod 2.0.16: a reached agent goal paused the task and never ended the relay
 // session, so the Mac kept showing "Being controlled" after YouTube opened.
-function fixture(endSession:'stopped'|'error'='stopped'){
+function fixture(endSession:'stopped'|'error'='stopped',needsInput:(...args:any[])=>boolean=()=>true){
  const root=mkdtempSync(join(tmpdir(),'computer-goal-adapter-'));runComputerUse.mockReset();
  const callTool=jest.fn(async({name}:{name:string})=>name==='computer_end_session'?(endSession==='stopped'?{content:[{type:'text',text:'{"state":"stopped"}'}]}:{isError:true,content:[{type:'text',text:'{"error":"COMPUTER_CLOSED"}'}]}):{content:[{type:'text',text:'{"state":"approved"}'}]});
  jest.mocked(withComputerConnection).mockImplementation(async(_c,fn)=>fn({callTool} as any));
  const connectors={get:()=>({connectorId:'c',scope:{device_id:'d',grant_id:'g'}}),connection:()=>({endpoint:'https://computer.example/mcp',headers:{}})};
- const adapter=new ComputerTaskAdapter({agentId:'a',root,connectors:connectors as any,allowed:()=>true,member:()=>true,active:()=>true,evaluate:jest.fn(),needsInput:()=>true});
+ const adapter=new ComputerTaskAdapter({agentId:'a',root,connectors:connectors as any,allowed:()=>true,member:()=>true,active:()=>true,evaluate:jest.fn(),needsInput});
  const task={agentId:'a',taskId:'t',ownerPrincipalId:'p',conversationId:'c',revision:1,automationController:'user',gatewayTarget:{adapter:'computer',sessionId:'target'}} as any;
  const run=async(t:any,request:string,goal:string)=>{await adapter.submit(t,request,goal);for(let i=0;i<50;i++){const outcome=await adapter.inspect(t,request);if(typeof outcome==='object')return outcome as any;await new Promise(r=>setImmediate(r));}throw Error('not settled');};
  const ended=()=>callTool.mock.calls.filter(([c]:any)=>c.name==='computer_end_session');
@@ -97,5 +97,21 @@ test('a yes to the agent\'s single hand-off command does not become a goal',asyn
   await f.run(reply,'r3','ใช่');
   expect(runComputerUse.mock.calls[2][0].confirmation).toEqual({command:'quit chrome',label:'Quit Google Chrome'});
   expect(runComputerUse.mock.calls[2][0].resumeGoal).toBeUndefined();
+ }finally{await f.close();}
+});
+
+// Pod-jinawong 2.0.21, task fa17f432: the goal reached the focused shell with no text
+// to type and stopped as a bare COMMAND_WAITING_INPUT; nobody was asked for the text.
+test('a goal stopped at a field without its text asks the agent for that field',async()=>{
+ const needsInput=jest.fn(()=>true);
+ const f=fixture('stopped',needsInput);try{
+  const fieldRequest={label:'shell',application:'com.apple.Terminal',windowTitle:'jisack — -zsh — 80×24',role:'AXTextArea',reason:'missing'};
+  runComputerUse.mockImplementationOnce(async()=>({status:'needs_input',reason:'FIELD_TEXT_REQUIRED',steps:1,evaluations:2,fieldRequest,lastAction:{kind:'open',appId:'com.apple.Terminal'}}));
+  const outcome=await f.run(f.task,'r1','Open Terminal.app and check whether htop is installed.');
+  expect(outcome.type).toBe('paused');
+  expect(outcome.computerReport).toMatchObject({status:'needs_input',reason:'FIELD_TEXT_REQUIRED',fieldRequest});
+  expect(needsInput).toHaveBeenCalledTimes(1);
+  expect((needsInput.mock.calls[0] as any[])[1]).toContain('Computer Use needs a value for "shell"');
+  expect(f.ended()).toHaveLength(0);
  }finally{await f.close();}
 });
