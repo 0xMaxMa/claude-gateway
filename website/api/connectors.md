@@ -641,8 +641,9 @@ The gateway allocates a free loopback port for each run and passes it as `PORT`.
 server must listen on `127.0.0.1:$PORT` and serve MCP over streamable HTTP at `path`.
 
 The sidecar is **ready** when two checks pass. A `GET` on `path` gets any HTTP status
-line back (`405` or `401` is fine). If `lsof` is installed, every process listening on
-the port must also be in the sidecar's process group. Until then the status reads
+line back (`405` or `401` is fine). Every process listening on the port must also be
+in the sidecar's process group, checked with `lsof` or, on Linux, `ss` if `lsof` is
+unavailable. If neither tool can verify ownership, readiness fails closed. Until then the status reads
 `starting`. A server that is not ready within `readyTimeoutMs` is stopped and counts as
 a failed start.
 
@@ -704,8 +705,8 @@ the arguments.
 
 The sidecar's stdout and stderr go to the gateway log, one line per entry, prefixed
 `connector-sidecar: connector=<connectorId> output:`. At most 120 lines a minute are
-kept. The rest are counted in one `line(s) suppressed` line. Each line is cut at 2000
-characters.
+kept. The rest are counted in one `line(s) suppressed` line. A line longer than
+2000 characters is replaced with `[line omitted: exceeds 2000 characters]`.
 
 Before a line is written, any `Bearer <value>` is replaced with `Bearer [redacted]`,
 and so is any of this connector's stored secrets that is at least 8 characters long.
