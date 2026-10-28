@@ -20,3 +20,9 @@ export function buildCliUrl(publicUrl: string | undefined, pairingId: string): s
   const base = normalizePublicUrl(publicUrl);
   return base ? `${base}/cli/${pairingId}` : null;
 }
+
+/** Telegram `/call` page for a voice-call pairing, or null without a public URL. */
+export function buildVoiceCallUrl(publicUrl: string | undefined, pairingId: string): string | null {
+  const base = normalizePublicUrl(publicUrl);
+  return base ? `${base}/voice-call/${pairingId}` : null;
+}

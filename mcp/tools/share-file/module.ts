@@ -31,10 +31,10 @@ export class ShareFileModule implements ToolModule {
     if (process.env.GATEWAY_ORCHESTRATION_ROLE !== 'worker') return shareFileToolDefs;
     return shareFileToolDefs.map(tool => ({
       ...tool,
-      description: tool.description + ' In a task, use the original absolute file path in the active task workspace, a supplied input attachment or this session’s media directory. The gateway stages it automatically; do not copy it to the agent-wide media root. Describe this as creating a link (Thai: สร้างลิงก์).',
-      inputSchema: { ...shareFileInputSchema, properties: { ...shareFileInputSchema.properties,
-        path: { type: 'string', description: 'Original absolute file path in the active task workspace or session media, or artifact:<id>.' },
-        paths: { type: 'array', items: { type: 'string' }, description: 'Up to 5 authorized absolute file paths or artifact refs.' },
+      description: tool.name === LEGACY_TOOL_NAME ? tool.description : tool.description + ' In a task, pass the original absolute file path in the active task workspace, a supplied input attachment or this session’s media directory. The gateway prepares the authorized file path automatically. Do not copy it to the agent-wide media root. Describe this as creating a link (Thai: สร้างลิงก์).',
+      inputSchema: { ...(tool.name === LEGACY_TOOL_NAME ? shareImageInputSchema : shareFileInputSchema), properties: { ...(tool.name === LEGACY_TOOL_NAME ? shareImageInputSchema.properties : shareFileInputSchema.properties),
+        path: { type: 'string', description: tool.name === LEGACY_TOOL_NAME ? 'Original absolute file path in this session’s media directory, or artifact:<id>.' : 'Original absolute file path in the active agent workspace or session media, or artifact:<id>.' },
+        paths: { type: 'array', items: { type: 'string' }, description: tool.name === LEGACY_TOOL_NAME ? 'Up to 5 authorized session media paths or artifact refs.' : 'Up to 5 authorized workspace/media paths or artifact refs.' },
       } },
     }));
   }
@@ -73,7 +73,7 @@ export class ShareFileModule implements ToolModule {
     const refs: ShareRef[] = paths.map((p) =>
       p.startsWith('artifact:') ? { artifact_id: p.slice('artifact:'.length) } : { path: p },
     );
-    const opts: { purpose?: string; ttlSeconds?: number; allowDocuments: boolean } = {
+    const opts: { purpose?: string; ttlSeconds?: number; allowDocuments: boolean; allowAllFiles: boolean } = {
       // share_file is the agent's explicit "publish this file" verb, so it opts
       // into the full share allowlist (images + PDF). The legacy share_image
       // name does NOT: an instruction written against it meant "share an
@@ -83,6 +83,7 @@ export class ShareFileModule implements ToolModule {
       // failed closed with a 404. The narrow image consumers (line_image,
       // generate_image ref normalization) stay strict for the same reason.
       allowDocuments: !legacy,
+      allowAllFiles: !legacy,
     };
     if (typeof args.purpose === 'string' && args.purpose.trim()) opts.purpose = args.purpose.trim();
     if (typeof args.ttl_seconds === 'number' && args.ttl_seconds > 0) opts.ttlSeconds = args.ttl_seconds;
@@ -130,8 +131,8 @@ const shareFileInputSchema = {
   type: 'object',
   properties: {
     action: { type: 'string', enum: ['create', 'revoke'], description: 'create (default) | revoke' },
-    path: { type: 'string', description: 'One media path (e.g. "media/session-1/report.pdf") or "artifact:<id>" to share.' },
-    paths: { type: 'array', items: { type: 'string' }, description: 'Multiple media paths / artifact refs (max 5).' },
+    path: { type: 'string', description: 'One absolute workspace/media path (e.g. report.pdf or disk.iso), or "artifact:<id>" to share.' },
+    paths: { type: 'array', items: { type: 'string' }, description: 'Up to 5 authorized workspace/media paths or artifact refs.' },
     ttl_seconds: { type: 'number', description: 'Optional lifetime in seconds (default 1800).' },
     purpose: { type: 'string', description: 'Optional purpose tag (default "codex_ref").' },
     share_id: { type: 'string', description: 'Share id to revoke (required for action="revoke").' },
@@ -156,8 +157,9 @@ const shareFileToolDefs: McpToolDefinition[] = [
   {
     name: 'share_file',
     description:
-      'Create or revoke a SHORT-LIVED public URL for a file in this agent\'s media directory (PNG, JPEG, WebP or PDF). ' +
-      'action="create" takes "path" (one media path or artifact:<id>) or "paths" (up to 5) and returns ' +
+      'Create or revoke a SHORT-LIVED public URL for an existing file in this agent\'s workspace or session media. ' +
+      'Files are served as downloads (images retain inline display); files are not uploaded by this tool. ' +
+      'action="create" takes "path" (one authorized path or artifact:<id>) or "paths" (up to 5) and returns ' +
       '{ share_id, url, expires_at } per file — the URL needs no auth and expires automatically (default 30 min). ' +
       'action="revoke" takes "share_id" and invalidates the URL immediately. ' +
       'You normally do NOT need this for image editing: generate_image converts local/artifact references ' +

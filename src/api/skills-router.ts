@@ -87,18 +87,30 @@ function extractSourceUrl(filePath: string): string | null {
   }
 }
 
-function reloadRunnerRegistry(
+/**
+ * Refresh a running agent after a skill write: its workspace recomposer rewrites CLAUDE.md
+ * and swaps the registry with the hidden-until-used set recomputed. Without one (or if it
+ * fails) the registry is reloaded bare, keeping the hidden set of skills still installed.
+ */
+async function reloadRunnerRegistry(
   agentId: string,
   config: AgentConfig,
   agents: Map<string, AgentRunner>,
-): void {
+): Promise<void> {
   const runner = agents.get(agentId);
   if (!runner) return;
+  try {
+    if (await runner.recomposeWorkspace()) return;
+  } catch (err) {
+    console.warn(`skills reload for agent '${agentId}' could not recompose CLAUDE.md:`, (err as Error).message);
+  }
   const registry = loadSkills({
     workspaceDir: config.workspace,
     mcpToolsDir: MCP_TOOLS_DIR,
     sharedSkillsDir: SHARED_SKILLS_DIR,
   });
+  const hidden = runner.getSkillRegistry().hiddenUntilUsed;
+  if (hidden) registry.hiddenUntilUsed = new Set([...hidden].filter((key) => registry.skills.has(key)));
   runner.setSkillRegistry(registry);
 }
 
@@ -284,7 +296,7 @@ export function createSkillsRouter(
       const tmpFile = skillFile + '.tmp';
       fs.writeFileSync(tmpFile, skillMd, 'utf-8');
       fs.renameSync(tmpFile, skillFile);
-      if (agents) reloadRunnerRegistry(agentId, config, agents);
+      if (agents) await reloadRunnerRegistry(agentId, config, agents);
       res.status(201).json({
         key: name,
         name,
@@ -391,7 +403,7 @@ export function createSkillsRouter(
       const tmpFile = skillFile + '.tmp';
       fs.writeFileSync(tmpFile, content, 'utf-8');
       fs.renameSync(tmpFile, skillFile);
-      if (agents) reloadRunnerRegistry(agentId, config, agents);
+      if (agents) await reloadRunnerRegistry(agentId, config, agents);
       const description = typeof fm['description'] === 'string' ? fm['description'] : '(no description)';
       res.status(201).json({
         key: skillName,
@@ -414,7 +426,7 @@ export function createSkillsRouter(
    * Delete a skill by name.
    * Query: scope=workspace|shared (default: workspace)
    */
-  router.delete('/v1/agents/:agentId/skills/:name', auth, (req: Request, res: Response) => {
+  router.delete('/v1/agents/:agentId/skills/:name', auth, async (req: Request, res: Response) => {
     const { agentId, name } = req.params as { agentId: string; name: string };
     const apiKey = (req as AuthedRequest).apiKey;
 
@@ -452,7 +464,7 @@ export function createSkillsRouter(
       if (scope === 'workspace') {
         agents?.get(agentId)?.getHistoryDb()?.deleteSkillStat(name);
       }
-      if (agents) reloadRunnerRegistry(agentId, config, agents);
+      if (agents) await reloadRunnerRegistry(agentId, config, agents);
       res.json({ message: `Skill "${name}" deleted from ${scope}` });
     } catch (err: unknown) {
       res.status(500).json({ error: (err as Error).message });

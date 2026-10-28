@@ -37,6 +37,8 @@ export interface BrowserExecutionContext {
   confirmation?: {command:string;label:string};
   /** The agent's opening text for a session the user drives; no action means ready. */
   sessionStart?: boolean;
+  /** jev.images.enabled, read before each capture (live reload): a decision may carry the tab's screenshot. */
+  images?: () => boolean;
   /** The user's explicit step list (step mode). */
   steps?: string[];
   fields?: Array<{label:string;text:string}>;

@@ -31,8 +31,8 @@ export function commandHelp(channel: CommandChannel, orchestration = false, inte
   const lines = commandCatalog(channel, orchestration).map(command => {
     const name = command.name.slice(1);
     let description = command.description;
-    // Telegram's receiver answers /model itself and only shows it; its /models buttons switch.
-    if (name === 'model' && channel === 'telegram') description = 'Show the current model; switch with /models';
+    // Telegram's receiver answers /model itself; /models shows the picker in DM.
+    if (name === 'model' && channel === 'telegram') description = 'Show the current model; view or select models in a direct message with /models';
     if (name === 'model' && ['discord', 'line'].includes(channel)) description = 'Show the model; change it in a private chat: /model [model ID]';
     if (name === 'new' && channel === 'api') description = 'Create a session: /new [name] (the reply carries its session ID)';
     if (name === 'stop' && orchestration) description = 'Stop the reply and choose a task to cancel';
@@ -46,6 +46,7 @@ export function commandHelp(channel: CommandChannel, orchestration = false, inte
   if (orchestration && channel !== 'api') {
     lines.push('/tasks — View tasks, progress and cancellation controls', '/task_question — Open a pending task question (use the command supplied with the question)');
     if (['telegram', 'discord', 'line', 'slack'].includes(channel)) lines.push('/voice [on|auto|off] — Set voice replies', '/voices — Choose the agent voice');
+    if (channel === 'telegram') lines.push('/call — Start a live voice call (direct message)');
     if (channel !== 'telegram') lines.push('/orch <token> — Use a supplied menu action; tokens expire');
   }
   if (channel === 'discord') lines.push('/ask <question> — Send a message to the agent');

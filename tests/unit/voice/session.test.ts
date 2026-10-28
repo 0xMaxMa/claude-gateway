@@ -3,6 +3,7 @@ import { FakeSttProvider } from '../../../src/voice/providers/fake';
 import { PCM16, TtsProvider } from '../../../src/voice/types';
 import { decodeVoiceFrame } from '../../../src/voice/protocol';
 import { BoundedQueue } from '../../../src/orchestration/bounded-queue';
+import { ORCHESTRATION_DEFAULTS } from '../../../src/orchestration/config';
 
 test('approved spoken text produces audio before the final answer and playback receipts bound long provider chunks', async () => {
   const stt = new FakeSttProvider(), controls: Record<string, any>[] = [], audio: Buffer[] = [], consumed: string[] = [], selectedVoices: string[] = [];
@@ -210,7 +211,7 @@ test('short speech segments merge once; resuming speech defers admission and man
     expect(submit).not.toHaveBeenCalled(); // Candidate speech is still being transcribed.
     await say('หมามีปีก', true);
     expect(submit).toHaveBeenCalledTimes(1);
-    expect(submit.mock.calls[0]).toEqual(['ช่วยสร้างรูป หมามีปีก', expect.any(String)]);
+    expect(submit.mock.calls[0]).toEqual(['ช่วยสร้างรูป หมามีปีก', expect.any(String), expect.any(Function), { fastAck: false }]);
     expect(controls.filter(c => c.type === 'stt.final').map(c => c.text)).toEqual(['ช่วยสร้างรูป หมามีปีก']);
     expect(controls.filter(c => c.type === 'utterance.accepted')).toHaveLength(1);
   } finally { await session.close(); }
@@ -397,6 +398,8 @@ test('batch STT only interrupts completed response playback after confirmed word
     await waitFor(()=>controls.some(c=>c.type==='playback.end'));
     const epoch=session.playback.epoch;
     expect((await commit(''))?.code).toBe('EMPTY_TRANSCRIPT');
+    // A punctuation-only final (#610) is no words either: it neither interrupts the reply nor reaches the agent.
+    expect((await commit('.'))?.code).toBe('EMPTY_TRANSCRIPT');
     expect(session.playback.epoch).toBe(epoch);expect(stop).not.toHaveBeenCalled();
     await commit('please wait');
     expect(session.playback.epoch).toBeGreaterThan(epoch);expect(stop).toHaveBeenCalledTimes(1);
@@ -462,4 +465,219 @@ test('STT candidate pause preserves backpressured audio past the normal client t
     expect(audio).toHaveLength(2);
     expect(controls.some(c=>c.type==='playback.end')).toBe(true);
   }finally{await session.close();jest.useRealTimers();}
+});
+
+test('turn timing correlates utterance, input and response ids from the end of speech to the first heard audio', async () => {
+  const stt = new FakeSttProvider(), controls: Record<string, any>[] = [], audio: Buffer[] = [], timing: any[] = [];
+  const stream = new BoundedQueue<{ responseId: string; text: string }>(1024, value => Buffer.byteLength(value.text));
+  const tts: TtsProvider = { id: 'fixture', capabilities: { textStreaming: true, wordAlignment: false, outputFormats: [PCM16] },
+    synthesize: async function* (options) { let sequence = 0; for await (const _ of options.text) yield { bytes: Buffer.alloc(640), format: PCM16, chunkSeq: sequence++ }; } };
+  const session = new VoiceSession(stt, tts, 'voice', { control: c => controls.push(c), audio: c => audio.push(c), bufferedBytes: () => 0 },
+    async () => ({ inputId: 'input-1', response: new Promise<string>(() => {}), stream }), jest.fn(),
+    { silenceCommitMs: 1, finalizationTimeoutMs: 5000, maxUtteranceMs: 60000, maxBufferedAudioMs: 1500, mergeWindowMs: 0 }, undefined, undefined, event => timing.push(event));
+  const waitFor = async (predicate: () => boolean) => { const end = Date.now() + 2000; while (!predicate() && Date.now() < end) await new Promise(resolve => setTimeout(resolve, 5)); expect(predicate()).toBe(true); };
+  try {
+    await session.start();
+    const listening = controls.at(-1)!;
+    await session.audio({ generation: listening.generation, epoch: 0, sequence: 1, segmentId: listening.utterance_id, audio: Buffer.alloc(320) });
+    session.speechEnded(1);
+    await waitFor(() => !!stt.sessions[0].commitId);
+    stt.sessions[0].emit({ type: 'segment_final', segmentId: 's', text: 'hello' });
+    stt.sessions[0].emit({ type: 'commit_done', commitId: stt.sessions[0].commitId! });
+    await waitFor(() => controls.some(c => c.type === 'utterance.accepted'));
+    stream.push({ responseId: 'response-1', text: 'Hi.' });
+    await waitFor(() => audio.length === 1);
+    const frame = decodeVoiceFrame(audio[0]);
+    session.progress(frame.epoch, 320);
+    const turn = timing.filter(e => e.operation === 'turn');
+    expect(turn.map(e => e.phase)).toEqual(['speech_ended', 'transcript_ready', 'turn_admitted', 'agent_first_spoken', 'spoken_sentence_sent', 'e2e_first_audio']);
+    expect(new Set(turn.map(e => e.operationId)).size).toBe(1);
+    expect(turn.at(-1)).toMatchObject({ utteranceId: listening.utterance_id, inputId: 'input-1', responseId: 'response-1' });
+    expect(turn.at(-1).elapsedMs).toBeGreaterThanOrEqual(turn[0].elapsedMs);
+    expect(timing.find(e => e.operation === 'tts' && e.phase === 'first_playback_progress')).toMatchObject({ utteranceId: listening.utterance_id, inputId: 'input-1', responseId: 'response-1' });
+  } finally { stream.close(); await session.close(); }
+});
+
+test('the agent turn reports its phases on the voice turn trace, and every spoken sentence handed to TTS is marked', async () => {
+  const stt = new FakeSttProvider(), controls: Record<string, any>[] = [], audio: Buffer[] = [], timing: any[] = [];
+  const stream = new BoundedQueue<{ responseId: string; text: string }>(1024, value => Buffer.byteLength(value.text));
+  let mark!: (phase: string) => void;
+  const tts: TtsProvider = { id: 'fixture', capabilities: { textStreaming: true, wordAlignment: false, outputFormats: [PCM16] },
+    synthesize: async function* (options) { let sequence = 0; for await (const _ of options.text) yield { bytes: Buffer.alloc(640), format: PCM16, chunkSeq: sequence++ }; } };
+  const session = new VoiceSession(stt, tts, 'voice', { control: c => controls.push(c), audio: c => audio.push(c), bufferedBytes: () => 0 },
+    async (_text, _utterance, onMark) => { mark = onMark!; return { inputId: 'input-1', response: new Promise<string>(() => {}), stream }; }, jest.fn(),
+    { silenceCommitMs: 1, finalizationTimeoutMs: 5000, maxUtteranceMs: 60000, maxBufferedAudioMs: 1500, mergeWindowMs: 0 }, undefined, undefined, event => timing.push(event));
+  const waitFor = async (predicate: () => boolean) => { const end = Date.now() + 2000; while (!predicate() && Date.now() < end) await new Promise(resolve => setTimeout(resolve, 5)); expect(predicate()).toBe(true); };
+  try {
+    await session.start();
+    const listening = controls.at(-1)!;
+    await session.audio({ generation: listening.generation, epoch: 0, sequence: 1, segmentId: listening.utterance_id, audio: Buffer.alloc(320) });
+    session.speechEnded(1);
+    await waitFor(() => !!stt.sessions[0].commitId);
+    stt.sessions[0].emit({ type: 'segment_final', segmentId: 's', text: 'hello' });
+    stt.sessions[0].emit({ type: 'commit_done', commitId: stt.sessions[0].commitId! });
+    await waitFor(() => controls.some(c => c.type === 'utterance.accepted'));
+    for (const phase of ['process_spawned', 'first_model_token', 'first_spoken_delta']) mark(phase);
+    stream.push({ responseId: 'response-1', text: 'One.' });
+    stream.push({ responseId: 'response-1', text: 'Two.' });
+    await waitFor(() => timing.filter(e => e.phase === 'spoken_sentence_sent').length === 2);
+    const turn = timing.filter(e => e.operation === 'turn');
+    expect(turn.map(e => e.phase)).toEqual(['speech_ended', 'transcript_ready', 'turn_admitted', 'process_spawned', 'first_model_token', 'first_spoken_delta', 'agent_first_spoken', 'spoken_sentence_sent', 'spoken_sentence_sent']);
+    expect(new Set(turn.map(e => e.operationId)).size).toBe(1);
+    expect(turn.find(e => e.phase === 'process_spawned')).toMatchObject({ utteranceId: listening.utterance_id, inputId: 'input-1' });
+  } finally { stream.close(); await session.close(); }
+});
+
+test('silenceCommitMs 0 commits on speech.ended without a pause, after the last audio frame reaches the recognizer', async () => {
+  jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] });
+  const stt = new FakeSttProvider(), controls: Record<string, any>[] = [];
+  const tts: TtsProvider = { id: 'fixture', capabilities: { textStreaming: true, wordAlignment: false, outputFormats: [PCM16] }, synthesize: async function* () {} };
+  const session = new VoiceSession(stt, tts, 'voice', { control: c => controls.push(c), audio: () => {}, bufferedBytes: () => 0 },
+    async () => ({ inputId: 'input', response: new Promise<string>(() => {}) }), jest.fn(),
+    { silenceCommitMs: 0, finalizationTimeoutMs: 5000, maxUtteranceMs: 60000, maxBufferedAudioMs: 1500, mergeWindowMs: 0 });
+  try {
+    await session.start();
+    const listening = controls.at(-1)!;
+    await session.audio({ generation: listening.generation, epoch: 0, sequence: 1, segmentId: listening.utterance_id, audio: Buffer.alloc(320) });
+    await session.audio({ generation: listening.generation, epoch: 0, sequence: 2, segmentId: listening.utterance_id, audio: Buffer.alloc(320) });
+    session.speechEnded(2);
+    await jest.advanceTimersByTimeAsync(0);
+    expect(stt.sessions[0].commitId).toBeDefined();
+    expect(stt.sessions[0].frames).toHaveLength(2);
+    stt.sessions[0].emit({ type: 'segment_final', segmentId: 's', text: 'สวัสดี' });
+    stt.sessions[0].emit({ type: 'commit_done', commitId: stt.sessions[0].commitId! });
+    await jest.advanceTimersByTimeAsync(0);
+    expect(controls).toContainEqual(expect.objectContaining({ type: 'stt.final', text: 'สวัสดี' }));
+  } finally { await session.close(); jest.useRealTimers(); }
+});
+
+test('barge-in while spoken sentences are still streaming cancels the rest: later sentences never reach TTS', async () => {
+  const stt = new FakeSttProvider(), controls: Record<string, any>[] = [], audio: Buffer[] = [], consumed: string[] = [];
+  const stream = new BoundedQueue<{ responseId: string; text: string }>(4096, value => Buffer.byteLength(value.text));
+  const tts: TtsProvider = { id: 'fixture', capabilities: { textStreaming: true, wordAlignment: false, outputFormats: [PCM16] },
+    synthesize: async function* (options) { let sequence = 0; for await (const text of options.text) { consumed.push(text); yield { bytes: Buffer.alloc(640), format: PCM16, chunkSeq: sequence++ }; } } };
+  const stop = jest.fn();
+  const session = new VoiceSession(stt, tts, 'voice', { control: c => controls.push(c), audio: c => audio.push(c), bufferedBytes: () => 0 },
+    async () => ({ inputId: 'input', response: new Promise<string>(() => {}), stream }), stop,
+    { silenceCommitMs: 0, finalizationTimeoutMs: 5000, maxUtteranceMs: 60000, maxBufferedAudioMs: 1500, mergeWindowMs: 0 });
+  const waitFor = async (predicate: () => boolean) => { const end = Date.now() + 2000; while (!predicate() && Date.now() < end) await new Promise(resolve => setTimeout(resolve, 5)); expect(predicate()).toBe(true); };
+  try {
+    await session.start();
+    const listening = controls.at(-1)!;
+    await session.audio({ generation: listening.generation, epoch: 0, sequence: 1, segmentId: listening.utterance_id, audio: Buffer.alloc(320) });
+    session.speechEnded(1);
+    await waitFor(() => !!stt.sessions[0].commitId);
+    stt.sessions[0].emit({ type: 'segment_final', segmentId: 's', text: 'ราคาเท่าไหร่' });
+    stt.sessions[0].emit({ type: 'commit_done', commitId: stt.sessions[0].commitId! });
+    await waitFor(() => controls.some(c => c.type === 'utterance.accepted'));
+    stream.push({ responseId: 'reply', text: 'ได้ค่ะ ตอนนี้ราคาอยู่ที่ประมาณหกหมื่นเจ็ดพันดอลลาร์' });
+    await waitFor(() => audio.length === 1);
+    session.speechStarted(session.playback.epoch + 1);
+    expect(stop).toHaveBeenCalled();
+    try { stream.push({ responseId: 'reply', text: 'ขึ้นมาราวสองเปอร์เซ็นต์จากเมื่อวานค่ะ' }); } catch { /* the queue may already be closed */ }
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(consumed).toEqual(['ได้ค่ะ ตอนนี้ราคาอยู่ที่ประมาณหกหมื่นเจ็ดพันดอลลาร์']);
+    expect(audio).toHaveLength(1);
+  } finally { stream.close(); await session.close(); }
+});
+
+test('each streamed piece of a reply is synthesized on its own provider stream, as one playback with continuous chunk numbers', async () => {
+  const stt = new FakeSttProvider(), controls: Record<string, any>[] = [], audio: Buffer[] = [], calls: string[][] = [];
+  const stream = new BoundedQueue<{ responseId: string; text: string }>(4096, value => Buffer.byteLength(value.text));
+  const tts: TtsProvider = { id: 'fixture', capabilities: { textStreaming: true, wordAlignment: false, outputFormats: [PCM16] },
+    synthesize: async function* (options) { const texts: string[] = []; calls.push(texts); let sequence = 0; for await (const text of options.text) { texts.push(text); yield { bytes: Buffer.alloc(640), format: PCM16, chunkSeq: sequence++ }; } } };
+  const session = new VoiceSession(stt, tts, 'voice', { control: c => controls.push(c), audio: c => audio.push(c), bufferedBytes: () => 0 },
+    async () => ({ inputId: 'input', response: new Promise<string>(() => {}), stream }), jest.fn(),
+    { silenceCommitMs: 0, finalizationTimeoutMs: 5000, maxUtteranceMs: 60000, maxBufferedAudioMs: 1500, mergeWindowMs: 0 });
+  const waitFor = async (predicate: () => boolean) => { const end = Date.now() + 2000; while (!predicate() && Date.now() < end) await new Promise(resolve => setTimeout(resolve, 5)); expect(predicate()).toBe(true); };
+  try {
+    await session.start();
+    const listening = controls.at(-1)!;
+    await session.audio({ generation: listening.generation, epoch: 0, sequence: 1, segmentId: listening.utterance_id, audio: Buffer.alloc(320) });
+    session.speechEnded(1);
+    await waitFor(() => !!stt.sessions[0].commitId);
+    stt.sessions[0].emit({ type: 'segment_final', segmentId: 's', text: 'ราคาเท่าไหร่' });
+    stt.sessions[0].emit({ type: 'commit_done', commitId: stt.sessions[0].commitId! });
+    await waitFor(() => controls.some(c => c.type === 'utterance.accepted'));
+    stream.push({ responseId: 'reply', text: 'ได้ค่ะ ตอนนี้ราคาอยู่ที่ประมาณหกหมื่นเจ็ดพันดอลลาร์' });
+    await waitFor(() => audio.length === 1);
+    stream.push({ responseId: 'reply', text: 'ขึ้นมาราวสองเปอร์เซ็นต์จากเมื่อวานค่ะ' });
+    stream.close();
+    await waitFor(() => controls.some(c => c.type === 'playback.end'));
+    expect(calls).toEqual([['ได้ค่ะ ตอนนี้ราคาอยู่ที่ประมาณหกหมื่นเจ็ดพันดอลลาร์'], ['ขึ้นมาราวสองเปอร์เซ็นต์จากเมื่อวานค่ะ']]);
+    expect(controls.filter(c => c.type === 'playback.start')).toHaveLength(1);
+    expect(audio.map(bytes => decodeVoiceFrame(bytes).sequence)).toEqual([0, 1]);
+  } finally { stream.close(); await session.close(); }
+});
+
+test('mute right after speech answers it without the silence timer, and the reply still plays while muted; mute with no speech admits nothing', async () => {
+  const stt = new FakeSttProvider(), controls: Record<string, any>[] = [], audio: Buffer[] = [];
+  const stream = new BoundedQueue<{ responseId: string; text: string }>(1024, value => Buffer.byteLength(value.text));
+  const submit = jest.fn(async () => ({ inputId: 'input', response: new Promise<string>(() => {}), stream, responseId: () => 'reply' }));
+  const tts: TtsProvider = { id: 'fixture', capabilities: { textStreaming: true, wordAlignment: false, outputFormats: [PCM16] },
+    synthesize: async function* (options) { for await (const _ of options.text) yield { bytes: Buffer.alloc(640), format: PCM16, chunkSeq: 0 }; } };
+  // A long silence timer and merge window: an answer within the test proves mute did not wait for either.
+  const session = new VoiceSession(stt, tts, 'voice', { control: c => controls.push(c), audio: c => audio.push(c), bufferedBytes: () => 0 }, submit, jest.fn(),
+    { silenceCommitMs: 60000, finalizationTimeoutMs: 5000, maxUtteranceMs: 60000, maxBufferedAudioMs: 1500, mergeWindowMs: 60000 });
+  const waitFor = async (predicate: () => boolean) => { const end = Date.now() + 2000; while (!predicate() && Date.now() < end) await new Promise(resolve => setTimeout(resolve, 5)); expect(predicate()).toBe(true); };
+  try {
+    await session.start();
+    await session.mute(true, 'commit', 0);
+    await session.mute(false, 'commit');
+    expect(submit).not.toHaveBeenCalled();
+
+    const listening = controls.filter(c => c.state === 'listening' && c.utterance_id).at(-1)!;
+    session.speechActivity();
+    for (const sequence of [1, 2]) await session.audio({ generation: listening.generation, epoch: 0, sequence, segmentId: listening.utterance_id, audio: Buffer.alloc(320) });
+    session.speechEnded(2);
+    const muting = session.mute(true, 'commit', 2);
+    await waitFor(() => !!stt.sessions.at(-1)!.commitId);
+    stt.sessions.at(-1)!.emit({ type: 'segment_final', segmentId: 's', text: 'สรุปให้หน่อย' });
+    stt.sessions.at(-1)!.emit({ type: 'commit_done', commitId: stt.sessions.at(-1)!.commitId! });
+    await muting;
+    expect(submit).toHaveBeenCalledTimes(1);
+    expect(submit).toHaveBeenCalledWith('สรุปให้หน่อย', listening.utterance_id, expect.any(Function), { fastAck: false });
+    expect(controls.at(-1)).toMatchObject({ type: 'voice.state', state: 'muted' });
+    stream.push({ responseId: 'reply', text: 'ได้ครับ' });
+    await waitFor(() => audio.length === 1);
+  } finally { await session.close(); }
+});
+
+// Issue #624: a ~1.6 s hesitation mid-sentence used to start a second turn that barged in on the
+// first reply. Under the default merge window it joins the same turn; a longer pause does not.
+describe('default merge window', () => {
+  const { turns } = ORCHESTRATION_DEFAULTS.voice;
+  const pausedSpeech = async (pauseMs: number) => {
+    const stt = new FakeSttProvider(), controls: Record<string, any>[] = [], stop = jest.fn();
+    const submit = jest.fn(async (text: string) => ({ inputId: text, response: new Promise<string>(() => {}) }));
+    const session = new VoiceSession(stt, { id: 'fixture', capabilities: { textStreaming: true, wordAlignment: false, outputFormats: [PCM16] }, synthesize: async function* () {} }, 'v',
+      { control: c => controls.push(c), audio: jest.fn(), bufferedBytes: () => 0 }, submit, stop,
+      { ...turns, silenceCommitMs: 0, maxBufferedAudioMs: 1500 });
+    const say = async (text: string) => {
+      const listening = controls.filter(c => c.type === 'voice.state').at(-1)!, provider = stt.sessions.at(-1)!, previous = provider.commitId;
+      session.speechActivity();
+      await session.audio({ generation: listening.generation, epoch: 0, sequence: 1, segmentId: listening.utterance_id, audio: Buffer.alloc(320) });
+      const commit = session.commit(1);
+      while (!provider.commitId || provider.commitId === previous) await new Promise(r => setTimeout(r, 1));
+      provider.emit({ type: 'segment_final', segmentId: 's', text }); provider.emit({ type: 'commit_done', commitId: provider.commitId! }); await commit;
+    };
+    try {
+      await session.start();
+      await say('แล้วผมอยากรู้ว่า');
+      await new Promise(r => setTimeout(r, pauseMs));
+      await say('npm จะขึ้นยังไง');
+      await new Promise(r => setTimeout(r, turns.mergeWindowMs + 200));
+      return { submitted: submit.mock.calls.map(call => call[0]), stop };
+    } finally { await session.close(); }
+  };
+  test('a pause shorter than the window joins the same turn without interrupting a reply', async () => {
+    const { submitted, stop } = await pausedSpeech(1600);
+    expect(submitted).toEqual(['แล้วผมอยากรู้ว่า npm จะขึ้นยังไง']);
+    expect(stop).not.toHaveBeenCalled();
+  }, 15000);
+  test('a pause longer than the window keeps barge-in: the continuation interrupts the first reply', async () => {
+    const { submitted, stop } = await pausedSpeech(turns.mergeWindowMs + 400);
+    expect(submitted).toEqual(['แล้วผมอยากรู้ว่า', 'npm จะขึ้นยังไง']);
+    expect(stop).toHaveBeenCalled();
+  }, 15000);
 });

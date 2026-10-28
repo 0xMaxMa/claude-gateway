@@ -20,7 +20,7 @@ test('uploaded voice notes use batch STT multipart and retain Thai transcripts',
     expect(fetcher).toHaveBeenCalledTimes(1);
     expect(fetcher.mock.calls[0][0]).toBe('https://api.elevenlabs.io/v1/speech-to-text');
     await expect(transcribeVoiceNote(path, { provider: 'elevenlabs', model: 'scribe_v2', sleep: async () => {} }, (async () => new Response('{}', { status: 429 })) as any)).rejects.toThrow('STT_PROVIDER_ERROR_HTTP_429');
-    await expect(transcribeVoiceNote(path, { provider: 'elevenlabs', model: 'scribe_v2' }, (async () => new Response('{"text":""}')) as any)).rejects.toThrow('VOICE_NOTE_NO_TRANSCRIPT');
+    await expect(transcribeVoiceNote(path, { provider: 'elevenlabs', model: 'scribe_v2', sleep: async () => {} }, (async () => new Response('{"text":""}')) as any)).rejects.toThrow('VOICE_NOTE_NO_TRANSCRIPT');
     delete process.env.ELEVENLABS_API_KEY;
     await expect(transcribeVoiceNote(path, { provider: 'elevenlabs', model: 'scribe_v2' }, fetcher as any)).rejects.toThrow('STT_CREDENTIALS_MISSING');
   } finally { if (previous === undefined) delete process.env.ELEVENLABS_API_KEY; else process.env.ELEVENLABS_API_KEY = previous; rmSync(root, { recursive: true, force: true }); }
@@ -45,6 +45,27 @@ test.each(['elevenlabs', 'gemini', 'paxalabs'])('%s voice notes preserve provide
       expect(request).toHaveBeenCalledTimes(status === 402 ? 1 : 3);
     }
     await expect(transcribeVoiceNote(path, { provider, model: 'fixture', sleep: async () => {} }, async () => { throw new Error('private network details'); })).rejects.toMatchObject({ code: 'PROVIDER_CONNECTION_FAILED' });
+  } finally {
+    for (const key of keys) if (previous[key] === undefined) delete process.env[key]; else process.env[key] = previous[key];
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test.each([
+  ['paxalabs', (text: string) => ({ text })],
+  ['gemini', (text: string) => ({ candidates: [{ finishReason: 'STOP', content: { parts: [{ text }] } }] })],
+] as const)('%s voice notes retry a punctuation-only transcript instead of returning it', async (provider, body) => {
+  const root = mkdtempSync(join(tmpdir(), 'note-no-words-'));
+  const keys = ['GEMINI_API_KEY', 'PAXALABS_API_KEY'];
+  const previous = Object.fromEntries(keys.map(key => [key, process.env[key]]));
+  for (const key of keys) process.env[key] = 'fixture';
+  try {
+    const path = join(root, 'voice.ogg'); writeFileSync(path, Buffer.from('OggSfixture'));
+    const sleeps: number[] = [], responses = ['.', 'ช่วยสรุปงานให้หน่อย'];
+    const request = jest.fn(async () => new Response(JSON.stringify(body(responses.shift()!)), { status: 200 }));
+    await expect(transcribeVoiceNote(path, { provider, model: 'fixture', sleep: async ms => { sleeps.push(ms); } }, request)).resolves.toBe('ช่วยสรุปงานให้หน่อย');
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(sleeps).toEqual([1000]);
   } finally {
     for (const key of keys) if (previous[key] === undefined) delete process.env[key]; else process.env[key] = previous[key];
     rmSync(root, { recursive: true, force: true });

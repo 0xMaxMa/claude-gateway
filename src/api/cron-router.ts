@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { CronManager } from '../cron/manager';
+import { CronManager, CronPolicyError } from '../cron/manager';
 import { ApiKey, CronJobCreate, CronJobUpdate } from '../types';
 import { createApiAuthMiddleware, canAccessAgent } from './auth';
 import { defineRoute } from './route-registry';
@@ -153,7 +153,7 @@ export function createCronRouter(manager: CronManager, apiKeys?: ApiKey[], known
         const job = await manager.create(body as CronJobCreate);
         res.status(201).json({ job });
       } catch (err) {
-        res.status(400).json({ error: (err as Error).message });
+        res.status(err instanceof CronPolicyError ? 403 : 400).json({ error: (err as Error).message });
       }
     },
   );
@@ -222,7 +222,7 @@ export function createCronRouter(manager: CronManager, apiKeys?: ApiKey[], known
         if (message.includes('not found')) {
           res.status(404).json({ error: message });
         } else {
-          res.status(400).json({ error: message });
+          res.status(err instanceof CronPolicyError ? 403 : 400).json({ error: message });
         }
       }
     },

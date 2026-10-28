@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { loadSkills, renderSkillsSection, AUTO_SKILL_MENU_DESC_MAX, type SkillRegistry } from '../../src/skills/loader';
+import { loadSkills, renderSkillsSection, hiddenAutoSkills, AUTO_SKILL_MENU_DESC_MAX, AUTO_SKILL_CATALOG_GRACE_DAYS, type SkillRegistry } from '../../src/skills/loader';
 import type { SkillDefinition } from '../../src/skills/parser';
 
 function makeTmpDir(): string {
@@ -288,6 +288,93 @@ describe('Skill Loader', () => {
           ]),
         };
         expect(renderSkillsSection(registry)).toContain(`/mod:auto: ${longDesc}`);
+      });
+    });
+
+    describe('hide-until-used — never-loaded auto skills stay out of the catalog', () => {
+      const DAY = 24 * 60 * 60 * 1000;
+      const now = 1000 * DAY;
+      const old = now - (AUTO_SKILL_CATALOG_GRACE_DAYS + 1) * DAY;
+      const fm = (extra: string) => `---\nname: x\ndescription: "d"\n${extra}\n---\n\nbody`;
+      const ws = (name: string, content: string, source: SkillDefinition['source'] = 'workspace') =>
+        [name, makeSkill({ name, description: 'd', source, content })] as const;
+      const registry: SkillRegistry = {
+        skills: new Map([
+          ws('auto-unused', fm(`origin: auto\ncreatedAt: ${old}`)),
+          ws('auto-used', fm(`origin: auto\ncreatedAt: ${old}`)),
+          ws('auto-young', fm(`origin: auto\ncreatedAt: ${now - DAY}`)),
+          ws('auto-pinned', fm(`origin: auto\ncreatedAt: ${old}\npinned: true`)),
+          ws('auto-no-date', fm('origin: auto')),
+          ws('user-unused', fm(`createdAt: ${old}`)),
+          ws('shared-unused', fm(`origin: auto\ncreatedAt: ${old}`), 'shared'),
+        ]),
+      };
+      const stat = (createdAt: number | null, timesLoaded = 0) => ({ createdAt, timesLoaded, lastUsedAt: null as number | null });
+      const usage = {
+        now,
+        stats: new Map([
+          ['auto-unused', stat(old)], ['auto-used', stat(old, 3)], ['auto-young', stat(now - DAY)], ['auto-pinned', stat(old)],
+          ['auto-no-date', stat(old)], ['user-unused', stat(old)], ['shared-unused', stat(old)],
+        ]),
+      };
+      const withHidden = (u: typeof usage): SkillRegistry => ({ ...registry, hiddenUntilUsed: hiddenAutoSkills(registry, u) });
+
+      it('hides an old auto skill that was never loaded and says how many were hidden', () => {
+        const section = renderSkillsSection(withHidden(usage));
+        expect(section).not.toContain('/auto-unused:');
+        expect(section).not.toContain('/auto-no-date:');
+        expect(section).toContain('2 auto-learned skills are hidden until used');
+      });
+
+      it('keeps used, young and pinned auto skills, and every non-auto skill', () => {
+        const section = renderSkillsSection(withHidden(usage));
+        for (const key of ['auto-used', 'auto-young', 'auto-pinned', 'user-unused', 'shared-unused']) {
+          expect(section).toContain(`/${key}:`);
+        }
+      });
+
+      it('keeps an old auto skill with no stat row listed (restored from the archive)', () => {
+        const restored = renderSkillsSection(withHidden({ now, stats: new Map([['auto-used', stat(old, 3)]]) }));
+        expect(restored).toContain('/auto-unused:');
+        expect(restored).not.toContain('hidden until used');
+      });
+
+      it('measures the grace window from the stat row, not the frontmatter createdAt', () => {
+        // Frontmatter says old, but the curator re-tracked it today (restored): it gets a fresh grace window.
+        const hidden = hiddenAutoSkills(registry, { now, stats: new Map([['auto-unused', stat(now - DAY)], ['auto-no-date', stat(now - DAY)]]) });
+        expect(hidden.size).toBe(0);
+        // A row without a creation time (counted before it was tracked) is unknown age: keep it listed.
+        expect(hiddenAutoSkills(registry, { now, stats: new Map([['auto-unused', stat(null)]]) }).size).toBe(0);
+      });
+
+      it('with a menu cap (unusable archive) hides the least-recently-used listed auto skills above it', () => {
+        const capped = {
+          now,
+          maxListedAutoSkills: 1,
+          stats: new Map([
+            ['auto-unused', stat(old)],
+            ['auto-used', { ...stat(old, 3), lastUsedAt: now - 2 * DAY }],
+            ['auto-young', stat(now - DAY)],
+            ['auto-pinned', stat(old)],
+            ['user-unused', stat(old)],
+          ]),
+        };
+        const hidden = hiddenAutoSkills(registry, capped);
+        // The untracked, undated import gets a fresh activity timestamp and counts toward the cap.
+        expect([...hidden].sort()).toEqual(['auto-unused', 'auto-used', 'auto-young']);
+        const section = renderSkillsSection({ ...registry, hiddenUntilUsed: hidden });
+        expect(section).not.toContain('/auto-young:');
+        expect(section).toContain('/auto-no-date:');
+        expect(section).toContain('/auto-pinned:');
+        expect(section).toContain('/user-unused:');
+        expect(section).toContain('3 auto-learned skills are hidden until used');
+      });
+
+      it('honors the registry hidden set and shows everything without one', () => {
+        expect(renderSkillsSection({ ...registry, hiddenUntilUsed: new Set(['auto-young']) })).not.toContain('/auto-young:');
+        const section = renderSkillsSection(registry);
+        expect(section).toContain('/auto-unused:');
+        expect(section).not.toContain('hidden until used');
       });
     });
   });

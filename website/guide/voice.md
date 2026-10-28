@@ -44,6 +44,8 @@ Merge this **partial configuration** into your existing configuration. Retain th
 
 An empty `voiceId` selects Auto; select a specific voice from the catalog if desired. Browser realtime STT and uploaded-file STT use different model IDs.
 
+ElevenLabs v3 and v4 TTS models (`eleven_v3_conversational`, `eleven_v3`, `eleven_v4_turbo`, `eleven_v4`) stream through the Text-to-Dialogue socket; other models use the classic stream-input socket. Both sockets close after 20 seconds without input by default. While a reply's text stalls, the gateway keeps them open for up to 180 seconds: it sends `keep_alive` every 10 seconds on the dialogue socket, and it sets `inactivity_timeout` on the classic socket. `eleven_v4_turbo` has low first-audio latency; `eleven_v4` is slower and costs about twice as much per character, so it is not recommended for live conversation. A reply that contains known audio tags such as `[laughs]` or `[whispers]` is still spoken. The ElevenLabs v3/v4 models and Gemini 3.1 Flash TTS (`gemini-3.1-flash-tts-preview`, natively or through OpenRouter) receive the tags and perform them. Every other TTS model, including Gemini 2.5 TTS and Gemini 3.8 TTS (which documents `<angle>` tags instead), receives the text without them, so it never reads a tag aloud. A spoken text that holds only tags is not spoken. On a turn that is spoken, the chat copy omits the tags, both while it streams and in the final message. On a text-only turn the chat keeps them, since there a tag may be part of the answer.
+
 ### Upstream ElevenLabs example
 
 Use the voice relay at the **origin of `ANTHROPIC_BASE_URL`**. For example, set the following in your gateway environment file when no higher-priority Claude settings identity is configured:
@@ -170,25 +172,65 @@ Runs of symbols with nothing to pronounce (for example a line of `=` characters)
 | Setting under `voice` | Default | Meaning |
 | --- | --- | --- |
 | `language` | empty | Recognition language hint; empty allows automatic recognition |
-| `turns.silenceCommitMs` | 650 ms | Pause before committing a microphone segment |
+| `turns.silenceCommitMs` | 650 ms | Pause after the client's `speech.ended` before committing a microphone segment; `0` commits at once (the `/call` page already waits 350 ms of silence before it sends `speech.ended`) |
 | `turns.finalizationTimeoutMs` | 5000 ms | Base finalization budget; batch providers may require a longer provider-specific budget |
 | `turns.maxUtteranceMs` | 60000 ms | Bound a single utterance |
+| `turns.mergeWindowMs` | 2000 ms | After a segment is committed, wait this long for a continuation before submitting the combined turn; `0` submits each segment at once |
 | `playback.maxBufferedAudioMs` | 1500 ms | Bound unacknowledged playback audio |
 | `playback.bargeIn` | true | Allow speech interruption behavior |
 | `maxActiveSessionsPerConversation` | 1 | Limit concurrent live voice connections for a conversation |
 
-A shorter pause commits sooner and may cut a natural pause into separate segments; a longer pause waits for more speech but delays submission. This is separate from orchestration's `intakeWaitMs`, which combines already received incomplete inputs. The setting is not a promise of end-to-end reply latency.
+A shorter pause commits sooner and may cut a natural pause into separate segments; a longer pause waits for more speech but delays submission. The merge window is the larger of the two waits: every turn waits the full `mergeWindowMs` after its transcript before the agent starts. The default is 2000 ms, so a hesitation of up to about two seconds in the middle of a thought stays in the same turn. Lowering it, for example to 1200 ms (the previous default), answers about 800 ms sooner, but a pause longer than the window becomes its own turn: the earlier part is answered, then interrupted by the continuation. When that happens, the next turn receives the interrupted parts from the last minute as context, and the agent answers the latest part first. Set `voice.turns.mergeWindowMs` per agent to trade one for the other, and remove the setting to go back. The spoken reply answers the latest question first and, within its length budget, covers each question the chat reply answers. This is separate from orchestration's `intakeWaitMs`, which combines already received incomplete inputs. The setting is not a promise of end-to-end reply latency.
+
+## Live call latency settings
+
+These settings under `voice.live` change only live voice turns (`/call` and browser live voice). `fastAck` is on by default: the reply's first audio usually takes several seconds, and the acknowledgement fills that silence at the cost of one extra `fastAckModel` request per live turn. Set `voice.live.fastAck` to `false` for an agent to turn it off. If the request fails or times out, the turn continues without an acknowledgement and the reply is not delayed.
+
+> **Upgrade note:** `fastAck` used to default to `false`, and saving voice settings could write that default into an agent's config. Upgrading to configVersion 1.0.37 removes `voice.live.fastAck: false` from every agent once, so those agents use the new default, and logs a warning. A `false` set before 1.0.37 is removed too, because it cannot be told apart from the old default; set it again to keep fast acknowledgements off. A `false` set at 1.0.37 or later is kept. `PATCH /api/v1/agents/:agentId/voice-settings` now saves only the `live` and `narrate` values that differ from the agent's current settings, merged into the values already saved.
+
+| Setting under `voice.live` | Default | Effect |
+| --- | --- | --- |
+| `fastAck` | `true` | When the reply has not started speaking `fastAckAfterMs` after the turn is admitted, speak one short acknowledgement that names the request (for example "เดี๋ยวเปิด PR 623 ดูให้นะคะ"), written by `fastAckModel` from the caller's words, their previous two turns, the acknowledgements already spoken in this call and the voice style. The model is asked for at most 8 words, never to answer, and to stay silent when the request is unclear or unfinished; a phrase longer than 80 characters or with a line break, a link, markup or a number the caller did not say is dropped, and greetings or small talk get none. Acknowledgements are kept sparse: a transcript with fewer than three letters or digits ("um") and a turn that follows an acknowledged turn get none and make no request, hesitation or restart fragments ("เอ่อ เอาใหม่", "wait") are left to the model, which replies "-" for them, and a phrase that matches or nearly matches one already spoken in this call is dropped. The agent's own spoken response for the turn, such as a task acknowledgement, replaces one that has not started playing, and a turn that may be acknowledged is told not to open its reply with another receipt. It is cancelled, or its acknowledgement discarded, when the reply starts speaking first. It is audio only; it is not added to the chat, the history or memory. The call uses the agent's own model endpoint and credential (the `ANTHROPIC_BASE_URL` group the Claude CLI uses); a subscription token is only sent through a proxy, never straight to Anthropic. Each call is logged as `Voice fast ack` with its outcome, elapsed time and token counts, and each skip as `fast_ack_skipped` with its reason (`too_short`, `cooldown`, `duplicate`, `no_fit`, `superseded`), never the text. |
+| `fastAckModel` | `claude-haiku-5-5` | Model for the acknowledgement, called with thinking disabled |
+| `fastAckAfterMs` | `1500` | How long after admission the reply may take to start speaking before the acknowledgement plays |
+| `fastAckTimeoutMs` | `3000` | Give up on an acknowledgement that takes longer |
+| `vad` | see below | Overrides for the `/call` page's browser speech detection, merged field by field over the defaults |
+
+## Background speech and noise
+
+The browser removes echo and steady noise, but not other people talking nearby. Realtime STT transcribes whatever the microphone hears, so nearby speech can arrive as if the caller said it. Three settings reduce this:
+
+- **ElevenLabs background-audio filter.** Set `voice.stt.filterBackgroundAudio` to `true` to send `filter_background_audio=true` to ElevenLabs realtime STT (`elevenlabs`, `upstream:elevenlabs` and `managed:elevenlabs`). It is off by default and other providers ignore it. Caveats: the filter can also drop the caller's quiet speech; its Thai quality is unverified; it is reported to conflict with `include_timestamps=true` (the gateway sends `false`); and for `upstream:` and `managed:` the gateway forwards the parameter in the relay URL, but whether the relay passes it on to ElevenLabs depends on the provider service.
+- **Less sensitive browser speech detection.** `voice.live.vad` overrides the `/call` page's energy detector. Raise `minLevel`, `ratio` or `startMs` so quieter or shorter sounds do not open a turn. Too high a value can miss the caller's own soft speech.
+- **Agent caveat.** Every live voice turn tells the agent that its input is a speech-to-text transcript that can include other voices, and to confirm an off-topic or implausible fragment before acting on it. Voice messages and typed turns do not get this note.
+
+| Setting under `voice.live.vad` | Default | Effect |
+| --- | --- | --- |
+| `startMs` | `120` | Milliseconds above the threshold before speech starts |
+| `endMs` | `350` | Milliseconds below the threshold before speech ends |
+| `minLevel` | `0.012` | Lowest speech threshold, as RMS level (0.001–0.5) |
+| `ratio` | `3` | The threshold is at least this many times the adaptive noise floor (1–100) |
+| `initialNoise` | `0.004` | Starting noise floor, as RMS level (0–0.5) |
+| `noiseAdapt` | `0.05` | How fast the noise floor follows quiet input (0–1) |
+| `bargeInRatio` | `2` | While the reply is audible, speech must be this many times the threshold (1–100) |
+| `bargeInMs` | `250` | While the reply is audible, milliseconds above that level before speech interrupts it |
+
+Millisecond values are positive integers. For example, `{ "voice": { "stt": { "provider": "elevenlabs", "model": "scribe_v2_realtime", "filterBackgroundAudio": true }, "live": { "vad": { "minLevel": 0.03, "startMs": 200 } } } }` turns on the filter and ignores quieter, shorter sounds.
 
 ## Diagnose missing or delayed audio
 
 Start with the text result, the selected route and the error reference. Authentication failures, exhausted quota and temporary provider unavailability require different actions; switching voices does not fix a missing API key or exhausted quota. Auto voice selection requires a readable voice catalog. For a catalog failure, check credentials/model access instead of overwriting the saved selection with an invented voice.
 
-Live voice logs `Voice timing` events with operation `stt` or `tts`, an operation ID, session/response identifiers and phase timestamps. Subtract elapsed times between phases:
+Live voice logs `Voice timing` events with operation `stt`, `tts` or `turn`, an operation ID, session identifiers, the `utteranceId`, `inputId` and `responseId` known so far, and phase timestamps. Subtract elapsed times between phases:
 
 1. `speech_ready` → `synthesis_started`: queue wait before TTS.
 2. `provider_request_started` → `provider_headers_received`: HTTP provider/proxy wait.
 3. `provider_body_received` → `first_provider_audio`: complete-body processing for the Gemini adapter.
 4. `first_audio_sent` → `first_playback_progress`: first positive browser playback receipt.
+
+A `turn` operation follows one user turn end to end, measured at the gateway: `speech_ended` (the client's `speech.ended` arrived; an explicit commit without it logs `commit_received`), `transcript_ready`, `turn_admitted`, `agent_first_spoken` (the agent's first approved spoken text) and `e2e_first_audio` (the first playback receipt for that reply). The `e2e_first_audio` elapsed time is the gateway's view of end of speech to first heard audio; it excludes microphone and network time before `speech.ended` arrives.
+
+The agent turn between `turn_admitted` and `agent_first_spoken` reports its own phases on the same `turn` operation: `process_spawned` (the agent CLI process is ready for the prompt, spawned or resumed), `first_model_token` (the first reply text or response-argument chunk), `agent_provider_ready` (the model provider answered), `first_spoken_delta` (the first characters of `spoken_text` in the streamed response), each `spoken_sentence_sent` (a piece of spoken text handed to TTS) and, when fast acknowledgements are on, `fast_ack_sent`. A `tts` operation on a managed provider logs `tts_credit_check_started` and `tts_credit_check_finished` around the wallet check, and the ElevenLabs adapter logs `tts_socket_open` when its streaming socket is connected.
 
 HTTP phases apply to adapters using the shared HTTP helper. They do not identify whether an upstream wait is internal queueing or work inside the final provider; that needs upstream diagnostics. A playback receipt is not an exact audio-device start timestamp. `audio_sent_complete` includes browser backpressure, so it must not be used as time to first sound.
 
@@ -197,11 +239,15 @@ The current Gemini adapter waits for the full provider JSON/audio result before 
 The diagnostic payload contains metadata, not transcript text, audio, URLs or provider credentials. See [voice API](../api/voice.md) for error fields, ticket authentication, replay and client reconnect behavior. Static `allowedOrigins` configuration is obsolete; live voice uses authenticated tickets bound to the initiating origin.
 
 
+## Telegram voice calls
+
+With orchestration serving Telegram, voice enabled and an HTTPS `gateway.publicUrl`, a paired user can send `/call` in the bot's private chat to talk with the agent live. The call uses the same STT, TTS and turn settings as browser live voice, and speaks with the voice chosen by `/voices` in that chat (the same voice as its voice messages), or the configured `voice.tts.voiceId` (Auto when empty) if the chat has not chosen one. A voice chosen during a call applies from the next call. It joins the chat's active session, and posts the user's words (`🎙 …`) and the agent's text replies in that chat. Tool permissions follow the Telegram channel (`allow_tools`); live voice never writes memory. Behind a proxy with its own sign-in, such as a GetPod pod, the call page uses the same login redirect as `/cli`. In a call, **Mute** sends what you just said: the agent answers at once instead of waiting for a pause, and keeps speaking while your microphone is off. Speaking while the agent's reply is still playing interrupts it, and your new words become the next turn. The page shows **Thinking** from when you stop speaking until the reply plays; the agent receives the turn after `voice.turns.silenceCommitMs`, transcription, and `voice.turns.mergeWindowMs` (a continuation within that window joins the same turn). A call link opens one call: an older or expired link renders only its ended state, and the page follows Telegram's light or dark theme. See [Telegram setup](../channels/telegram.md#live-voice-calls).
+
 ## Managed voice credits
 
 Select `managed:elevenlabs` or `managed:paxalabs` with a model from the authenticated provider service’s managed catalog. These routes use its daily voice wallet; direct providers and `upstream:<provider>` BYOK routes keep their own billing. There is no automatic switch between payers.
 
-When managed credits run out, channels quietly skip voice transcription and synthesis while text chat remains available. Saved voice preferences stay unchanged; a subsequent request checks the wallet again after reset. Browser clients should pause voice on `MANAGED_VOICE_QUOTA_EXHAUSTED` until credits become available. A wallet check that cannot finish is retried briefly and then does not block the request, because only a definite empty wallet stops voice work. See the [Voice API](../api/voice.md#managed-voice-wallet-and-startup-recovery).
+When managed credits run out, text chat remains available and the channel says why voice stopped. The notices are fixed English text on every channel (Telegram, Discord, LINE and Slack), whatever the chat, agent or voice language. The gateway sends them directly; the agent never writes or translates them. A voice note gets `Voice credit is used up, so this voice message could not be transcribed. Please type your message instead. Reference: <inputId>`. A voice reply is replaced by its text, followed by `Voice reply unavailable: voice credit is used up. Text replies continue until the credit resets or is topped up, or use /voice off.` Each chat gets at most one notice of each kind per hour, also across new sessions. The notice is recorded in the agent state, so a restart does not repeat it. When managed voice works again anywhere on the agent (a voice note is transcribed or a voice reply is delivered), every chat's notices reset, because they share one wallet. A notice that could not be sent does not count. Later voice notes in that hour end without a reply. Saved voice preferences stay unchanged; a subsequent request checks the wallet again after reset. Browser clients should pause voice on `MANAGED_VOICE_QUOTA_EXHAUSTED` until credits become available. A wallet check that cannot finish is retried briefly and then does not block the request, because only a definite empty wallet stops voice work. See the [Voice API](../api/voice.md#managed-voice-wallet-and-startup-recovery).
 
 ## Voice-message failures and retry
 

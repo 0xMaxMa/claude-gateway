@@ -45,6 +45,22 @@ export interface CustomConnectorsStore {
    * sessions, in particular) belongs after this resolves.
    */
   withEntry<T>(connectorId: string, fn: (write: ConnectorWrite) => T | Promise<T>): Promise<T>;
+  /**
+   * Serialised read-decide-write over the connector map AND every agent's
+   * enablement map, for the routes that manage a connector's agent scope. `fn`
+   * mutates in place and returns `write: true` to persist. Same lock and same
+   * no-reentry rule as `withEntry`.
+   */
+  withScope<T>(fn: (scope: ConnectorScope) => { result: T; write: boolean }): Promise<T>;
+}
+
+/** What `withScope` hands its callback. */
+export interface ConnectorScope {
+  readonly connectors: Record<string, CustomConnectorEntry>;
+  /** config.json's agents, in file order. `connectors` is created on demand by the caller. */
+  readonly agents: Array<{ id: string; connectors?: Record<string, { enabled: boolean }> }>;
+  /** gateway.connectorsDefaultEnabled, defaulting to true as every resolver does. */
+  readonly defaultEnabled: boolean;
 }
 
 /** What `withEntry` hands its callback. */
@@ -80,8 +96,8 @@ function ownKeysOnly(
 
 /** config.json, as much of its shape as this module touches. */
 type ParsedConfig = {
-  gateway?: { customConnectors?: Record<string, CustomConnectorEntry> };
-  agents?: Array<{ connectors?: Record<string, unknown> }>;
+  gateway?: { customConnectors?: Record<string, CustomConnectorEntry>; connectorsDefaultEnabled?: boolean };
+  agents?: Array<{ id?: unknown; connectors?: Record<string, unknown> }>;
   [k: string]: unknown;
 };
 
@@ -240,5 +256,30 @@ export function createCustomConnectorsStore(configPath?: string): CustomConnecto
     });
   }
 
-  return { mutate, read, withEntry };
+  async function withScope<T>(fn: (scope: ConnectorScope) => { result: T; write: boolean }): Promise<T> {
+    if (!configPath) {
+      return fn({ connectors: ownKeysOnly(undefined), agents: [], defaultEnabled: true }).result;
+    }
+    return withConfigWriteLock(configPath, async () => {
+      // No degrade-to-empty here, unlike read(): answering "no agents" off an
+      // unreadable file would let a scope write silently do nothing.
+      const config = JSON.parse(await fsp.readFile(configPath, 'utf-8')) as ParsedConfig;
+      config.gateway = config.gateway ?? {};
+      const connectors = ownKeysOnly(config.gateway.customConnectors);
+      config.gateway.customConnectors = connectors;
+      const agents = (Array.isArray(config.agents) ? config.agents : []).filter(
+        (a): a is { id: string; connectors?: Record<string, { enabled: boolean }> } =>
+          !!a && typeof a === 'object' && typeof a.id === 'string',
+      );
+      const { result, write } = fn({
+        connectors,
+        agents,
+        defaultEnabled: config.gateway.connectorsDefaultEnabled !== false,
+      });
+      if (write) await writeConfigAtomic(configPath, config);
+      return result;
+    });
+  }
+
+  return { mutate, read, withEntry, withScope };
 }

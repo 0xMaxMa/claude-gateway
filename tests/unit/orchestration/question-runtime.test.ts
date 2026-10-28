@@ -173,6 +173,32 @@ test.each((['api','telegram','discord','line','slack'] as const).flatMap(source 
  }finally{await f.close();}
 });
 
+test.each([true,false])('acknowledgement audio tags are spoken, and shown in chat only on a text turn (voice=%s)',async voice=>{
+ const f=await fixture();
+ try{
+  let scope:any;
+  const issue=f.runtime.bridge.issue.bind(f.runtime.bridge);
+  jest.spyOn(f.runtime.bridge,'issue').mockImplementation((value,...args)=>{scope=value;return issue(value,...args);});
+  f.createAgentSession.mockImplementation(async(_id,profile)=>Object.assign(new EventEmitter(),{runtimeProfile:profile,start:async()=>{},stop:async()=>{},sendMessage:function(this:EventEmitter){
+   const emitter=this;
+   void(async()=>{
+    await scope.onIntake({mode:'ready',acknowledgement:'[laughs] On it.'});
+    await scope.beforeMutation('task_spawn',{});
+    f.runtime.tasks.spawn({...scope.context,actionId:'ack-tags'},{title:'Inspect PR',instructions:'Inspect read-only',targetProfile:'default-worker'});
+    emitter.emit('output',JSON.stringify({type:'result',result:''}));
+   })().catch(error=>emitter.emit('error',error));
+  }}) as unknown as SessionProcess);
+  const seen=jest.fn(),spoken=jest.fn(),foreground=jest.fn();
+  f.runtime.subscribeText(f.scope.agentSessionId,'owner',seen);
+  if(voice) f.runtime.subscribeVoiceResults(f.scope.agentSessionId,'owner',spoken);
+  const shown=voice?'On it.':'[laughs] On it.';
+  await expect(f.runtime.send({scope:f.scope,text:'Inspect the PR'},{execute:true,writeMemory:false},{timeoutMs:5000,onText:foreground})).resolves.toBe(shown);
+  expect(foreground.mock.calls.map(call=>call[0]).join('')).toBe(shown);
+  expect(seen.mock.calls.map(call=>call[0].text)).toEqual([shown]);
+  if(voice) expect(spoken).toHaveBeenCalledWith(expect.objectContaining({text:'On it.',spoken:'[laughs] On it.'}));
+ }finally{await f.close();}
+});
+
 test('failed task dispatch cannot finish with a false promise of background work',async()=>{
  const f=await fixture();
  try{

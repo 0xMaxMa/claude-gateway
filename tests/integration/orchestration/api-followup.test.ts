@@ -125,6 +125,8 @@ test('live task requires Agent contextual speech, flushes it before terminal res
           const call = (args: object) => fetch(ticket.url, { method: 'POST', headers: { Authorization: `Bearer ${ticket.token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ tool: 'task_spawn', action_id: 'spawn-once', args }) });
           const args = { title: 'Python sum', instructions: 'Compute sum', target_profile: 'media-worker' };
           const denied = await call(args); expect(await denied.json()).toEqual({ error: 'VOICE_ACKNOWLEDGEMENT_REQUIRED' });
+          // Audio tags alone say nothing (issue #595).
+          expect(await (await call({ ...args, spoken_acknowledgement: '[laughs] [sighs]' })).json()).toEqual({ error: 'VOICE_ACKNOWLEDGEMENT_REQUIRED' });
           expect(runtime.store.all('SELECT id FROM tasks')).toHaveLength(0);
           const queued = await call({ ...args, spoken_acknowledgement: speech }); expect(queued.status).toBe(200);
           // Retried tool calls cannot duplicate either the task or the spoken receipt.

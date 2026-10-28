@@ -2,9 +2,12 @@ import { sanitizeJevChildEnv, jevCredentialEnvNames } from '../jev/child-env';
 import { workerEnvironment } from './worker-environment';
 import { ProcessDiagnostics, TurnOutcome } from './process-diagnostics';
 import { prepareManagedConnectors } from './managed-connectors';
+import { agentFacingConnectors, revokeConnectorGrant, type ContainerLaunch } from '../connectors/proxy';
+import { prepareContainerLaunch } from './container-connectors';
 import { RequestToolCapture, RequestToolSchemas } from './request-tool-capture';
 import type { InputImage } from './input-image';
 import { prepareContainerProfile, stopContainerProfile, CONTAINER_SUPERVISOR, containerNode, assertContainerBinding } from '../orchestration/container';
+import { isSandboxContainerName, sandboxPool, usesConversationSandbox, type SandboxLease } from '../apps/conversation-sandbox';
 import { spawn, ChildProcess } from 'child_process';
 import { createHash, randomUUID } from 'crypto';
 import { EventEmitter } from 'events';
@@ -20,6 +23,7 @@ import { OrchestrationError } from '../orchestration/types';
 import chokidar from 'chokidar';
 import { AgentConfig, GatewayConfig } from '../types';
 import { resolveSharedConfig, sharedVaultDir } from '../agent/knowledge';
+import { agentMemoryBudget, composeChatMemory } from '../agent/workspace-loader';
 import { resolveDreamingConfig } from '../agent/dreaming/config';
 import { toChatChannel, type ChatChannel, type ChatChannelOrApi } from '../history/types';
 import { SessionStore } from './store';
@@ -228,6 +232,8 @@ const STATE_SUBDIR: Record<ChatChannel, string> = {
 export class SessionProcess extends EventEmitter {
   private managedProcessGroup?: number;
   private containerAttempt?: { directory: string; config: string };
+  /** The container the current spawn executes in (an app agent's, or its sandbox). */
+  private execContainer?: string;
   /** Bumped by stop(): a spawnProcess() that awaited across it abandons its spawn. */
   private spawnEpoch = 0;
   // Bumped by every start(): a stop() still awaiting after one ran no longer owns the session's live state.
@@ -376,11 +382,14 @@ export class SessionProcess extends EventEmitter {
     sessionStore: SessionStore,
     chatId?: string,  // for telegram/discord: actual chatId; for api: same as sessionId
     readonly runtimeProfile?: RuntimeProfile,
+    /** API chat keying the isolated memory (#601): an API session's own chatId is its sessionId, but a chat holds many sessions. */
+    private readonly memoryChatId?: string,
   ) {
     super();
     this.sessionId = sessionId;
     this.source = source;
     this.chatId = chatId ?? sessionId;
+    this.composedContext = runtimeProfile?.context;
     this.sessionChannel = toChatChannel(source);
     this.agentConfig = agentConfig;
     this.gatewayConfig = gatewayConfig;
@@ -725,9 +734,17 @@ export class SessionProcess extends EventEmitter {
   }
 
   private managedMcpConfigPath?: string;
+  /** Host file holding this conversation's memory (see writeChatMemoryFile). */
+  private chatMemoryPath?: string;
+  /** The context the caller composed (a task driver for workers); the container Agent's is filled in per spawn. */
+  private readonly composedContext?: string;
   /** Host file holding the appended system prompt (see writeSystemPromptFile). */
   private systemPromptPath?: string;
   private managedConnectorPaths = new Set<string>();
+  /** Loopback proxy grant (connectors/proxy.ts) the current spawn's MCP config holds. */
+  private connectorGrant?: string;
+  /** Set for a legacy app-agent spawn whose container can run the connector launcher. */
+  private containerLaunch?: ContainerLaunch;
   /** `.sessions/<id>`, once a spawn without a runtime profile has written its mcp-config.json there. */
   private sessionDirPath?: string;
 
@@ -749,26 +766,63 @@ export class SessionProcess extends EventEmitter {
     return moved.args;
   }
 
-  private writeMcpConfig(): string | null {
-    if (this.runtimeProfile) {
-      // Orchestrators dispatch execution; only eligible workers receive connectors.
-      // App and isolated workers must never receive host connector credentials
-      // or start host-configured stdio servers inside their execution boundary.
-      if (this.runtimeProfile.role === 'agent' || this.agentConfig.allow_tools === false || this.runtimeProfile.connectorsAllowed === false || this.agentConfig.type === 'app-agent' || (this.runtimeProfile.role === 'worker' && !this.runtimeProfile.hostExecution)) return this.runtimeProfile.mcpConfigPath;
-      const ticket = JSON.parse(fs.readFileSync(this.runtimeProfile.mcpConfigPath, 'utf8'));
-      const { servers, connectors } = prepareManagedConnectors(this.agentConfig, this.gatewayConfig, this.runtimeProfile, this.managedConnectorPaths);
-      this.spawnedConnectors = new Map(Object.entries(connectors).map(([id, server]) => [id, connectorFingerprint(server)]));
-      const configPath = path.join(path.dirname(this.runtimeProfile.mcpConfigPath), 'managed-connectors.json');
-      const mcpServers = { ...servers, ...ticket.mcpServers };
-      for (const server of Object.values(mcpServers) as any[]) if (server?.env) server.env = sanitizeJevChildEnv(server.env, this.gatewayConfig.gateway.jev);
-      fs.writeFileSync(configPath, JSON.stringify({ mcpServers }), { mode: 0o600 });
-      fs.chmodSync(configPath, 0o600);
-      this.managedMcpConfigPath = configPath;
-      return configPath;
-    }
-    if (this.source === 'api' && !this.agentConfig.allow_tools) return null;
+  private chatMemory(): string {
+    return composeChatMemory(this.agentConfig.workspace, this.source, this.memoryChatId ?? this.chatId,
+      agentMemoryBudget(this.gatewayConfig, this.agentConfig), this.isContainerAgent() ? '/workspace' : undefined);
+  }
 
-    const stateDir = path.join(this.agentConfig.workspace, '.telegram-state');
+  /** Claude runs in the app container, which mounts the workspace at /workspace. */
+  private isContainerAgent(): boolean {
+    return this.agentConfig.type === 'app-agent' && !!this.agentConfig.container;
+  }
+
+  /** Isolate mode for an app agent (#609): this session executes in its conversation's
+   * own sandbox container, never in the shared app container. */
+  private sandboxed(): boolean {
+    return usesConversationSandbox(this.agentConfig);
+  }
+
+  /** The container this spawn executes in. A worker's driver already resolved its
+   * conversation's sandbox; anything else resolves its own conversation's here. */
+  private async executionContainer(held: { lease?: SandboxLease }): Promise<string> {
+    if (!this.sandboxed()) return this.agentConfig.container!;
+    if (this.runtimeProfile?.role === 'worker') {
+      if (!isSandboxContainerName(this.agentConfig.container)) throw Object.assign(new Error('Isolated worker has no conversation sandbox'), { code: 'CONTAINER_ISOLATION_REQUIRED' });
+      return this.agentConfig.container!;
+    }
+    // Held until this spawn's process exits, so the sandbox is never reaped or replaced
+    // under it; a spawn that starts no process lets go of it (see spawnProcess).
+    held.lease = await sandboxPool.acquire(this.agentConfig, { source: this.source, chatId: this.memoryChatId ?? this.chatId, sessionId: this.sessionId });
+    return held.lease.container;
+  }
+
+  /** Outside orchestration a sandbox has no `.sessions/` to read, so its conversation's
+   * memory is written into the sandbox's own /tmp, which no other conversation shares. */
+  private async writeSandboxChatMemory(container: string): Promise<string> {
+    const file = `/tmp/gateway-session-${this.sessionId.replace(/[^\w.-]/g, '_')}/chat-memory.md`;
+    await containerNode(container, "const fs=require('fs'),path=require('path');let s='';process.stdin.on('data',b=>s+=b);process.stdin.on('end',()=>{fs.mkdirSync(path.dirname(process.argv[1]),{recursive:true,mode:448});fs.writeFileSync(process.argv[1],s,{mode:384});});", [file], this.chatMemory());
+    return file;
+  }
+
+  /** A host path under the workspace as the app container sees it. */
+  private toContainerPath(hostPath: string): string {
+    return `/workspace/${path.relative(this.agentConfig.workspace, hostPath)}`;
+  }
+
+  /** Outside orchestration the conversation's memory cannot join an appended prompt, so
+   * it is written fresh each spawn to `.sessions/<id>/` (0700) and passed with
+   * --append-system-prompt-file. Undefined when isolate mode is off. */
+  private writeChatMemoryFile(): string | undefined {
+    if (this.runtimeProfile || !this.agentConfig.isolateMemory) return undefined;
+    const file = path.join(this.ensureSessionDir(), 'chat-memory.md');
+    fs.writeFileSync(file, this.chatMemory(), { mode: 0o600 });
+    return file;
+  }
+
+  /** `.sessions/<id>` (0700) for this session's generated spawn files. Recording
+   * it as this spawn's directory keeps a stop() of an earlier spawn from removing
+   * it at that spawn's exit. */
+  private ensureSessionDir(): string {
     const sessionsRoot = path.join(this.agentConfig.workspace, '.sessions');
     const sessionDir = path.join(sessionsRoot, this.sessionId);
     // Defense-in-depth: a sessionId containing '../' would escape the .sessions
@@ -779,14 +833,49 @@ export class SessionProcess extends EventEmitter {
     }
     fs.mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
     this.sessionDirPath = sessionDir;
+    return sessionDir;
+  }
+
+  private writeMcpConfig(): string | null {
+    // A respawn replaces the config, so the handle the previous one held goes too.
+    revokeConnectorGrant(this.connectorGrant);
+    this.connectorGrant = undefined;
+    if (this.runtimeProfile) {
+      // Orchestrators dispatch execution; only eligible workers receive connectors.
+      // App and isolated workers must never receive host connector credentials
+      // or start host-configured stdio servers inside their execution boundary.
+      // Isolate mode (#609) is default-deny: connectors are agent-wide accounts.
+      if (this.runtimeProfile.role === 'agent' || this.agentConfig.allow_tools === false || this.runtimeProfile.connectorsAllowed === false || this.agentConfig.type === 'app-agent' || this.agentConfig.isolateMemory || (this.runtimeProfile.role === 'worker' && !this.runtimeProfile.hostExecution)) return this.runtimeProfile.mcpConfigPath;
+      const ticket = JSON.parse(fs.readFileSync(this.runtimeProfile.mcpConfigPath, 'utf8'));
+      const { servers, connectors, grant } = prepareManagedConnectors(this.agentConfig, this.gatewayConfig, this.runtimeProfile, this.managedConnectorPaths);
+      this.connectorGrant = grant;
+      this.spawnedConnectors = new Map(Object.entries(connectors).map(([id, server]) => [id, connectorFingerprint(server)]));
+      const configPath = path.join(path.dirname(this.runtimeProfile.mcpConfigPath), 'managed-connectors.json');
+      const mcpServers = { ...servers, ...ticket.mcpServers };
+      for (const server of Object.values(mcpServers) as any[]) if (server?.env) server.env = sanitizeJevChildEnv(server.env, this.gatewayConfig.gateway.jev);
+      fs.writeFileSync(configPath, JSON.stringify({ mcpServers }), { mode: 0o600 });
+      fs.chmodSync(configPath, 0o600);
+      this.managedMcpConfigPath = configPath;
+      return configPath;
+    }
+    if (this.source === 'api' && !this.agentConfig.allow_tools) return null;
+    // A conversation sandbox (#609) gets no gateway MCP config at all: the config carries
+    // channel tokens and an API key, and the gateway server cannot run in the container.
+    if (this.sandboxed()) return null;
+
+    const stateDir = path.join(this.agentConfig.workspace, '.telegram-state');
+    const sessionDir = this.ensureSessionDir();
 
     const mcpServerPath = path.resolve(__dirname, '..', '..', 'mcp', 'server.ts');
 
     // Merge stdio servers from Claude Code user + project configs (project overrides user).
     // Skip the gateway's own server names from both — gateway always generates its own
     // config below (RESERVED_CONNECTOR_IDS; connector ids can no longer land here at all).
-    const userServers = this.readUserScopedMcp();
-    const projectServers = this.readProjectScopedMcp();
+    // Isolate mode (#609) is default-deny: the operator's own MCP servers and the
+    // agent's connectors act for every conversation, so none are injected.
+    const isolated = this.agentConfig.isolateMemory === true;
+    const userServers = isolated ? {} : this.readUserScopedMcp();
+    const projectServers = isolated ? {} : this.readProjectScopedMcp();
     const extraServers: Record<string, unknown> = {};
     for (const [name, server] of Object.entries({ ...userServers, ...projectServers })) {
       if (!isReservedConnectorId(name)) extraServers[name] = server;
@@ -794,12 +883,23 @@ export class SessionProcess extends EventEmitter {
 
     // Connectors enabled for THIS agent AND connected (every secret present in
     // mcp-token.env). Resolved fresh each spawn so a web "connect" is picked up
-    // without a daemon restart. Secrets land only in this 0600 mcp-config.json.
-    const connectorServers = resolveEnabledConnectors(
+    // without a daemon restart. The resolved form only feeds the fingerprints:
+    // the file gets agent-facing entries, so an HTTP connector's secret stays in
+    // the gateway behind the loopback proxy (#635).
+    const connectorServers = isolated ? {} : resolveEnabledConnectors(
       this.agentConfig,
       this.gatewayConfig.gateway.customConnectors,
       this.gatewayConfig.gateway.connectorsDefaultEnabled ?? true,
     );
+    // An app-agent's CLI runs inside its container, where the gateway's loopback
+    // address is not reachable: its connectors launch through a workspace socket,
+    // or, in a container that cannot run the launcher, keep their resolved entries.
+    const { servers: agentFacing, grant } = agentFacingConnectors(this.agentConfig, this.gatewayConfig, connectorServers, {
+      container: this.containerLaunch,
+      containerUnavailable: this.isContainerAgent() && !this.containerLaunch,
+      sanitizeEnv: true,
+    });
+    this.connectorGrant = grant;
     const spawnedConnectors = new Map<string, string>();
     for (const [name, server] of Object.entries(connectorServers)) {
       // Defence in depth: slugify() and /oauth/receive both refuse these ids now,
@@ -815,7 +915,7 @@ export class SessionProcess extends EventEmitter {
             ` the user/project Claude Code config for agent=${this.agentConfig.id}`,
         );
       }
-      extraServers[name] = server;
+      extraServers[name] = agentFacing[name];
       spawnedConnectors.set(name, connectorFingerprint(server));
     }
     this.spawnedConnectors = spawnedConnectors;
@@ -883,7 +983,13 @@ export class SessionProcess extends EventEmitter {
             GATEWAY_API_URL: process.env.GATEWAY_API_URL ?? `http://127.0.0.1:${process.env.PORT ?? '10850'}`,
             GATEWAY_API_KEY: this.findApiKeyForAgent(this.agentConfig.id),
             GATEWAY_ORIGIN_CHANNEL: this.source,
+            // Isolate mode (#609): channel tools refuse every chat but this one.
+            GATEWAY_ORIGIN_CHAT_ID: this.source === 'api' ? '' : this.chatId,
             GATEWAY_WORKSPACE_DIR: this.agentConfig.workspace,
+            // Isolate mode (#601): the archive is one index for every conversation, so
+            // the memory module turns its tools off instead of filtering them.
+            GATEWAY_ISOLATE_MEMORY: this.agentConfig.isolateMemory ? '1' : '',
+            GATEWAY_DISABLE_ARCHIVE: this.agentConfig.disableArchive ? '1' : '',
             GATEWAY_SHARED_SKILLS_DIR: path.join(os.homedir(), '.claude-gateway', 'shared-skills'),
             // Shared KB vault dir (planning-64 K3), so memory_search corpus:"shared"
             // can reach the cross-agent vault. Empty when shared KB is disabled.
@@ -901,9 +1007,11 @@ export class SessionProcess extends EventEmitter {
             GATEWAY_RECORD_RETRIEVALS: this.resolveRecordRetrievals(),
             GATEWAY_SESSION_ID: this.sessionId,
             // For API sessions: absolute path to session media dir so browser screenshots land there
+            // Isolate mode (#609) confines a channel session's files to its own chat's
+            // media directory too (named like MediaStore.copyToMedia's).
             GATEWAY_SESSION_MEDIA_DIR: this.source === 'api'
               ? path.resolve(this.agentConfig.workspace, '..', 'media', `api-${this.sessionId}`)
-              : '',
+              : isolated ? path.resolve(this.agentConfig.workspace, '..', 'media', `${this.source}-${this.chatId}`) : '',
             // Image-generation tool (generate_image) — targets an image provider that
             // may differ from the LLM: IMAGE_BASE_URL/IMAGE_API_KEY override, falling
             // back to ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN when they share a provider.
@@ -943,10 +1051,17 @@ export class SessionProcess extends EventEmitter {
     return configPath;
   }
 
-  /** Find the first API key that has access to this agent (agents: '*' or includes agentId). */
+  /** Find the first API key that has access to this agent (agents: '*' or includes agentId).
+   * An isolated agent (#609) only gets a non-admin key naming it: a wildcard or admin
+   * key reaches every conversation of every agent. */
   private findApiKeyForAgent(agentId: string): string {
     const keys = this.gatewayConfig.gateway.api?.keys;
     if (!keys?.length) return '';
+    if (this.agentConfig.isolateMemory) {
+      const scoped = keys.find(k => Array.isArray(k.agents) && k.agents.includes(agentId) && !k.admin)?.key;
+      if (!scoped) this.logger.warn('Isolated agent has no non-admin API key naming it: gateway-API tools (api_reply, share_file, image/video, WhatsApp and WeChat replies) are unavailable', { agentId });
+      return scoped ?? '';
+    }
     // Prefer a key scoped to this agent; fall back to wildcard or admin key.
     const match = keys.find(k =>
       (Array.isArray(k.agents) && k.agents.includes(agentId)) ||
@@ -1005,6 +1120,7 @@ export class SessionProcess extends EventEmitter {
           }
           throw error;
         }
+        if (this.agentConfig.isolateMemory) context += '\n\n' + this.chatMemory();
       }
       const profileArgs = runtimeProfileArgs({ ...this.runtimeProfile, context, checkpointCommand: containerAttempt && this.runtimeProfile.checkpointCommand ? `node ${containerAttempt.directory}/checkpoint.cjs ${containerAttempt.directory}/ticket.json` : this.runtimeProfile.checkpointCommand, containerExecution: this.agentConfig.type === 'app-agent', mcpConfigPath: containerAttempt?.config ?? mcpConfigPath ?? this.runtimeProfile.mcpConfigPath, skillPluginDir: containerAttempt && this.runtimeProfile.skillPluginDir ? containerAttempt.directory + '/skill-plugin' : this.runtimeProfile.skillPluginDir }, this.agentConfig.claude.extraFlags ?? []);
       args.push(...profileArgs);
@@ -1025,6 +1141,11 @@ export class SessionProcess extends EventEmitter {
     // Built-in: gateway sessions always run with permissions skipped.
     // (The old claude.dangerouslySkipPermissions config is gone.)
     args.push('--dangerously-skip-permissions');
+
+    // Isolated memory mode (#601): Claude Code loads the conversation-neutral
+    // workspace CLAUDE.md itself; this conversation's own USER.md/MEMORY.md
+    // ride alongside it (see writeChatMemoryFile).
+    if (this.chatMemoryPath) args.push('--append-system-prompt-file', this.isContainerAgent() && !this.sandboxed() ? this.toContainerPath(this.chatMemoryPath) : this.chatMemoryPath);
 
     // Enforce allow_tools:false as a real boundary. Gated on the SAME condition as
     // writeMcpConfig() (source==='api' && !allow_tools): those sessions get no MCP
@@ -1056,6 +1177,16 @@ export class SessionProcess extends EventEmitter {
   /** Resolves false when a stop() during its awaits abandoned the spawn: nothing was
    * started, and a container attempt it prepared is already cleaned up. */
   private async spawnProcess(): Promise<boolean> {
+    // A sandbox lease this spawn took and has not handed to a process.
+    const held: { lease?: SandboxLease } = {};
+    try {
+      const started = await this.spawnProcessOnce(held);
+      if (!started) held.lease?.release();
+      return started;
+    } catch (error) { held.lease?.release(); throw error; }
+  }
+
+  private async spawnProcessOnce(held: { lease?: SandboxLease }): Promise<boolean> {
     const epoch = this.spawnEpoch;
     const { historyPrompt, loadedAtSpawn, archivedCount, messageCountAtSpawn } = await this.buildInitialPrompt();
     if (epoch !== this.spawnEpoch) return false;
@@ -1063,14 +1194,25 @@ export class SessionProcess extends EventEmitter {
 
     // Determine if this is a docker-exec app-agent before computing paths
     assertContainerBinding(this.agentConfig, this.runtimeProfile);
-    const isAppAgent = this.agentConfig.type === 'app-agent' && !!this.agentConfig.container;
+    const isAppAgent = this.isContainerAgent();
+    let execContainer: string | undefined;
+    try { execContainer = isAppAgent ? await this.executionContainer(held) : undefined; }
+    catch (error) { if (epoch !== this.spawnEpoch) return false; throw error; }
+    if (epoch !== this.spawnEpoch) return false;
+    this.execContainer = execContainer;
 
     const freshModel = this.readFreshModel();
     let containerArgs: string[] | undefined;
     if (isAppAgent && this.runtimeProfile) {
-      const profile = this.runtimeProfile, container = this.agentConfig.container!;
-      const attempt = await prepareContainerProfile(this.agentConfig, profile, async directory => {
-        profile.context = await containerNode(container, "process.stdout.write(require('fs').readFileSync('/workspace/CLAUDE.md','utf8'))");
+      const profile = this.runtimeProfile, container = execContainer!;
+      const attempt = await prepareContainerProfile({ ...this.agentConfig, container }, profile, async directory => {
+        // A worker's context arrives composed by its task driver, with the task's
+        // own conversation's memory; only the Agent's is read from the container.
+        if (this.composedContext === undefined) {
+          profile.context = await containerNode(container, "process.stdout.write(require('fs').readFileSync('/workspace/CLAUDE.md','utf8'))");
+          // A context set here skips the chat memory append in buildArgs, so it goes in now.
+          if (this.agentConfig.isolateMemory) profile.context += '\n\n' + this.chatMemory();
+        }
         const moved = appendSystemPromptViaFile(this.buildArgs(null, freshModel, { directory, config: directory + '/mcp.json' }), directory + '/system-prompt.md');
         containerArgs = moved.args;
         return moved.prompt;
@@ -1079,14 +1221,16 @@ export class SessionProcess extends EventEmitter {
       if (epoch !== this.spawnEpoch) { await stopContainerProfile(container, attempt.directory); return false; }
       this.containerAttempt = attempt;
     }
+    this.containerLaunch = isAppAgent && !this.runtimeProfile && !this.sandboxed() && !this.agentConfig.isolateMemory
+      ? await prepareContainerLaunch(execContainer!, this.agentConfig.workspace, this.gatewayConfig.gateway.customConnectors)
+      : undefined;
+    if (epoch !== this.spawnEpoch) return false;
     const mcpConfigPath = this.writeMcpConfig();
+    this.chatMemoryPath = this.sandboxed() && !this.runtimeProfile ? await this.writeSandboxChatMemory(execContainer!) : this.writeChatMemoryFile();
+    if (epoch !== this.spawnEpoch) return false;
 
-    // For app-agents, Claude runs inside the container where /workspace is mounted.
-    // Convert host paths (agentConfig.workspace-relative) to container paths (/workspace/...).
-    const toContainerPath = (hostPath: string): string =>
-      `/workspace/${path.relative(this.agentConfig.workspace, hostPath)}`;
-    const effectiveMcpPath = (isAppAgent && mcpConfigPath) ? toContainerPath(mcpConfigPath) : mcpConfigPath;
-    const containerRestartPath = isAppAgent ? toContainerPath(this.restartSignalPath) : this.restartSignalPath;
+    const effectiveMcpPath = (isAppAgent && mcpConfigPath) ? this.toContainerPath(mcpConfigPath) : mcpConfigPath;
+    const containerRestartPath = isAppAgent ? this.toContainerPath(this.restartSignalPath) : this.restartSignalPath;
 
     const args = containerArgs ?? this.writeSystemPromptFile(this.buildArgs(effectiveMcpPath, freshModel), mcpConfigPath);
 
@@ -1182,13 +1326,21 @@ export class SessionProcess extends EventEmitter {
     const configuredWorkerEnvironment = sanitizeJevChildEnv(this.runtimeProfile?.role === 'worker' ? workerEnvironment(this.agentConfig, this.gatewayConfig) : {}, this.gatewayConfig.gateway.jev);
     const turnEnvironment: Record<string,string> = this.runtimeProfile?.claudeEffort
       ? { CLAUDE_CODE_EFFORT_LEVEL: this.runtimeProfile.claudeEffort } : {};
+    // Isolate mode (#601): Claude Code's auto memory is one directory per cwd,
+    // loaded into every session there, so it would carry notes across conversations.
+    const isolateEnvironment: Record<string,string> = this.agentConfig.isolateMemory
+      ? { CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' } : {};
     const containerEnv: Record<string, string> = {
       HOME: os.homedir(),
       CLAUDE_WORKSPACE: '/workspace',
       ...turnEnvironment,
+      ...isolateEnvironment,
       GATEWAY_RESTART_SIGNAL_PATH: containerRestartPath,
     };
-    if (!this.runtimeProfile && process.env.GATEWAY_API_URL) containerEnv.GATEWAY_API_URL = process.env.GATEWAY_API_URL;
+    // A conversation sandbox (#609) gets no gateway address or channel token: either
+    // reaches past this conversation.
+    const sandboxed = this.sandboxed();
+    if (!this.runtimeProfile && !sandboxed && process.env.GATEWAY_API_URL) containerEnv.GATEWAY_API_URL = process.env.GATEWAY_API_URL;
 
     // Secrets are forwarded by NAME only (`-e KEY`, no `=value`), which makes
     // Docker read the value from this process's own environment (set on the spawn
@@ -1200,7 +1352,7 @@ export class SessionProcess extends EventEmitter {
     // Claude credentials — it is a bearer token for the agent's whole bot
     // account. It is already placed in the spawn env below, unconditionally.
     const containerAuthEnv = isAppAgent || (this.runtimeProfile?.checkpointCommand && !this.runtimeProfile.hostExecution) ? this.resolveContainerAuthEnv() : {};
-    const byNameKeys = [...(this.runtimeProfile ? [] : ['TELEGRAM_BOT_TOKEN']), ...Object.keys(containerAuthEnv), ...Object.keys(configuredWorkerEnvironment)];
+    const byNameKeys = [...(this.runtimeProfile || sandboxed ? [] : ['TELEGRAM_BOT_TOKEN']), ...Object.keys(containerAuthEnv), ...Object.keys(configuredWorkerEnvironment)];
     const dockerEnvFlags = [
       ...Object.entries(containerEnv).flatMap(([k, v]) => ['-e', `${k}=${v}`]),
       ...byNameKeys.flatMap((k) => ['-e', k]),
@@ -1212,7 +1364,7 @@ export class SessionProcess extends EventEmitter {
       ? [
           'exec', '--workdir', '/workspace', '--user', String(containerUid), '-i',
           ...dockerEnvFlags,
-          this.agentConfig.container!,
+          execContainer!,
           ...(this.containerAttempt ? ['node', '-e', CONTAINER_SUPERVISOR, this.containerAttempt.directory, this.agentConfig.claudeBin ?? claudeBin] : [this.agentConfig.claudeBin ?? claudeBin]),
           ...allArgs,
         ]
@@ -1250,6 +1402,7 @@ export class SessionProcess extends EventEmitter {
         ...(hardenedPath ? { PATH: hardenedPath } : {}),
         ...configuredWorkerEnvironment,
         ...turnEnvironment,
+        ...isolateEnvironment,
         GATEWAY_ORIGIN_SESSION_ID: this.runtimeProfile?.originSessionId ?? this.sessionId,
         GATEWAY_TASK_ID: this.runtimeProfile?.taskId ?? '',
         GATEWAY_TASK_ATTEMPT_ID: this.runtimeProfile?.attemptId ?? '',
@@ -1279,6 +1432,9 @@ export class SessionProcess extends EventEmitter {
     this.process = proc;
     const startsAtSpawn = this.starts;
     proc.once('exit', releaseCapacity);
+    const lease = held.lease;
+    held.lease = undefined;
+    if (lease) { proc.once('exit', () => lease.release()); proc.once('error', () => lease.release()); }
     proc.once('exit', () => { setTimeout(() => toolCapture?.close(), 200).unref(); });
     proc.once('error', () => toolCapture?.close());
     proc.once('error', releaseCapacity);
@@ -1713,6 +1869,9 @@ export class SessionProcess extends EventEmitter {
           ? { hint: 'claude executable is not resolvable — set CLAUDE_BIN to the claude path (native install: ~/.local/bin/claude)' }
           : {}),
       });
+      // No respawn follows, and the runner drops a failed session without stop().
+      revokeConnectorGrant(this.connectorGrant);
+      this.connectorGrant = undefined;
       this.emit('failed');
       return;
     }
@@ -2112,7 +2271,9 @@ export class SessionProcess extends EventEmitter {
       systemPrompt: this.systemPromptPath,
       connectors: [...this.managedConnectorPaths],
       managedMcpConfig: this.managedMcpConfigPath,
+      connectorGrant: this.connectorGrant,
     };
+    this.connectorGrant = undefined;
     this.systemPromptPath = undefined;
     this.managedConnectorPaths = new Set();
     this.managedMcpConfigPath = undefined;
@@ -2130,8 +2291,8 @@ export class SessionProcess extends EventEmitter {
     let exited = false;
     const exit = proc ? new Promise<void>(resolve => proc.once('exit', () => { exited = true; resolve(); })) : undefined;
     this.resetBackgroundDispatchState();
-    if (attempt && this.agentConfig.container) {
-      this.managedGroupStopped = await stopContainerProfile(this.agentConfig.container, attempt.directory);
+    if (attempt && this.execContainer) {
+      this.managedGroupStopped = await stopContainerProfile(this.execContainer, attempt.directory);
       if (this.containerAttempt === attempt) this.containerAttempt = undefined;
     }
     if (group) {
@@ -2147,7 +2308,7 @@ export class SessionProcess extends EventEmitter {
       }
     }
     // mcp-config.json under here holds fully-substituted secrets (channel bot
-    // tokens, GATEWAY_API_KEY, connector OAuth tokens) — it must not outlive
+    // tokens, GATEWAY_API_KEY, connector grants) — it must not outlive
     // the session that needed it (issue #460). Recreated automatically on the
     // next spawn, so removing it here is safe across restarts. Deferred until
     // the process has actually exited below (not removed up front here) — the
@@ -2156,6 +2317,7 @@ export class SessionProcess extends EventEmitter {
     // window immediately after this point, and must not find it gone under it.
     // A newer spawn that wrote the shared directory owns it now; its stop removes it.
     const removeSessionDir = (): void => {
+      revokeConnectorGrant(owned.connectorGrant);
       const reclaimed = (file: string): boolean => this.managedConnectorPaths.has(file) || file === this.managedMcpConfigPath;
       for (const file of [...owned.connectors, owned.managedMcpConfig, owned.systemPrompt]) {
         if (file && !reclaimed(file)) { try { fs.rmSync(file, { force: true }); } catch {} }

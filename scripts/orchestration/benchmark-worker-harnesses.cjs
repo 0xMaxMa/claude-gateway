@@ -8,7 +8,7 @@ const { spawn, spawnSync } = require('node:child_process');
 const args = process.argv.slice(2);
 const option = (name, fallback) => args.includes(name) ? args[args.indexOf(name) + 1] : fallback;
 if (!args.includes('--run')) {
-  console.log('Opt-in real calls: node scripts/orchestration/benchmark-worker-harnesses.cjs --run [--claude-model sonnet] [--codex-model gpt-5.6-luna] [--claude-base-url URL --claude-api-key-env ENV_NAME] [--codex-base-url URL --codex-api-key-env ENV_NAME] [--host-execution] [--output /tmp/worker-benchmark.json]');
+  console.log('Opt-in real calls: node scripts/orchestration/benchmark-worker-harnesses.cjs --run [--claude-model sonnet] [--codex-model gpt-6-luna] [--claude-base-url URL --claude-api-key-env ENV_NAME] [--codex-base-url URL --codex-api-key-env ENV_NAME] [--host-execution] [--output /tmp/worker-benchmark.json]');
   process.exit(0);
 }
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gateway-worker-benchmark-'));
@@ -85,7 +85,7 @@ function metrics(harness, text) {
   const routes = [
     { harness: 'claude', bin: process.env.CLAUDE_BIN || 'claude', model: option('--claude-model','sonnet'), env: claudeEnv,
       auth: ['ANTHROPIC_API_KEY','ANTHROPIC_AUTH_TOKEN','CLAUDE_CODE_OAUTH_TOKEN'].some(k => claudeEnv[k]) || fs.existsSync(path.join(os.homedir(),'.claude','.credentials.json')) },
-    { harness: 'codex', bin: process.env.CODEX_BIN || 'codex', model: option('--codex-model','gpt-5.6-luna'), env: codexEnv,
+    { harness: 'codex', bin: process.env.CODEX_BIN || 'codex', model: option('--codex-model','gpt-6-luna'), env: codexEnv,
       auth: Boolean(codexEnv[codexKeyEnv]) || (!option('--codex-base-url') && fs.existsSync(path.join(codexEnv.CODEX_HOME || path.join(os.homedir(),'.codex'),'auth.json'))) },
   ];
   const report = { kind: 'native-cli-smoke', codexSandbox: args.includes('--host-execution') ? 'danger-full-access' : 'workspace-write', note: 'Different models/provider/account routes may apply. Not a controlled timing/cost A/B, gateway integration test, or quality-parity claim. CLI token accounting differs; null means unavailable.', runs: [] };

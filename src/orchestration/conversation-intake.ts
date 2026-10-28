@@ -1,5 +1,6 @@
 import { OrchestrationStore, boundedText } from './store';
 import { CommandContext, OrchestrationError } from './types';
+import { stripAudioTags } from '../voice/audio-tags';
 
 export interface IntakeChoice {
   mode: 'ready' | 'wait' | 'update' | 'resolve';
@@ -66,7 +67,8 @@ export class ConversationIntake {
     if (!['ready','wait','update','resolve'].includes(choice.mode)) throw new OrchestrationError('INVALID_INPUT');
     const acknowledgement = choice.mode !== 'wait' && choice.mode !== 'resolve' ? boundedText(choice.acknowledgement ?? '', 600) : '';
     const clarification = choice.mode === 'wait' ? boundedText(choice.clarification ?? '', 600) : '';
-    if ((choice.mode !== 'wait' && choice.mode !== 'resolve' && !acknowledgement.trim()) || (choice.mode === 'wait' && !clarification.trim())) throw new OrchestrationError('INTAKE_MESSAGE_REQUIRED');
+    // Audio tags alone (issue #595) say nothing, in chat or in speech.
+    if ((choice.mode !== 'wait' && choice.mode !== 'resolve' && !stripAudioTags(acknowledgement).trim()) || (choice.mode === 'wait' && !clarification.trim())) throw new OrchestrationError('INTAKE_MESSAGE_REQUIRED');
     const preparation = choice.preparation?.trim() ? boundedText(choice.preparation, 12000) : ''; 
     if (choice.mode === 'update') {
       const task = choice.task_id && this.store.task(choice.task_id);

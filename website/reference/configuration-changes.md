@@ -49,7 +49,7 @@ These are lifecycle categories, not a promise that every configuration field sup
 
 ### Settings that remain restart-required
 
-Listener/bind settings, storage and workspace identity, log-directory location, agent type/container identity, the agent environment-file path, shared knowledge root/project, and archive tokenizer are not silently moved or recreated by hot reload. Unrecognized changed fields are reported as restart-required rather than ignored. The deprecated `claude.dangerouslySkipPermissions` setting remains ignored.
+Listener/bind settings, storage and workspace identity, log-directory location, agent type/container identity, the agent environment-file path, shared knowledge root/project, and archive tokenizer are not silently moved or recreated by hot reload. Isolated memory mode (`agents[].isolateMemory`) is not applied to live sessions either, because they keep the context they were composed with; instead the gateway restarts that one agent once none of its sessions is busy. Unrecognized changed fields are reported as restart-required rather than ignored. The deprecated `claude.dangerouslySkipPermissions` setting remains ignored.
 
 A restart does not migrate storage or regenerate installed container mounts. Use the appropriate install/recreate procedure when changing container runtime files; see [worker harnesses](../guide/worker-harnesses.md).
 

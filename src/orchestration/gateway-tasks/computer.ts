@@ -221,11 +221,12 @@ export class ComputerTaskAdapter implements GatewayTaskAdapter {
      this.options.progress?.(t,{status:'running',reason:e.reason??e.phase,steps:e.steps,evaluations:e.evaluations,phase:e.phase,trace:receipt.trace.slice(-12)});
     }
    };
-   // Vision decides agent goals from the screenshot; the user's own commands and step lists stay on Accessibility.
+   // When image-first Computer Use is enabled, a one-command user turn also gets its target decision from the
+   // screenshot. Explicit ordered step lists retain their established Accessibility path.
    // A question the vision loop asked is answered here: yes resumes it there, no declines it as Accessibility does
    // (nothing runs), anything else is the user's own command. Accessibility gets the reply as read, never reads it again.
    const visionAsked=asked&&previousContext!.lastAction?.vision===true;
-   const vision=!steps&&(!asked||visionAsked)&&(t.automationController==='agent'||sessionStart||agentHandoff||visionAsked)?this.options.vision?.():undefined;
+   const vision=!steps&&(!asked||visionAsked)&&(t.automationController==='agent'||t.automationController==='user'||sessionStart||agentHandoff||visionAsked)?this.options.vision?.():undefined;
    let result:ComputerUseResult|undefined,axInput:object=input;
    const reply=vision&&visionAsked?await confirmationReply(asked.label,goal,deps,AbortSignal.any([signal,AbortSignal.timeout(125000)])):undefined;
    if(reply){deps.confirmed!(reply);if(reply==='OTHER'){const {confirmation:_c,resumeGoal:_r,...rest}=input as Record<string,unknown>;axInput=rest;}else axInput={...input,confirmation:{...asked!,reply}};}

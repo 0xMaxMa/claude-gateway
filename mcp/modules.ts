@@ -16,12 +16,24 @@ import { NarrateModule } from './tools/narrate/module';
 import { AppsModule } from './tools/apps/module';
 import { ApiModule } from './tools/api/module';
 import { MemoryModule } from './tools/memory/module';
+import { isolateAllowsModule } from './tools/shared/isolate';
 import type { ChannelModule, ToolModule } from './types';
 
-/** Shared registration for execution and read-only capability discovery. */
+/**
+ * Shared registration for execution and read-only capability discovery. In
+ * isolate mode the allowlist drops every module it does not name, so a module
+ * added here later is off for isolated conversations until allowlisted.
+ */
 export function gatewayModules(
   role?: string,
   media = false
+): Array<ChannelModule | ToolModule> {
+  return registeredModules(role, media).filter((m) => isolateAllowsModule(m.id));
+}
+
+function registeredModules(
+  role: string | undefined,
+  media: boolean
 ): Array<ChannelModule | ToolModule> {
   return role
     ? [

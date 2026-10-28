@@ -41,6 +41,7 @@ import { join, extname, sep } from 'path'
 import { execFileSync } from 'child_process'
 import { createWorkingStateManager, drainOrphanForwards, chunkText, htmlToPlain } from './typing'
 import { extractRepliedAttachment, safeName } from './reply-attachment'
+import { recordChatAttachments } from './attachment-log'
 // Import compiled dist/, not raw src/ — src/ is not published (files: ["mcp/"]),
 // so a src/ import crashes this bun-run receiver on installed packages (the bug
 // that silenced every bot on systemd installs). Enforced by
@@ -50,7 +51,7 @@ import { formatTurnIncident, type TurnIncident } from '../../../dist/agent/turn-
 import { createIncidentStore } from '../../../dist/agent/incident-store.js'
 import type { RecoveryOutcome } from '../../../dist/agent/incident.js'
 import { initDedupDir, isDuplicate as _isDuplicate, pruneDedup as _pruneDedup } from './dedup'
-import { normalizeTelegramLineBreaks, resolveTelegramReplyFormat, migrateAccess, telegramDisplayName, groupCommandReply, isGroupCommand, stripCommandTarget } from './pure'
+import { normalizeTelegramLineBreaks, resolveTelegramReplyFormat, migrateAccess, telegramDisplayName, groupCommandReply, isGroupCommand, isGroupCommandAllowed, telegramGroupModelReply, stripCommandTarget, type GroupCommandInput } from './pure'
 import { MAX_ATTACHMENT_BYTES } from '../shared/limits'
 
 // Standalone fallback: default state dir to ~/.claude/channels/telegram
@@ -876,7 +877,7 @@ const RECEIVER_MODE = process.env.TELEGRAM_RECEIVER_MODE === 'true'
 import { parseMenuFileContent } from './menu-parser'
 
 const BOT_COMMANDS = [
-  ...(ORCHESTRATION_ENABLED ? [{ command: 'tasks', description: 'View pending tasks in this chat' }, { command: 'voice', description: 'Turn automatic voice replies on or off' }, { command: 'voices', description: 'Choose the agent voice' }] : []),
+  ...(ORCHESTRATION_ENABLED ? [{ command: 'tasks', description: 'View pending tasks in this chat' }, { command: 'voice', description: 'Turn automatic voice replies on or off' }, { command: 'voices', description: 'Choose the agent voice' }, { command: 'call', description: 'Start a live voice call with the agent' }] : []),
   { command: 'session', description: 'Show current session info' },
   { command: 'sessions', description: 'Manage conversation sessions' },
   { command: 'new', description: 'Create a new session' },
@@ -930,9 +931,8 @@ const AVAILABLE_MODELS = [
   { id: 'gpt-6-sol[1m]',             label: 'GPT 6 Sol',        alias: 'gpt6sol' },
   { id: 'gpt-6-astra[1m]',           label: 'GPT 6 Astra',      alias: 'gpt6astra' },
   { id: 'gpt-6-luna[1m]',            label: 'GPT 6 Luna',       alias: 'gpt6luna' },
-  { id: 'gpt-5.6-sol[1m]',           label: 'GPT 5.6 Sol',      alias: 'gpt56sol' },
   { id: 'gpt-5.6-terra[1m]',         label: 'GPT 5.6 Terra',    alias: 'gpt56terra' },
-  { id: 'gpt-5.6-luna[1m]',          label: 'GPT 5.6 Luna',     alias: 'gpt56luna' },
+  { id: 'gpt-6.1-sol[1m]',          label: 'GPT 6.1 Sol',      alias: 'gpt61sol' },
   { id: 'gpt-5.5[1m]',               label: 'GPT 5.5',          alias: 'gpt55' },
 ]
 
@@ -1071,6 +1071,13 @@ async function handleInbound(
   // file_id so the agent can fetch it with download_attachment — without this a
   // quote-reply of e.g. a CSV dropped the file entirely.
   const repliedAttachment = extractRepliedAttachment(replyMsg)
+  // Isolate mode downloads only the file_ids this chat was shown (#609).
+  const repliedPhotoId = orchestrationSpool && replyMsg?.photo ? replyMsg.photo[replyMsg.photo.length - 1]!.file_id : undefined
+  try {
+    recordChatAttachments(STATE_DIR, chat_id, [attachment?.file_id, repliedPhotoId, repliedAttachment?.file_id].filter((id): id is string => Boolean(id)))
+  } catch (err) {
+    process.stderr.write(`telegram channel: failed to record attachment ids: ${err}\n`)
+  }
 
   // image_path goes in meta only — an in-content "[image attached — read: PATH]"
   // annotation is forgeable by any allowlisted sender typing that string.
@@ -1209,11 +1216,32 @@ bot.command('status', async ctx => {
   await ctx.reply(`Not paired. Send me a message to get a pairing code.`)
 })
 
-// /model — show current AI model (receiver mode only, needs AgentRunner callback)
+// /model — show the current model in a group or DM; setting is DM-only.
 bot.command('model', async ctx => {
-  if (ctx.chat?.type !== 'private') return
-  const access = loadAccess()
-  if (!access.allowFrom.includes(String(ctx.from!.id))) return
+  const isGroup = ctx.chat?.type === 'group' || ctx.chat?.type === 'supergroup'
+  const argument = ctx.match.trim()
+  let groupAccess: ReturnType<typeof loadAccess> | undefined
+  let groupInput: GroupCommandInput | undefined
+  if (isGroup) {
+    const chat = ctx.chat!
+    groupAccess = loadAccess()
+    groupInput = {
+      chatType: chat.type,
+      chatId: String(chat.id),
+      fromId: String(ctx.from!.id),
+      text: ctx.message.text,
+      botUsername,
+    }
+    if (!isGroupCommandAllowed(groupAccess, groupInput)) return
+    if (argument) {
+      await ctx.reply('Use /model <model-id> in a direct message with the bot to change the model.')
+      return
+    }
+  } else {
+    if (ctx.chat?.type !== 'private') return
+    const access = loadAccess()
+    if (!access.allowFrom.includes(String(ctx.from!.id))) return
+  }
   if (!CALLBACK_URL_BASE) return
 
   try {
@@ -1223,7 +1251,9 @@ bot.command('model', async ctx => {
       body: JSON.stringify({ command: 'get_model', chat_id: String(ctx.chat.id) }),
     })
     const data = (await res.json()) as { model?: string }
-    await ctx.reply(`Current model: ${data.model ?? 'unknown'}`)
+    await ctx.reply(groupAccess && groupInput
+      ? telegramGroupModelReply(groupAccess, groupInput, data.model ?? 'unknown') ?? 'Current model: unknown'
+      : `Current model: ${data.model ?? 'unknown'}`)
   } catch (err) {
     await ctx.reply('Failed to get model info.')
   }
@@ -1529,6 +1559,28 @@ bot.command('voice', async ctx => {
     const menu = voiceMenu(await telegramVoiceSetting(String(ctx.chat.id), choice ? choice as VoiceReplyMode : undefined))
     await ctx.reply(menu.text, choice ? {} : { reply_markup: menu.reply_markup })
   } catch { await ctx.reply('Voice settings are unavailable. Check the agent TTS configuration.') }
+})
+
+// /call — open a live voice call as a Telegram Mini App bound to this DM. The
+// page proves the user again with signed initData before any ticket is issued.
+bot.command('call', async ctx => {
+  if (ctx.chat?.type !== 'private' || !isCallbackAuthorized(ctx) || loadAccess().dmPolicy === 'disabled') return
+  if (!ORCHESTRATION_ENABLED) { await ctx.reply('Voice calls require orchestration mode.'); return }
+  if (!CALLBACK_URL_BASE) return
+  try {
+    const response = await fetch(CALLBACK_URL_BASE + '/command', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(10000),
+      body: JSON.stringify({ command: 'voice_call_pair', chat_id: String(ctx.chat.id), payload: { user_id: String(ctx.from!.id), ...(ctx.message?.message_thread_id ? { thread_id: String(ctx.message.message_thread_id) } : {}) } }),
+    })
+    const data = (await response.json()) as { success?: boolean; url?: string; error?: string }
+    if (!data.success || !data.url) {
+      await ctx.reply(data.error === 'not_configured' ? 'Voice calls are not configured. Set an HTTPS gateway.publicUrl in config.json first.'
+        : data.error === 'voice_not_configured' ? 'Voice calls need voice enabled for this agent.' : 'Could not start a voice call right now.')
+      return
+    }
+    // web_app buttons open the Mini App with signed initData; Telegram requires HTTPS.
+    await ctx.reply('Tap to start a voice call. Your words and the replies also appear here.', { ...(ctx.message?.message_thread_id ? { message_thread_id: ctx.message.message_thread_id } : {}), reply_markup: new InlineKeyboard().webApp('\u{1F399} Start voice call', data.url) })
+  } catch { await ctx.reply('Could not start a voice call right now.') }
 })
 
 // Reuse the /tasks live-message lifecycle: serialize reads/replacement, edit only

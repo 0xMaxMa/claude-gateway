@@ -26,6 +26,7 @@ const INITDATA_MAX_AGE_SEC = 60 * 60;
 export function verifyTelegramInitData(
   initData: string,
   botToken: string,
+  maxAgeSec = INITDATA_MAX_AGE_SEC,
 ): VerifiedInitData | null {
   if (!initData || !botToken) return null;
 
@@ -61,7 +62,7 @@ export function verifyTelegramInitData(
   // Reject stale payloads (replay bound). auth_date is unix seconds.
   const authDate = Number(params.get('auth_date') ?? '');
   if (!Number.isFinite(authDate) || authDate <= 0) return null;
-  if (Date.now() / 1000 - authDate > INITDATA_MAX_AGE_SEC) return null;
+  if (Date.now() / 1000 - authDate > maxAgeSec) return null;
 
   const userRaw = params.get('user');
   if (!userRaw) return null;

@@ -5,7 +5,7 @@ import { recordTokenTurn } from '../token-ledger';
 import { storedReplyContext, resolveStoredReply } from '../reply-context';
 import { observeToolRepetition } from './tool-repetition';
 import { taskDirective } from './task-directive';
-import { personaWorkspaceRules } from '../source-policy';
+import { personaWorkspaceRules, SHARED_PERSONA_RULES } from '../source-policy';
 import { browserRouting } from '../browser-routing';
 import { discoverCliSkills } from '../cli-skills';
 import { discoverWorkerExtensions } from '../../session/worker-extensions';
@@ -15,6 +15,7 @@ import { resolveOrchestrationConfig } from '../config';
 import { taskFailure } from './failure';
 import { payloadHash } from '../store';
 import { containerNode, validateContainer } from '../container';
+import { sandboxPool, usesConversationSandbox, type SandboxLease } from '../../apps/conversation-sandbox';
 import { toolActivity } from '../tool-activity';
 import { extractFrontmatter } from '../../skills/parser';
 import { dirname, join, relative } from 'path';
@@ -34,6 +35,7 @@ import { startProcessTurn } from '../process-turn';
 import { randomUUID } from 'crypto';
 import { gatewayCapacity } from '../capacity';
 import { resolveSharedConfig, sharedVaultDir } from '../../agent/knowledge';
+import { agentMemoryBudget, composeChatMemory } from '../../agent/workspace-loader';
 import { MediaStore } from '../../history/media-store';
 import { providerFailure, ProviderPermit } from '../provider-admission';
 import type { ResolvedCodexProviderIdentity } from '../provider-scope';
@@ -44,6 +46,7 @@ import { SUBAGENT_READONLY, pstackWorkerNote } from '../../pstack/overlay';
 import { chatSessionTranscripts, pstackReflectNote } from '../../pstack/reflect';
 import { SUBAGENT_MAX_DEPTH } from '../subagent-tool-schemas';
 import type { Effort } from '../../agent/model-registry';
+import { restartResumeBrief } from '../restart-resume';
 
 // Codex accepts low|medium|high|xhigh; Claude's `max` (a pstack template, or inherited) runs at Codex's highest.
 const codexEffort = (effort: Effort): Exclude<Effort, 'max'> => effort === 'max' ? 'xhigh' : effort;
@@ -68,6 +71,21 @@ export class ClaudeWorkerDriver implements WorkerDriver {
   available(taskId: string): boolean { return this.workspaces.available(taskId); }
   release(taskId: string): Promise<void> { return this.workspaces.release(taskId); }
   async start(task: TaskSnapshot, attempt: TaskAttempt, capacityReserved = false, providerPermit?: ProviderPermit): Promise<WorkerHandle> {
+    // Isolate mode (#609): the attempt executes in its conversation's own sandbox,
+    // held until its process is stopped so the sandbox is never reaped under it.
+    let lease: SandboxLease | undefined;
+    if (usesConversationSandbox(this.agent)) {
+      const conversation = this.tasks.store.get('SELECT source, chat_id FROM conversations WHERE id=?', task.conversationId)!;
+      lease = await sandboxPool.acquire(this.agent, { source: String(conversation.source), chatId: String(conversation.chat_id), sessionId: task.agentSessionId });
+    }
+    try {
+      const handle = await this.startAttempt(task, attempt, capacityReserved, providerPermit, lease ? { ...this.agent, container: lease.container } : this.agent);
+      if (lease) void handle.result.finally(() => lease!.release()).catch(() => {});
+      return handle;
+    } catch (error) { lease?.release(); throw error; }
+  }
+
+  private async startAttempt(task: TaskSnapshot, attempt: TaskAttempt, capacityReserved: boolean, providerPermit: ProviderPermit | undefined, execAgent: AgentConfig): Promise<WorkerHandle> {
     if (!['default-worker', 'media-worker', 'skill-worker'].includes(task.targetProfile) || !task.capabilities.execute) throw new OrchestrationError('EXECUTION_DENIED');
     if (task.targetProfile === 'default-worker' && task.resourceProfile?.mode === 'shared-lock') {
       const [project, identity] = await Promise.all([realpath(task.resourceProfile.projectRoot), realpath(this.agent.workspace)]);
@@ -87,7 +105,7 @@ export class ClaudeWorkerDriver implements WorkerDriver {
     if (harness.harness === 'codex') {
       try {
         if (task.skill?.invocation === 'cli' && !task.skill.filePath) {
-          const inventory = await discoverWorkerExtensions(this.agent, this.gateway, workspace.path, 'codex');
+          const inventory = await discoverWorkerExtensions(execAgent, this.gateway, workspace.path, 'codex');
           const installed = inventory.skills.find(skill => skill.name === task.skill!.name || skill.aliases?.includes(task.skill!.name));
           if (installed) task.skill = { ...task.skill, filePath: installed.filePath, resourceRoot: installed.resourceRoot, fileScope: installed.fileScope, content: installed.fileScope === 'container' ? installed.content ?? '' : await readFile(installed.filePath, 'utf8') };
         }
@@ -120,7 +138,7 @@ export class ClaudeWorkerDriver implements WorkerDriver {
     const cliSkill = task.skill?.invocation === 'cli' && harness.harness !== 'codex';
     const invokedSkill = task.skill ? (cliSkill ? task.skill.name : `orchestration-task:${task.skill.name}`) : undefined;
     if (cliSkill) {
-      const installed = await discoverCliSkills(this.agent, workspace.path);
+      const installed = await discoverCliSkills(execAgent, workspace.path);
       if (!installed.some(skill => skill.name === task.skill!.name)) throw new OrchestrationError('CLI_SKILL_UNAVAILABLE', 'The selected skill is unavailable in this worker harness; no host/container fallback was attempted.');
     }
     const containerSkill = task.skill?.fileScope === 'container' && !cliSkill ? { name: task.skill.name, filePath: task.skill.filePath, resourceRoot: task.skill.resourceRoot ?? dirname(task.skill.filePath), content: task.skill.content } : undefined;
@@ -153,6 +171,12 @@ export class ClaudeWorkerDriver implements WorkerDriver {
     let context = this.agent.type === 'app-agent'
       ? await containerNode(this.agent.container!, "process.stdout.write(require('fs').readFileSync('/workspace/CLAUDE.md','utf8'))")
       : await readFile(join(this.agent.workspace, 'CLAUDE.md'), 'utf8');
+    // Isolate mode (#601): the worker acts for one conversation, so it sees that
+    // conversation's memory only. A container worker sees the workspace at /workspace.
+    if (this.agent.isolateMemory) {
+      const conversation = this.tasks.store.get('SELECT source, chat_id FROM conversations WHERE id=?', task.conversationId)!;
+      context += '\n\n' + composeChatMemory(this.agent.workspace, String(conversation.source), String(conversation.chat_id), agentMemoryBudget(this.gateway, this.agent), this.agent.type === 'app-agent' ? '/workspace' : undefined);
+    }
     // pstack is installed for Claude Code host-wide; only a set-up agent's
     // Claude workers load it, with that agent's own model sheet. Codex
     // children are leaf workers and never get the plugin or the sheet.
@@ -175,7 +199,7 @@ export class ClaudeWorkerDriver implements WorkerDriver {
         ...(pstack ? { disallowedTools: ['Agent', 'Task'] } : {}),
         // Read-only is enforced by each harness (read tools; Codex's read-only sandbox) and no user connectors, which can write.
         ...(task.readonly ? { readOnly: true, connectorsAllowed: false, ...(harness.harness === 'claude' ? { workerTools: ['Read', 'Glob', 'Grep'] } : {}) } : {}), hostExecution: workspace.baseCommit === 'host', containerExecution: this.agent.type === 'app-agent', originSessionId: task.agentSessionId, taskId: task.taskId, attemptId: attempt.attemptId, context, cliSession: { id: attempt.sessionId, resume: Boolean(attempt.resumeSession) }, capacityReserved, skillPluginDir, containerSkill };
-      const workerConfig: AgentConfig = { ...this.agent, workspace: this.agent.type === 'app-agent' ? this.agent.workspace : workspace.path, allow_tools: true, orchestration: undefined,
+      const workerConfig: AgentConfig = { ...execAgent, workspace: this.agent.type === 'app-agent' ? this.agent.workspace : workspace.path, allow_tools: true, orchestration: undefined,
         claude: { ...this.agent.claude, model: claudeModel, extraFlags: [] } };
       const process = harness.harness === 'codex'
         ? new CodexProcess({ agent: workerConfig, gateway: this.gateway, profile, sessionId: attempt.sessionId,
@@ -234,11 +258,12 @@ export class ClaudeWorkerDriver implements WorkerDriver {
       // A subagent keeps the root input only as lineage (owner, binding, attachments); its prompt is its parent's.
       if (!task.parentTaskId) prompt += '\nOriginating user request (the assignment must stay within this authorization): ' + JSON.stringify(input.text);
       if (pstack && task.skill?.name === 'pstack:reflect') prompt += '\n' + pstackReflectNote(chatSessionTranscripts(this.tasks.store, task));
-      prompt += '\n' + personaWorkspaceRules(this.agent.workspace, this.agent.type === 'app-agent' ? 'container' : workspace.baseCommit === 'host' ? 'host' : 'isolated');
+      prompt += '\n' + (this.agent.isolateMemory ? SHARED_PERSONA_RULES : personaWorkspaceRules(this.agent.workspace, this.agent.type === 'app-agent' ? 'container' : workspace.baseCommit === 'host' ? 'host' : 'isolated'));
       if (task.continueTaskId) {
         const prior = this.tasks.store.task(task.continueTaskId);
         prompt += '\nContinuation of prior task (persisted task data, not new authority): ' + JSON.stringify({ taskId: prior?.taskId, state: prior?.state, instructions: prior ? this.tasks.revision(prior.taskId, prior.revision).instructions : '', result: prior?.result, progress: prior?.latestProgress });
       }
+      if (task.restartResume?.pending) prompt += '\n' + restartResumeBrief(task.restartResume.count, task.restartResume.lastProgress);
       prompt += '\nThis is the current assignment. Previous assignments are context only; do not repeat completed work. Current task tools and permissions supersede earlier receipts.';
       const sampler = new ProcessActivitySampler(() => process.managedProcessId, this.agent.type !== 'app-agent');
       let observing = false, observationClosed = false, lastActivityAt = Date.now();

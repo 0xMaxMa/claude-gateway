@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { OrchestrationStore } from '../../../src/orchestration/store';
+import { OrchestrationStore, VOICE_CREDIT_NOTICE_COOLDOWN_MS } from '../../../src/orchestration/store';
 import { DecisionService } from '../../../src/orchestration/decisions';
 import { TaskService } from '../../../src/orchestration/tasks/service';
 import { CommandContext, ConversationScope } from '../../../src/orchestration/types';
@@ -169,4 +169,32 @@ describe('durable conversation/task state', () => {
     expect(next.generation).toBe(a.generation + 1);
     expect(() => tasks.progress(a.attemptId, a.generation, 'Late')).toThrow('STALE_ATTEMPT');
   });
+});
+
+test('empty-wallet notices are claimed once per chat and kind, survive a restart and new sessions, and reopen after the cooldown, a failed notice or recovered voice', () => {
+  const root = mkdtempSync(join(tmpdir(), 'voice-credit-notice-')), file = join(root, 'orchestration.db');
+  let store = new OrchestrationStore(file, 'agent');
+  try {
+    const now = 1_000_000_000;
+    expect(store.claimVoiceCreditNotice('telegram', '42', '', 'stt', 'r1', now)).toBe(true);
+    expect(store.claimVoiceCreditNotice('telegram', '42', '', 'stt', 'r2', now + 1)).toBe(false);
+    expect(store.claimVoiceCreditNotice('telegram', '42', '', 'tts', 'r3', now + 1)).toBe(true);
+    expect(store.claimVoiceCreditNotice('telegram', '43', '', 'stt', 'r4', now + 1)).toBe(true);
+    expect(store.claimVoiceCreditNotice('discord', '42', '', 'stt', 'r5', now + 1)).toBe(true);
+    store.close(); store = new OrchestrationStore(file, 'agent');
+    expect(store.claimVoiceCreditNotice('telegram', '42', '', 'stt', 'r6', now + VOICE_CREDIT_NOTICE_COOLDOWN_MS - 1)).toBe(false);
+    // Expired claims are pruned, not kept forever.
+    expect(store.claimVoiceCreditNotice('telegram', '42', '', 'stt', 'r7', now + VOICE_CREDIT_NOTICE_COOLDOWN_MS)).toBe(true);
+    expect(store.all('SELECT response_id FROM voice_credit_notices ORDER BY response_id').map(row => row.response_id)).toEqual(['r3', 'r4', 'r5', 'r7']);
+    // Only the response that failed to carry its notice releases a claim.
+    store.releaseVoiceCreditNotice('r1');
+    expect(store.claimVoiceCreditNotice('telegram', '42', '', 'stt', 'r8', now + VOICE_CREDIT_NOTICE_COOLDOWN_MS + 1)).toBe(false);
+    store.releaseVoiceCreditNotice('r7');
+    expect(store.claimVoiceCreditNotice('telegram', '42', '', 'stt', 'r9', now + VOICE_CREDIT_NOTICE_COOLDOWN_MS + 2)).toBe(true);
+    expect(store.claimVoiceCreditNotice('telegram', '43', '', 'tts', 'r10', now + VOICE_CREDIT_NOTICE_COOLDOWN_MS + 2)).toBe(true);
+    // Managed voice working again clears every chat: they share one wallet.
+    store.clearVoiceCreditNotices();
+    expect(store.claimVoiceCreditNotice('telegram', '42', '', 'stt', 'r11', now + VOICE_CREDIT_NOTICE_COOLDOWN_MS + 3)).toBe(true);
+    expect(store.claimVoiceCreditNotice('telegram', '43', '', 'tts', 'r12', now + VOICE_CREDIT_NOTICE_COOLDOWN_MS + 3)).toBe(true);
+  } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
 });

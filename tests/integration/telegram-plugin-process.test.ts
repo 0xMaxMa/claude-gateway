@@ -392,6 +392,27 @@ describe.each([{orchestration:true,interactive:false},{orchestration:false,inter
     expect(notification.params.meta.message_id).toBe('42')
   }, 30000)
 
+  test('inbound document → its file_id is logged for that chat (isolate-mode download allowlist, #609)', async () => {
+    const now = Math.floor(Date.now() / 1000)
+    mock.queueUpdate({
+      message: {
+        message_id: 43,
+        from: { id: Number(USER_ID), username: 'tester', is_bot: false, first_name: 'Tester' },
+        chat: { id: Number(USER_ID), type: 'private' },
+        date: now,
+        caption: 'a file',
+        document: { file_id: 'DOC_FILE_ID_1', file_unique_id: 'u1', file_name: 'a.csv', file_size: 10 },
+      },
+    })
+    const notification = await mcp.wait<any>(
+      m => (m as any).method === 'notifications/claude/channel' && (m as any).params?.meta?.attachment_file_id === 'DOC_FILE_ID_1',
+      20000,
+    )
+    expect(notification.params.meta.chat_id).toBe(USER_ID)
+    const logged = JSON.parse(fs.readFileSync(path.join(tmpDir, 'attachments', `${USER_ID}.json`), 'utf8'))
+    expect(logged).toContain('DOC_FILE_ID_1')
+  }, 30000)
+
   // ── test 3 ──────────────────────────────────────────────────────────────
 
   test('reply tool → sendMessage sent to Telegram API', async () => {

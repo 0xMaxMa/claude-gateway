@@ -394,6 +394,29 @@ describe('dreaming/DreamingManager.dreamOnce', () => {
     }
   });
 
+  it('D-MGR-1d: disableArchive (#609) applies locally but promotes nothing to the shared vault', async () => {
+    const ws = mkWs({ 'MEMORY.md': '# Memory\n', 'USER.md': 'u' });
+    try {
+      const db = makeDb([{ sessionId: 's1', lastActivity: NOW - 2 * HOUR }], {
+        s1: [{ role: 'user', content: 'shared team convention', ts: NOW - 2 * HOUR }],
+      });
+      const spawn = scriptedSpawn({
+        summary: 's',
+        proposals: [{ op: 'add', file: 'MEMORY.md', content: '- team uses trunk-based dev', reason: 'convention', score: 0.9, recallCount: 3 }],
+      });
+      const promoted: string[] = [];
+      const mgr = new DreamingManager({
+        db, agentId: 'a', workspaceDir: ws, globalCfg: { mode: 'auto' }, spawnFn: spawn,
+        sharedPromote: (p) => promoted.push(p.content ?? ''), disableArchive: true,
+      });
+      await mgr.dreamOnce(NOW);
+      expect(fs.readFileSync(path.join(ws, 'MEMORY.md'), 'utf8')).toContain('- team uses trunk-based dev');
+      expect(promoted).toEqual([]);
+    } finally {
+      fs.rmSync(ws, { recursive: true });
+    }
+  });
+
   it('D-MGR-2: caps proposals at maxChangesPerRun', async () => {
     const ws = mkWs({ 'MEMORY.md': 'm' });
     try {

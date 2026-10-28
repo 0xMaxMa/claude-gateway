@@ -93,6 +93,7 @@ export function visionRequestBody(model: string, messages: unknown[]) {
 }
 
 export type VisionAction =
+  | { kind: 'open'; appId: string }
   | { kind: 'pointer'; op: 'click' | 'double_click' | 'right_click' | 'move' | 'drag'; x: number; y: number; to_x?: number; to_y?: number; modifiers?: string[] }
   | { kind: 'scroll'; x: number; y: number; dx?: number; dy?: number }
   | { kind: 'key_chord'; keys: string[] }
@@ -136,8 +137,12 @@ const modifierList = (text: unknown, caps: RawCapabilities): string[] | undefine
 
 /** Map one computer-toolset member call to the helper protocol, gated on the advertised capabilities and bounded
  * by the screenshot it refers to. Coordinates are only accepted inside that screenshot. */
-export function mapComputerCall(name: string, input: unknown, caps: RawCapabilities, shot: VisionScreenshot): MappedCall {
+export function mapComputerCall(name: string, input: unknown, caps: RawCapabilities, shot: VisionScreenshot, apps: ComputerState['apps'] = []): MappedCall {
   const args = (input && typeof input === 'object' && !Array.isArray(input) ? input : {}) as Record<string, unknown>;
+  if (name === 'open_application') {
+    const appId = args.app_id;
+    return typeof appId === 'string' && apps.some(app => app.id === appId) ? { action: { kind: 'open', appId } } : { error: 'APPLICATION_NOT_ALLOWED' };
+  }
   const point = (value: unknown): [number, number] | undefined => {
     if (!Array.isArray(value) || value.length !== 2 || !value.every(n => typeof n === 'number' && Number.isFinite(n))) return;
     const [x, y] = value.map(n => Math.round(n as number));
@@ -193,8 +198,14 @@ export function mapComputerCall(name: string, input: unknown, caps: RawCapabilit
 }
 
 /** A Messages response, trimmed to what the loop reads. */
-export interface VisionTurn { content: unknown[]; stopReason?: string }
-export type VisionDecide = (messages: unknown[], signal: AbortSignal) => Promise<VisionTurn>;
+export interface VisionTurn { content: unknown[]; stopReason?: string;
+  /** More actions of the same decision follow (a Jev click, select-all and type): a run that returns control after
+   * each action returns after the last of them instead. */
+  continues?: boolean }
+/** What the loop is looking at, for deciders that do not read the conversation (Jev): the goal and earlier context, the observation and
+ * its screenshot, and whether the decider's previous call ran an action (`completed`) or not (`not_run`). */
+export interface VisionView { goal: string; context?: string; state: ComputerState; shot: VisionScreenshot; previous?: 'completed' | 'not_run' }
+export type VisionDecide = (messages: unknown[], signal: AbortSignal, view: VisionView) => Promise<VisionTurn>;
 export interface VisionDecisionEvent {
   model: string; elapsedMs: number; outcome: 'completed' | 'failed'; errorCode?: string; requestBytes: number; images: number;
   usage?: { input_tokens: number; output_tokens: number }; stopReason?: string;
@@ -281,6 +292,11 @@ export function controlAt(state: ComputerState, shot: VisionScreenshot, x: numbe
 /** The action as the impact question reads it, the label the user is asked about, and its exact target (kind, window,
  * control and position, hashed as in runComputerUse): a yes covers only this. Sensitive fields contribute no text. */
 export function describeVisionAction(action: VisionAction, state: ComputerState, shot: VisionScreenshot) {
+  if (action.kind === 'open') {
+    const app = state.apps.find(candidate => candidate.id === action.appId);
+    const name = app?.name ?? action.appId;
+    return { command: `open or activate ${name}`, label: name.slice(0, 200), target: createHash('sha256').update(JSON.stringify(['open', action.appId])).digest('hex').slice(0, 32) };
+  }
   const control = action.kind === 'pointer' || action.kind === 'scroll' ? controlAt(state, shot, action.x, action.y) : state.controls.find(c => c.ref === state.focusedControl?.ref) ?? state.controls.find(c => c.focused);
   const named = control && !control.sensitive ? `${JSON.stringify(control.label.slice(0, 120))} (${control.role})` : control ? `a sensitive ${control.role}` : undefined;
   const command = action.kind === 'pointer' ? `${action.op.replace('_', ' ')}${action.modifiers ? ' with ' + action.modifiers.join('+') : ''} ${named ? 'on ' + named : `at (${action.x}, ${action.y})`}${action.op === 'drag' ? ` to (${action.to_x}, ${action.to_y})` : ''}`
@@ -317,7 +333,7 @@ export function withRecentImages(messages: unknown[], max = VISION_MAX_IMAGES): 
   }
   return out;
 }
-const progressAction = (action: VisionAction): ComputerProgress['action'] => action.kind === 'pointer' ? 'press' : action.kind === 'scroll' ? 'scroll' : action.kind === 'key_chord' ? 'key' : 'type';
+const progressAction = (action: VisionAction): ComputerProgress['action'] => action.kind === 'open' ? 'open' : action.kind === 'pointer' ? 'press' : action.kind === 'scroll' ? 'scroll' : action.kind === 'key_chord' ? 'key' : 'type';
 type ToolUse = { type: 'tool_use'; id: string; name: string; input?: unknown; toolset_name?: string };
 
 /** Vision Computer Use: the model sees the window screenshot (plus Accessibility boxes in hybrid mode) and answers with
@@ -380,12 +396,14 @@ export async function runVisionComputerUse(raw: unknown, deps: VisionDependencie
     if ('error' in seen) return fallback(seen.error);
     const goal = `<goal>\n${input.goal}\n</goal>${input.interactionContext ? `\n<earlier_context>\n${input.interactionContext}\n</earlier_context>` : ''}`;
     messages.push({ role: 'user', content: [{ type: 'text', text: goal }, stateText(seen.state, seen.shot), image(seen.shot)] });
-    let nudged = false;
+    let nudged = false, previous: VisionView['previous'];
     for (;;) {
       round++; check(); checkInterruption(deps.interruptSignal);
       if (round > maxTurns) return result('blocked', 'LOOP_CYCLE_BUDGET');
       emit('evaluating', { decisionMode: 'model', targetGeneration: seen.state.generation });
-      const turn = await interruptible(child => deps.decide(withRecentImages(messages), child), runSignal, deps.interruptSignal); evaluations++;
+      const view: VisionView = { goal: input.goal, ...(input.interactionContext ? { context: input.interactionContext } : {}), state: seen.state, shot: seen.shot, ...(previous ? { previous } : {}) };
+      previous = 'not_run';
+      const turn = await interruptible(child => deps.decide(withRecentImages(messages), child, view), runSignal, deps.interruptSignal); evaluations++;
       check();
       // Append-only, as the model returned it: models with preserved thinking require the exact prior content.
       messages.push({ role: 'assistant', content: turn.content });
@@ -422,7 +440,7 @@ export async function runVisionComputerUse(raw: unknown, deps: VisionDependencie
       } else if (use.toolset_name === undefined) {
         answer(use, 'ACTION_NOT_SUPPORTED', true);
       } else {
-        const mapped = mapComputerCall(use.name, use.input, caps!, seen.shot);
+        const mapped = mapComputerCall(use.name, use.input, caps!, seen.shot, seen.state.apps);
         if ('screenshot' in mapped) {
           const failed = await fresh(use, 'Current window.', false);
           if (failed) return result('blocked', failed);
@@ -436,7 +454,7 @@ export async function runVisionComputerUse(raw: unknown, deps: VisionDependencie
           answer(use, `${mapped.error}: not run. Use another action.`, true);
         } else {
           const action = mapped.action, generation = seen.state.generation;
-          const summary: Partial<ComputerProgress> = { targetGeneration: generation, application: seen.state.application, action: progressAction(action), ...(action.kind === 'key_chord' ? { key: action.keys.join('+') } : {}) };
+          const summary: Partial<ComputerProgress> = { targetGeneration: generation, application: seen.state.application, action: progressAction(action), ...(action.kind === 'open' ? { appId: action.appId } : {}), ...(action.kind === 'key_chord' ? { key: action.keys.join('+') } : {}) };
           emit('decided', { ...summary, decisionMode: 'model' });
           // The Accessibility gate (runComputerUse): nobody spelled this action out, so its impact is judged on the
           // observed window before it runs; anything not confidently routine waits for the user's yes to exactly it.
@@ -461,7 +479,8 @@ export async function runVisionComputerUse(raw: unknown, deps: VisionDependencie
           check(); checkInterruption(deps.interruptSignal);
           pending = operationId; emit('acting', { ...summary, operationId }); const started = Date.now();
           let receipt: z.infer<typeof Receipt>, rejected: string | undefined;
-          try { receipt = Receipt.parse(await call('computer_action', { ...action, generation, operation_id: operationId })); }
+          const nativeAction = action.kind === 'open' ? { kind: 'open', app_id: action.appId } : action;
+          try { receipt = Receipt.parse(await call('computer_action', { ...nativeAction, generation, operation_id: operationId })); }
           // A refusal before dispatch (raw input switched off included) is confirmed against the receipt store below.
           catch (error) { receipt = { state: 'unknown' }; if (error instanceof Error && (PRE_DISPATCH_REJECTIONS.has(error.message) || RAW_UNAVAILABLE.has(error.message))) rejected = error.message; }
           if (receipt.state === 'unknown') {
@@ -493,10 +512,12 @@ export async function runVisionComputerUse(raw: unknown, deps: VisionDependencie
             const failed = await fresh(use, `${refusal}: the action was not run. This is the current window.`, true);
             if (failed) return result('blocked', failed);
           } else {
-            steps++; refusals = 0;
+            steps++; refusals = 0; previous = 'completed';
             lastAction = { kind: action.kind, ...(action.kind === 'key_chord' ? { key: action.keys.join('+') } : {}), ...(action.kind === 'scroll' ? { direction: action.dy ? (action.dy > 0 ? 'down' : 'up') : (action.dx! > 0 ? 'right' : 'left') } : {}) };
             emit('acted', { ...summary, operationId, outcome: 'completed', elapsedMs: Date.now() - started });
-            if (steps >= input.maxSteps || input.yieldAfterAction) {
+            // A decision under way (select-all done, typing next) is finished first: stopping between its actions
+            // could leave a field's text selected for whatever comes next. Its actions are bounded and each is judged.
+            if (!turn.continues && (steps >= input.maxSteps || input.yieldAfterAction)) {
               try { await observe(); await deps.screenshot(last!, runSignal); } catch { check(); checkInterruption(deps.interruptSignal); emit('waiting', { reason: 'GOAL_EVIDENCE_UNAVAILABLE' }); }
               // The agent decides the next step on the new screen, as after an Accessibility action.
               return input.yieldAfterAction ? result('needs_input', 'COMMAND_WAITING_INPUT') : result('blocked', 'STEP_LIMIT');
@@ -519,4 +540,3 @@ export async function runVisionComputerUse(raw: unknown, deps: VisionDependencie
     if (lease) for (let attempt = 0; attempt < 2; attempt++) { try { await deps.call('computer_release', { lease_token: lease }, AbortSignal.timeout(2000)); break; } catch { /* Retry once; the owner can still stop access on the Mac. */ } }
   }
 }
-

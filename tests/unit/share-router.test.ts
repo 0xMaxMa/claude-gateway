@@ -54,11 +54,11 @@ describe('file share router', () => {
 
   const request = () => supertest.default(app);
 
-  const buildApp = (publicOpts: { ratePerMinute?: number } = {}) => {
+  const buildApp = (publicOpts: { ratePerMinute?: number } = {}, isolated = false) => {
     const a = express();
     a.use(express.json());
     a.use(createSharesPublicRouter(store, baseDir, publicOpts));
-    a.use('/api', createSharesPrivateRouter(store, KEYS, baseDir, BASE_URL));
+    a.use('/api', createSharesPrivateRouter(store, KEYS, baseDir, BASE_URL, undefined, (id) => isolated && id === AGENT));
     return a;
   };
 
@@ -467,6 +467,80 @@ describe('file share router', () => {
     });
   });
 
+  describe('isolate_memory session scoping (#609)', () => {
+    const OWN = 'sess-own';
+    const OTHER = 'sess-other';
+    const CHANNEL = 'sess-tg';
+    const media = (dir: string, file: string) => {
+      fs.mkdirSync(path.join(baseDir, AGENT, 'media', dir), { recursive: true });
+      fs.writeFileSync(path.join(baseDir, AGENT, 'media', dir, file), PNG);
+      return path.join(baseDir, AGENT, 'media', dir, file);
+    };
+    const isolatedApp = (isolated: boolean) => {
+      const a = express();
+      a.use(express.json());
+      a.use('/api', createSharesPrivateRouter(store, KEYS, baseDir, BASE_URL, undefined, (id) => isolated && id === AGENT));
+      return a;
+    };
+    const mint = (a: express.Application, session: string, ref: string) =>
+      supertest.default(a).post('/api/v1/shares').set(AUTH_A1).send({ agent_id: AGENT, session_id: session, refs: [{ path: ref }] });
+    const register = (a: express.Application, session: string, file: string) =>
+      supertest.default(a).post('/api/v1/image-artifacts').set(AUTH_A1).send({ agent_id: AGENT, session_id: session, provider: 'p', model: 'm', files: [file] });
+
+    beforeEach(() => {
+      media(`api-${OWN}`, 'own.png');
+      media(`api-${OTHER}`, 'theirs.png');
+      media('telegram-42', 'inbound.png');
+      HistoryDB.forAgent(baseDir, AGENT).insertMessage({
+        chatId: 'telegram-42', sessionId: CHANNEL, source: 'telegram', role: 'user', content: 'hi', ts: 1_700_000_000_000,
+      });
+    });
+
+    test("a session shares and registers only files in its own media dirs", async () => {
+      const a = isolatedApp(true);
+      expect((await mint(a, OWN, `api-${OWN}/own.png`)).status).toBe(201);
+      expect((await mint(a, OWN, path.join(baseDir, AGENT, 'media', `api-${OWN}`, 'own.png'))).status).toBe(201);
+      const foreign = await mint(a, OWN, `api-${OTHER}/theirs.png`);
+      expect(foreign.status).toBe(400);
+      expect(foreign.body.code).toBe('invalid_path');
+      expect((await mint(a, OWN, 'telegram-42/inbound.png')).status).toBe(400);
+      expect((await mint(a, OWN, `${SESSION}/ok.png`)).status).toBe(400);
+      // A channel session owns `<channel>-<chatId>` (inbound media) and its api dir.
+      expect((await mint(a, CHANNEL, 'telegram-42/inbound.png')).status).toBe(201);
+      expect((await mint(a, CHANNEL, `api-${OWN}/own.png`)).status).toBe(400);
+      expect((await register(a, OWN, path.join(baseDir, AGENT, 'media', `api-${OWN}`, 'own.png'))).status).toBe(201);
+      expect((await register(a, OWN, path.join(baseDir, AGENT, 'media', `api-${OTHER}`, 'theirs.png'))).status).toBe(400);
+    });
+
+    test('a symlink in the own dir pointing at another session is refused', async () => {
+      const link = path.join(baseDir, AGENT, 'media', `api-${OWN}`, 'link.png');
+      fs.symlinkSync(path.join(baseDir, AGENT, 'media', `api-${OTHER}`, 'theirs.png'), link);
+      const a = isolatedApp(true);
+      expect((await mint(a, OWN, `api-${OWN}/link.png`)).status).toBe(400);
+      expect((await register(a, OWN, link)).status).toBe(400);
+    });
+
+    test('revoking needs the owning session for a non-admin key', async () => {
+      const a = isolatedApp(true);
+      const minted = await mint(a, OWN, `api-${OWN}/own.png`);
+      const id = minted.body.items[0].share_id as string;
+      const del = (query: string, auth = AUTH_A1) => supertest.default(a).delete(`/api/v1/shares/${id}${query}`).set(auth);
+      expect((await del('')).status).toBe(404);
+      expect((await del(`?session_id=${OTHER}`)).status).toBe(404);
+      expect((await del(`?session_id=${OWN}`)).status).toBe(200);
+      const again = await mint(a, OWN, `api-${OWN}/own.png`);
+      const res = await supertest.default(a).delete(`/api/v1/shares/${again.body.items[0].share_id}`).set({ Authorization: 'Bearer admin-key' });
+      expect(res.status).toBe(200);
+    });
+
+    test('a non-isolated agent keeps agent-wide media access', async () => {
+      const a = isolatedApp(false);
+      expect((await mint(a, OWN, `api-${OTHER}/theirs.png`)).status).toBe(201);
+      const minted = await mint(a, OWN, `api-${OWN}/own.png`);
+      expect((await supertest.default(a).delete(`/api/v1/shares/${minted.body.items[0].share_id}`).set(AUTH_A1)).status).toBe(200);
+    });
+  });
+
   describe('revoke (§10)', () => {
     test('owner revokes → public URL dies; foreign key sees uniform 404', async () => {
       const item = await mintOne();
@@ -833,6 +907,96 @@ describe('file share router', () => {
         // must not be able to throw on any input) degrades instead of throwing.
         expect(() => attachmentDisposition('x\uD800.pdf', 'application/pdf')).not.toThrow();
       });
+    });
+  });
+
+  describe('arbitrary file shares', () => {
+    test('shares a workspace file larger than the legacy 20 MiB cap and streams ranges', async () => {
+      const workspace = path.join(baseDir, AGENT, 'workspace');
+      fs.mkdirSync(workspace, { recursive: true });
+      const file = path.join(workspace, 'disk.iso');
+      const fd = fs.openSync(file, 'w');
+      const fileSize = 2_040_109_466;
+      fs.ftruncateSync(fd, fileSize);
+      fs.writeSync(fd, Buffer.from('ISO-DATA'), 0, 8, 0);
+      fs.closeSync(fd);
+
+      const minted = await request().post('/api/v1/shares').set(AUTH_A1).send({
+        agent_id: AGENT,
+        session_id: SESSION,
+        refs: [{ path: file }],
+        allow_all_files: true,
+      }).expect(201);
+      const url = sharedPath(minted.body.items[0].url);
+      const range = await request().get(url).set('Range', 'bytes=0-7').expect(206);
+      expect(range.headers['content-range']).toBe(`bytes 0-7/${fileSize}`);
+      expect(range.headers['content-type']).toBe('application/octet-stream');
+      expect(range.headers['content-disposition']).toContain('attachment;');
+      expect(range.headers['content-disposition']).toContain('disk.iso');
+      expect(range.body).toEqual(Buffer.from('ISO-DATA'));
+    });
+
+    test('downloads active HTML as a non-active attachment', async () => {
+      for (const [name, content] of [['page.html', HTML], ['active.svg', Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>')]] as const) {
+        fs.writeFileSync(path.join(mediaDir, name), content);
+        const minted = await request().post('/api/v1/shares').set(AUTH_A1).send({
+          agent_id: AGENT,
+          session_id: SESSION,
+          refs: [{ path: `${SESSION}/${name}` }],
+          allow_all_files: true,
+        }).expect(201);
+        const res = await request().get(sharedPath(minted.body.items[0].url)).expect(200);
+        expect(res.headers['content-type']).toBe('application/octet-stream');
+        expect(res.headers['content-disposition']).toContain('attachment;');
+        expect(res.headers['content-disposition']).not.toContain(name);
+        expect(res.headers['x-content-type-options']).toBe('nosniff');
+      }
+    });
+
+    test('rejects a workspace symlink escape', async () => {
+      const workspace = path.join(baseDir, AGENT, 'workspace');
+      fs.mkdirSync(workspace, { recursive: true });
+      const outside = path.join(baseDir, 'secret.bin');
+      fs.writeFileSync(outside, 'secret');
+      const link = path.join(workspace, 'secret.bin');
+      fs.symlinkSync(outside, link);
+      const res = await request().post('/api/v1/shares').set(AUTH_A1).send({
+        agent_id: AGENT,
+        session_id: SESSION,
+        refs: [{ path: link }],
+        allow_all_files: true,
+      });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_path');
+    });
+
+    test('isolated agents cannot share files from the shared workspace', async () => {
+      const workspace = path.join(baseDir, AGENT, 'workspace');
+      fs.mkdirSync(workspace, { recursive: true });
+      const file = path.join(workspace, 'private.dat');
+      fs.writeFileSync(file, 'private');
+      app = buildApp({}, true);
+      const res = await request().post('/api/v1/shares').set(AUTH_A1).send({
+        agent_id: AGENT,
+        session_id: SESSION,
+        refs: [{ path: file }],
+        allow_all_files: true,
+      });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_path');
+    });
+
+    test('shares an empty file without a stream range error', async () => {
+      fs.writeFileSync(path.join(mediaDir, 'empty.iso'), Buffer.alloc(0));
+      const minted = await request().post('/api/v1/shares').set(AUTH_A1).send({
+        agent_id: AGENT,
+        session_id: SESSION,
+        refs: [{ path: `${SESSION}/empty.iso` }],
+        allow_all_files: true,
+      }).expect(201);
+      const res = await request().get(sharedPath(minted.body.items[0].url)).expect(200);
+      expect(res.headers['content-length']).toBe('0');
+      expect(res.body).toEqual(Buffer.alloc(0));
     });
   });
 

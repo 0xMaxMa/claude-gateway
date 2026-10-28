@@ -340,9 +340,9 @@ export function normalizeTelegramLineBreaks(text: string): string {
 }
 
 /** Commands the receiver answers itself, in a direct message only (and `cli` where the terminal viewer is on). */
-const DM_ONLY_COMMANDS = ['start', 'help', 'status', 'model', 'models', 'clear', 'compact', 'restart', 'session', 'sessions', 'tasks', 'voice', 'voices']
-/** Commands forwarded to the gateway, which answers them in a group as well. */
-const GROUP_COMMANDS = ['stop', 'new', 'rename', 'pstack_setup', 'pstack-setup']
+const DM_ONLY_COMMANDS = ['start', 'help', 'status', 'models', 'clear', 'compact', 'restart', 'session', 'sessions', 'tasks', 'voice', 'voices', 'call']
+/** Commands explicitly addressed to this bot, including receiver-handled group model queries. */
+const GROUP_COMMANDS = ['stop', 'new', 'rename', 'model', 'pstack_setup', 'pstack-setup']
 
 /** The leading `/name` or `/name@<this bot>` of a message, lowercased; undefined when there is none or it names another bot. */
 export function leadingCommand(text: string, botUsername: string): string | undefined {
@@ -362,6 +362,33 @@ export function stripCommandTarget(text: string, botUsername: string): string {
   return match && botUsername && match[2]!.toLowerCase() === botUsername.toLowerCase() ? match[1] + text.slice(match[0].length) : text
 }
 
+export type GroupCommandInput = { chatType?: string; chatId: string; fromId: string; text: string; botUsername: string }
+
+/** Whether the existing Telegram access policy would deliver a model query in this group. */
+export function isGroupCommandAllowed(access: Access, input: GroupCommandInput): boolean {
+  if (input.chatType !== 'group' && input.chatType !== 'supergroup') return false
+  const copy: Access = { ...access, pairing: false, requireMention: false, pending: { ...access.pending } }
+  const verdict = gateLogic({ fromId: input.fromId, chatType: input.chatType, chatId: input.chatId, botUsername: input.botUsername, messageText: input.text },
+    () => copy, () => {}, () => { throw Error('NO_PAIRING_IN_GROUP_COMMAND_REPLY') })
+  return verdict.action === 'deliver'
+}
+
+/** Telegram's reply for a group model command after the existing access gate passes. */
+export function telegramGroupModelReply(access: Access, input: GroupCommandInput, currentModel?: string): string | undefined {
+  const name = leadingCommand(input.text, input.botUsername)
+  if (name === 'model') {
+    if (!isGroupCommandAllowed(access, input)) return undefined
+    if (input.text.trim().replace(/^\/model(?:@\w+)?/i, '').trim()) {
+      return '/model is only available in a direct message with the bot.'
+    }
+    return currentModel === undefined ? undefined : `Current model: ${currentModel}`
+  }
+  if (name === 'models' && isGroupCommandAllowed(access, input)) {
+    return '/models is only available in a direct message with the bot.'
+  }
+  return undefined
+}
+
 /**
  * The reply to a direct-message-only command typed in a group, or undefined.
  * Only a group whose messages the gate delivers gets one; others stay silent,
@@ -371,11 +398,9 @@ export function stripCommandTarget(text: string, botUsername: string): string {
 export function groupCommandReply(access: Access, input: { chatType?: string; chatId: string; fromId: string; text: string; botUsername: string; cliEnabled?: boolean }): string | undefined {
   if (input.chatType !== 'group' && input.chatType !== 'supergroup') return undefined
   const name = leadingCommand(input.text, input.botUsername)
+  if (name === 'model') return telegramGroupModelReply(access, input)
   if (!name || !(DM_ONLY_COMMANDS.includes(name) || (name === 'cli' && input.cliEnabled))) return undefined
-  const copy: Access = { ...access, pairing: false, requireMention: false, pending: { ...access.pending } }
-  const verdict = gateLogic({ fromId: input.fromId, chatType: input.chatType, chatId: input.chatId, botUsername: input.botUsername, messageText: input.text },
-    () => copy, () => {}, () => { throw Error('NO_PAIRING_IN_GROUP_COMMAND_REPLY') })
-  return verdict.action === 'deliver' ? `/${name} is only available in a direct message with the bot.` : undefined
+  return isGroupCommandAllowed(access, input) ? `/${name} is only available in a direct message with the bot.` : undefined
 }
 
 export function isMentionedPure(input: GateInput, extraPatterns?: string[]): boolean {

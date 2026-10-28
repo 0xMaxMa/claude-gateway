@@ -1,4 +1,5 @@
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, truncateSync } from 'fs';
+import fsPromises from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { OrchestrationStore } from '../../../src/orchestration/store';
@@ -249,7 +250,7 @@ test('uncorrelated, failed, forged assistant and container image output cannot b
 });
 
 
-test('worker PDF sharing reports a wrong media scope, then succeeds with the original workspace file through the MCP bridge', async () => {
+test.each(['pdf', 'iso'])('worker %s sharing reports a wrong media scope, then succeeds with the original workspace file through the MCP bridge', async extension => {
   const f = await fixture('api');
   const names = ['GATEWAY_API_URL', 'GATEWAY_ORCHESTRATION_ROLE', 'GATEWAY_ORCHESTRATION_TICKET_FILE'];
   const previous = Object.fromEntries(names.map(name => [name, process.env[name]]));
@@ -269,8 +270,11 @@ test('worker PDF sharing reports a wrong media scope, then succeeds with the ori
     const issued = bridge.issue({ role: 'worker', attemptId: a.attemptId, generation: a.generation }, directory, f.workspace);
     process.env.GATEWAY_ORCHESTRATION_ROLE = 'worker';
     process.env.GATEWAY_ORCHESTRATION_TICKET_FILE = join(directory, 'ticket.json');
-    const bytes = Buffer.from('%PDF-1.4\nfixture worksheet');
-    const original = join(f.path, '..', 'worksheet.pdf'); writeFileSync(original, bytes);
+    const bytes = Buffer.from(extension === 'iso' ? 'ISO fixture header' : '%PDF-1.4\nfixture worksheet');
+    const original = join(f.path, '..', `worksheet.${extension}`); writeFileSync(original, bytes);
+    if (extension === 'iso') truncateSync(original, 1_970_044_928);
+    // Simulate Linux protected_hardlinks for a readable root-owned source.
+    if (extension === 'iso') jest.spyOn(fsPromises, 'link').mockRejectedValue(Object.assign(new Error('protected hardlink'), { code: 'EPERM' }));
     const copied = join(f.root, 'agent', 'media', 'worksheet.pdf');
     mkdirSync(join(copied, '..'), { recursive: true }); writeFileSync(copied, bytes);
     const tool = new ShareFileModule();
@@ -284,11 +288,14 @@ test('worker PDF sharing reports a wrong media scope, then succeeds with the ori
     const staging = await fetch(ticket.url, { method: 'POST', headers: { Authorization: `Bearer ${ticket.token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ tool: 'task_stage_file', action_id: 'denied-pdf', args: { path: copied } }) });
     expect(await staging.json()).toMatchObject({ error: 'ARTIFACT_PATH_DENIED', message: expect.stringContaining('original file'), retryable: true });
     const created = await tool.handleTool('share_file', { path: original });
+    if (created.isError) throw new Error(created.content[0].text);
     expect(created.isError).toBeUndefined();
     const item = JSON.parse(created.content[0].text!).items[0];
-    const downloaded = await fetch(item.url);
-    expect(downloaded.status).toBe(200);
-    expect(downloaded.headers.get('content-type')).toContain('application/pdf');
+    const repeated = await tool.handleTool('share_file', { path: original });
+    expect(JSON.parse(repeated.content[0].text!).items[0].share_id).toBe(item.share_id);
+    const downloaded = await fetch(item.url, extension === 'iso' ? { headers: { Range: `bytes=0-${bytes.length - 1}` } } : undefined);
+    expect(downloaded.status).toBe(extension === 'iso' ? 206 : 200);
+    expect(downloaded.headers.get('content-type')).toContain(extension === 'iso' ? 'application/octet-stream' : 'application/pdf');
     expect(Buffer.from(await downloaded.arrayBuffer())).toEqual(bytes);
     expect((await tool.handleTool('share_file', { action: 'revoke', share_id: item.share_id })).isError).toBeUndefined();
     expect((await fetch(item.url)).status).toBe(404);
@@ -297,6 +304,7 @@ test('worker PDF sharing reports a wrong media scope, then succeeds with the ori
     expect(stale.isError).toBe(true);
     expect(stale.content[0].text).toContain('ACCESS_DENIED');
   } finally {
+    jest.restoreAllMocks();
     for (const name of names) if (previous[name] === undefined) delete process.env[name]; else process.env[name] = previous[name];
     await bridge.close(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); shares.close(); f.close();
   }

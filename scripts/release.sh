@@ -134,4 +134,5 @@ else
 fi
 
 echo ""
-echo "Released v$NEXT — GitHub Actions will publish to npm automatically."
+echo "Released v$NEXT — GitHub Actions will publish it to npm as 'latest'."
+echo "'claude-gateway update' follows 'stable'; run 'make promote' to move 'stable' to it."

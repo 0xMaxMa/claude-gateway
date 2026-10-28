@@ -5,6 +5,9 @@ import { resolveDreamingConfig } from './dreaming/config';
 import { presentedResponseError } from '../orchestration/response-errors';
 import { ChannelMediaError } from '../orchestration/channel-media-error';
 import { payloadHash, type AcceptInput } from '../orchestration/store';
+import { channelScope } from '../orchestration/identity';
+import type { VoiceScope } from '../voice/scope';
+import type { VoiceTurnHints } from '../voice/session';
 import { ORCHESTRATION_DEFAULTS } from '../orchestration/config';
 import { channelInputMedia } from '../orchestration/channel-input-media';
 import { chunkText } from '../telegram/chunks';
@@ -70,7 +73,9 @@ import { initialBudget, type BudgetState } from './recovery-policy';
 import { scrubText } from './incident';
 import { ptyStreamRegistry } from '../shell/pty-stream-registry';
 import { cliPairingStore, isCliChannel, type CliChannel } from '../cli-viewer/pairing-store';
-import { buildCliUrl } from '../cli-viewer/url';
+import { buildCliUrl, buildVoiceCallUrl, normalizePublicUrl } from '../cli-viewer/url';
+import { telegramVoiceCallsEnabled, voiceCallEndedText, voiceCallPairings } from '../voice/call-pairing';
+import { telegramBotAvatars } from '../voice/telegram-avatar';
 import { TUI_REQUEST_TOO_LARGE } from '../shell/screen';
 import { HistoryDB } from '../history/db';
 import { MediaStore } from '../history/media-store';
@@ -79,7 +84,7 @@ import { receiveChannelMedia } from '../orchestration/channel-media';
 import { scheduleCleanup, resolveRetentionDays } from '../history/cleanup';
 import type { HistorySource, ChatChannel, ChatChannelOrApi } from '../history/types';
 import { isChatChannel } from '../history/types';
-import type { SkillLearningManager } from './skill-learning';
+import { managedTurnSkills, toolUseSkills, type SkillLearningManager } from './skill-learning';
 import { spawnArchiveReindex } from './knowledge';
 import { resolveEnabledConnectors } from '../connectors/resolve';
 
@@ -410,6 +415,7 @@ export class AgentRunner extends EventEmitter {
 
   // Skill registry for detecting /skill-name commands in user messages
   private skillRegistry: SkillRegistry = { skills: new Map() };
+  private workspaceRecompose?: () => Promise<unknown>;
 
   // Skill self-improvement (planning-62). Optional — set by index.ts per agent.
   // All calls are guarded (`this.skillLearning?.`) and best-effort.
@@ -489,7 +495,7 @@ export class AgentRunner extends EventEmitter {
           },
           onManagedTurn: (sessionId, text, metrics, skills) => {
             const key = `orchestration:${sessionId}`;
-            this.skillLearning?.onTurnStart(key, sessionId, text, skills, metrics.startedAt);
+            this.skillLearning?.onTurnStart(key, sessionId, text, managedTurnSkills(skills, metrics.usedSkills, this.skillRegistry, metrics.usedSkillFiles), metrics.startedAt);
             for (const id of metrics.toolIds) this.skillLearning?.onToolUse(key, id);
             this.skillLearning?.onTokenUsage(key, metrics.inputTokens, metrics.totalTokens);
             this.skillLearning?.onTurnEnd(key, sessionId);
@@ -502,7 +508,8 @@ export class AgentRunner extends EventEmitter {
               await old.stop(); this.sessions.delete(key);
             }
             if (this.sessions.size >= this.maxConcurrent) throw new Error('Session pool full');
-            if (this.agentConfig.type !== 'app-agent') spawnArchiveReindex(this.agentConfig.workspace, this.agentConfig.knowledge, this.gatewayConfig.gateway.knowledge);
+            // Isolate mode (#601) and disableArchive (#609) offer no archive tool, so nothing would read the index.
+            if (this.agentConfig.type !== 'app-agent' && !this.agentConfig.isolateMemory && !this.agentConfig.disableArchive) spawnArchiveReindex(this.agentConfig.workspace, this.agentConfig.knowledge, this.gatewayConfig.gateway.knowledge);
             const agentSession = new SessionProcess(sessionId, scope?.source ?? 'api', this.agentConfig, this.gatewayConfig, this.sessionStore, scope?.chatId, profile);
             agentSession.historyLimit = resolveMaxHistoryMessages(this.agentConfig.history?.maxHistoryMessages, this.gatewayConfig.gateway.history?.maxHistoryMessages);
             if (model) agentSession.modelOverride = model;
@@ -546,18 +553,42 @@ export class AgentRunner extends EventEmitter {
   async authorizeVoiceSession(sessionId: string, principalId: string): Promise<void> {
     (await this.getOrchestration()).authorizeSession(sessionId, principalId);
   }
+  async voiceTts<T extends { provider: string; model: string; voiceId: string }>(scope: VoiceScope, tts: T): Promise<T> {
+    return (await this.getOrchestration()).telegramVoices.forScope(scope, tts);
+  }
   async subscribeVoiceResults(sessionId: string, principalId: string, receive: (result: { responseId: string; text: string; spoken: string; requestId?: string; speechOnly?: boolean }) => void, gender?: () => string | undefined): Promise<() => void> {
     return (await this.getOrchestration()).subscribeVoiceResults(sessionId, principalId, receive, gender);
   }
   recordVoicePlayback(responseId: string, principalId: string, progress: { generation: string; epoch: number; generatedSamples: number; playedSamples: number }, state: string): void {
     this.orchestration?.recordPlayback(responseId, principalId, progress, state);
   }
-  async submitVoiceUtterance(sessionId: string, chatId: string, principalId: string, text: string, utteranceId: string, allowTools: boolean, model?: string, executionTaskId?:string): Promise<{ inputId: string; response: Promise<string>; stream?: AsyncIterable<{ responseId: string; text: string }>; responseId(): string | undefined }> {
-    if (!this.agentConfig.orchestration?.enabled || !this.agentConfig.voice?.enabled) throw new Error('Voice is disabled');
-    if (!(await this.apiSessionExists(chatId, sessionId))) throw new Error('Session not found');
+  /** The Telegram session a DM call speaks in: the chat's active session, as for typed messages. */
+  async telegramVoiceSession(chatId: string): Promise<string> {
+    return this.sessionStore.getActiveSessionId(this.agentConfig.id, chatId, 'telegram');
+  }
+  /** A `/call` ended: a system notice with its length in the DM (or topic) the call joined. */
+  async notifyVoiceCallEnded(sessionId: string, scope: Extract<VoiceScope, { kind: 'telegram' }>, durationMs: number): Promise<void> {
     const orchestration = await this.getOrchestration();
-    const accepted = orchestration.submitInput({ scope: { agentId: this.agentConfig.id, agentSessionId: sessionId, source: 'api', accountId: principalId,
-      chatId, threadKey: '', principalId }, text, model, metadata:{executionTaskId}, modality: 'live_voice', ingressKey: `utterance:${utteranceId}` }, { execute: allowTools, writeMemory: false });
+    await orchestration.notifyChat(sessionId, 'telegram', scope.chatId, scope.threadKey, voiceCallEndedText(durationMs));
+  }
+  async submitVoiceUtterance(sessionId: string, voiceScope: VoiceScope, text: string, utteranceId: string, allowTools: boolean, model?: string, executionTaskId?:string, onMark?: (phase: string) => void, hints?: VoiceTurnHints): Promise<{ inputId: string; response: Promise<string>; stream?: AsyncIterable<{ responseId: string; text: string }>; responseId(): string | undefined }> {
+    if (!this.agentConfig.orchestration?.enabled || !this.agentConfig.voice?.enabled) throw new Error('Voice is disabled');
+    const { chatId, principalId } = voiceScope;
+    let scope: AcceptInput['scope'];
+    if (voiceScope.kind === 'telegram') {
+      // The call joins the DM it was opened from: the same conversation, delivery
+      // binding and membership as a message typed in that chat.
+      if (!telegramVoiceCallsEnabled(this.agentConfig)) throw new Error('Voice is disabled');
+      // /new or a session switch moves the chat; the call must not keep talking to the old session.
+      if (await this.telegramVoiceSession(chatId) !== sessionId) throw Object.assign(new Error('Voice session changed'), { code: 'VOICE_SESSION_CHANGED' });
+      scope = channelScope(this.agentConfig.id, sessionId, 'telegram', chatId, voiceScope.threadKey, principalId.slice('telegram:'.length));
+    } else {
+      if (!(await this.apiSessionExists(chatId, sessionId))) throw new Error('Session not found');
+      scope = { agentId: this.agentConfig.id, agentSessionId: sessionId, source: 'api', accountId: principalId, chatId, threadKey: '', principalId };
+    }
+    const orchestration = await this.getOrchestration();
+    const accepted = orchestration.submitInput({ scope, text, model, metadata:{executionTaskId, ...(hints?.fastAck ? { fastAck: true } : {})}, modality: 'live_voice', ingressKey: `utterance:${utteranceId}`,
+      ...(voiceScope.kind === 'telegram' ? { trustedChannelMember: true } : {}) }, { execute: allowTools, writeMemory: false }, undefined, onMark);
     // The browser refreshes history on utterance.accepted, before inference finishes.
     await orchestration.flushHistory();
     return { ...accepted, responseId: () => orchestration.responseIdForInput(accepted.inputId) };
@@ -730,10 +761,29 @@ export class AgentRunner extends EventEmitter {
       Number(process.env.CHANNEL_COALESCE_WINDOW_MS) || CHANNEL_COALESCE_WINDOW_MS;
   }
 
+  /** Wire this agent's CLAUDE.md + skill registry rebuild (src/index.ts, workspaceRecomposer). */
+  setWorkspaceRecomposer(recompose: () => Promise<unknown>): void {
+    this.workspaceRecompose = recompose;
+  }
+
+  /** Rebuild CLAUDE.md and the skill registry through the wired recomposer; false if none is wired. */
+  async recomposeWorkspace(): Promise<boolean> {
+    if (!this.workspaceRecompose) return false;
+    await this.workspaceRecompose();
+    return true;
+  }
+
   /**
-   * Update the skill registry used for detecting /skill-name commands.
+   * Update the skill registry used for detecting /skill-name commands. A workspace
+   * reload has no CLI/extension skills of its own: it keeps the last discovered ones
+   * until refreshCliSkillRegistry swaps in a new list.
    */
   setSkillRegistry(registry: SkillRegistry): void {
+    const previous = this.skillRegistry;
+    if (registry.cliSkills === undefined && previous.cliSkills !== undefined) {
+      const { cliSkills, cliDiscoveryError, extensionServers, extensionNotices } = previous;
+      Object.assign(registry, { cliSkills, extensionServers, extensionNotices }, cliDiscoveryError ? { cliDiscoveryError } : {});
+    }
     this.skillRegistry = registry;
   }
 
@@ -852,8 +902,8 @@ export class AgentRunner extends EventEmitter {
             const sessionId = await this.sessionStore.getActiveSessionId(this.agentConfig.id, chatId, channelSource);
             const runtime = await this.getOrchestration();
             const senderId = meta.user_id ?? meta.user ?? chatId;
-            const scope: AcceptInput['scope'] = {agentId:this.agentConfig.id,agentSessionId:sessionId,source:channelSource,
-              accountId:this.agentConfig.id,chatId,threadKey:channelSource==='whatsapp' && meta.account_id ? `whatsapp-account:${meta.account_id}` : meta.thread_ts ?? meta.message_thread_id ?? '',principalId:`${channelSource}:${senderId}`};
+            const scope = channelScope(this.agentConfig.id,sessionId,channelSource,chatId,
+              channelSource==='whatsapp' && meta.account_id ? `whatsapp-account:${meta.account_id}` : meta.thread_ts ?? meta.message_thread_id ?? '',senderId);
             const {ingress_recovery_batch,...originalMeta} = meta;
             let recoveryBatch = ingress_recovery_batch, recoveryKey = meta.message_id;
             const fingerprint = payloadHash({content,meta:originalMeta});
@@ -1421,6 +1471,23 @@ export class AgentRunner extends EventEmitter {
       return;
     }
 
+
+    // `/call` — the receiver has checked the DM sender against its allowlist.
+    // Mint a voice-call pairing for that user; the Mini App proves the same user
+    // again with signed initData before any ticket is issued.
+    if (command === 'voice_call_pair') {
+      const chatId = body.chat_id ?? '', userId = body.payload?.user_id, threadId = body.payload?.thread_id;
+      // Private chats only: a DM's chat id is its user id.
+      if (!/^\d+$/.test(chatId) || userId !== chatId || (threadId !== undefined && (typeof threadId !== 'string' || !/^\d+$/.test(threadId)))) { respond({ success: false, error: 'invalid_request' }, 400); return; }
+      if (!telegramVoiceCallsEnabled(this.agentConfig)) { respond({ success: false, error: 'voice_not_configured' }); return; }
+      // Telegram opens Mini Apps over HTTPS only.
+      if (!normalizePublicUrl(this.gatewayConfig.gateway.publicUrl)?.startsWith('https://')) { respond({ success: false, error: 'not_configured' }); return; }
+      respond({ success: true, url: buildVoiceCallUrl(this.gatewayConfig.gateway.publicUrl, voiceCallPairings.create(this.agentConfig.id, chatId, threadId ?? '')) });
+      // Look the bot up while the user taps the button, so the call page opens with its name and photo.
+      const botToken = this.agentConfig.telegram?.botToken;
+      if (botToken) void telegramBotAvatars.refresh(this.agentConfig.id, botToken);
+      return;
+    }
 
     if (command === 'get_model') {
       respond({ model: this.agentConfig.claude.model });
@@ -2221,6 +2288,7 @@ export class AgentRunner extends EventEmitter {
     source: ChatChannelOrApi,
     sessionId?: string,          // actual session UUID (only for channel sessions; equals mapKey for API)
     modelOverride?: string,      // per-session model override from SessionMeta
+    apiChatId?: string,          // API chat the session belongs to; keys its isolated memory (#601)
   ): Promise<SessionProcess> {
     // Normalize: treat agent-default model as "no override" so default sessions
     // don't restart unnecessarily when the frontend explicitly sends the default model.
@@ -2264,7 +2332,7 @@ export class AgentRunner extends EventEmitter {
           const respawn = (async () => {
             await existing.stop();          // idempotent on a dead child; closes watchers + signal file
             this.sessions.delete(mapKey);
-            return this.spawnSession(mapKey, source, sessionId, effectiveOverride);
+            return this.spawnSession(mapKey, source, sessionId, effectiveOverride, apiChatId);
           })();
           this.sessionSpawnLocks.set(mapKey, respawn);
           try {
@@ -2281,7 +2349,7 @@ export class AgentRunner extends EventEmitter {
         const respawn = (async () => {
           await existing.stop();
           this.sessions.delete(mapKey);
-          return this.spawnSession(mapKey, source, sessionId, effectiveOverride);
+          return this.spawnSession(mapKey, source, sessionId, effectiveOverride, apiChatId);
         })();
         this.sessionSpawnLocks.set(mapKey, respawn);
         try {
@@ -2295,7 +2363,7 @@ export class AgentRunner extends EventEmitter {
     }
 
     // No existing session — acquire lock for the spawn path
-    const spawnPromise = this.spawnSession(mapKey, source, sessionId, effectiveOverride);
+    const spawnPromise = this.spawnSession(mapKey, source, sessionId, effectiveOverride, apiChatId);
     this.sessionSpawnLocks.set(mapKey, spawnPromise);
     try {
       return await spawnPromise;
@@ -2309,6 +2377,7 @@ export class AgentRunner extends EventEmitter {
     source: ChatChannelOrApi,
     sessionId?: string,
     modelOverride?: string,
+    apiChatId?: string,
   ): Promise<SessionProcess> {
 
     // Evict oldest idle session if at capacity
@@ -2337,6 +2406,8 @@ export class AgentRunner extends EventEmitter {
       this.gatewayConfig,
       this.sessionStore,
       chatId,
+      undefined,
+      apiChatId,
     );
 
     // Apply per-session model override (caller already normalized to undefined when == agent default)
@@ -2344,7 +2415,8 @@ export class AgentRunner extends EventEmitter {
 
     // Keep the searchable memory archive (planning-64) fresh for the memory_search
     // tool. Fire-and-forget, detached, OFF the event loop — never blocks the spawn.
-    spawnArchiveReindex(
+    // Isolate mode (#601) and disableArchive (#609) offer no archive tool, so nothing would read the index.
+    if (!this.agentConfig.isolateMemory && !this.agentConfig.disableArchive) spawnArchiveReindex(
       this.agentConfig.workspace,
       this.agentConfig.knowledge,
       this.gatewayConfig.gateway.knowledge,
@@ -2504,6 +2576,7 @@ export class AgentRunner extends EventEmitter {
                 // completed blocks). Cheap, best-effort.
                 if (block.type === 'tool_use') {
                   this.skillLearning?.onToolUse(mapKey, (block as Record<string, unknown>)['id'] as string | undefined);
+                  for (const usedSkill of toolUseSkills(block, this.skillRegistry)) this.skillLearning?.onSkillUsed(mapKey, usedSkill);
                 }
                 // LINE sends images through its own line_image tool (not the reply
                 // tool's `files`), so capture those sends into history too — the
@@ -3002,7 +3075,7 @@ export class AgentRunner extends EventEmitter {
     } else if (/^\/pstack[-_]setup\b/.test(content)) {
       await this.handleCommandPstackSetup(chatId, content.replace(/^\/pstack[-_]setup(?:@\w+)?/, '').trim(), meta);
     } else if (content.startsWith('/models')) {
-      await this.handleCommandModels(chatId);
+      await this.handleCommandModels(chatId, meta);
     } else if (content.startsWith('/model')) {
       await this.handleCommandModel(chatId, content.replace('/model', '').trim(), meta);
     } else if (content.startsWith('/stop')) {
@@ -3015,15 +3088,19 @@ export class AgentRunner extends EventEmitter {
    *
    * Telegram never reaches this: its receiver answers `/models` itself with a
    * button keyboard and does not forward the message. Discord and LINE have no
-   * picker of their own, so they get the list as text plus the command that
-   * selects from it (issue #409).
+   * picker of their own, so direct messages get the list as text plus the
+   * command that selects from it (issue #409); groups get a DM instruction.
    *
    * A channel listed in BUILTIN_COMMANDS but missing a branch here is worse
    * than one not listed at all — the gate swallows the message and the user
    * gets silence instead of the agent's reply. `/model` on Discord was in
    * exactly that state before this.
    */
-  private async handleCommandModels(chatId: string): Promise<void> {
+  private async handleCommandModels(chatId: string, meta: Record<string, string> = {}): Promise<void> {
+    if (!this.isDirectChat(meta)) {
+      this.writeAutoForward(chatId, 'Use /models in a direct message with the bot to view available models.');
+      return;
+    }
     this.writeAutoForward(chatId, (await this.modelList('Switch with /model <id or alias>')).text);
   }
 
@@ -3151,16 +3228,13 @@ export class AgentRunner extends EventEmitter {
   ): Promise<void> {
     const current = this.agentConfig.claude.model;
     if (!arg) {
-      this.writeAutoForward(chatId, `Current model: ${current}\n\nUse /models to see the list.`);
+      this.writeAutoForward(chatId, this.isDirectChat(meta)
+        ? `Current model: ${current}\n\nUse /models to see the list.`
+        : `Current model: ${current}`);
       return;
     }
     if (!this.isDirectChat(meta)) {
-      this.writeAutoForward(
-        chatId,
-        'Switching models is only available in a direct message with the bot — '
-        + 'it changes the model for every chat of this agent. '
-        + 'Use /models here to see the list.',
-      );
+      this.writeAutoForward(chatId, 'Use /model <model-id> in a direct message with the bot to change the model.');
       return;
     }
     const match = findModel(await this.selectableModels(), arg);
@@ -3609,9 +3683,16 @@ export class AgentRunner extends EventEmitter {
    */
   async restartSessionsUsingConnector(
     connectorId: string,
-    opts?: { overlay?: Record<string, CustomConnectorEntry | null> },
+    opts?: {
+      overlay?: Record<string, CustomConnectorEntry | null>;
+      /** This agent's new per-agent enablement map, just written by a scope route. */
+      agentConnectors?: AgentConfig['connectors'];
+    },
   ): Promise<{ restarted: boolean }> {
     const overlay = opts?.overlay;
+    // Adopted for the overlay's reason below: the watcher has not delivered the
+    // write yet, and the restarted sessions respawn from this.agentConfig.
+    if (opts?.agentConnectors) this.agentConfig.connectors = opts.agentConnectors;
     const customConnectors = {
       ...this.gatewayConfig?.gateway?.customConnectors,
       ...overlay,
@@ -4684,8 +4765,9 @@ export class AgentRunner extends EventEmitter {
       this.logger.warn('Failed to register API session in index', { agentId: this.agentConfig.id, chatId, sessionId, error: (err as Error).message });
     });
 
-    // Use model from request body if provided, otherwise use agent default
-    const session = await this.getOrSpawnSession(sessionId, 'api', undefined, opts.model);
+    // Use model from request body if provided, otherwise use agent default.
+    // A spawn keys its isolated memory by the chat (#601).
+    const session = await this.getOrSpawnSession(sessionId, 'api', undefined, opts.model, chatId);
     this.apiChatIds.set(sessionId, chatId);
 
     // Promote UI-uploaded files from staging to permanent per-session storage
@@ -5013,8 +5095,9 @@ export class AgentRunner extends EventEmitter {
       this.logger.warn('Failed to register API session in index', { agentId: this.agentConfig.id, chatId, sessionId, error: (err as Error).message });
     });
 
-    // Use model from request body if provided, otherwise use agent default
-    const session = await this.getOrSpawnSession(sessionId, 'api', undefined, opts.model);
+    // Use model from request body if provided, otherwise use agent default.
+    // A spawn keys its isolated memory by the chat (#601).
+    const session = await this.getOrSpawnSession(sessionId, 'api', undefined, opts.model, chatId);
     this.apiChatIds.set(sessionId, chatId);
 
     // Promote UI-uploaded files from staging to permanent per-session storage
@@ -5755,12 +5838,12 @@ export class AgentRunner extends EventEmitter {
    * (`allowFrom` in mcp/tools/discord/access.ts is DM-only), so without this
    * any member of an allowlisted channel could switch the model out from under
    * everyone else and kill their in-flight turns. LINE forwards group and room
-   * messages the same way. Telegram's receiver answers `/model` itself behind
-   * a private-chat + allowlist check and does not forward it here.
+   * messages the same way. Telegram's receiver handles `/model` itself, using
+   * its existing group access policy for bare queries.
    *
    * Fails closed: a channel that does not report a chat type cannot switch.
-   * Listing models (`/models`, bare `/model`) is unaffected — it reads nothing
-   * and changes nothing.
+   * The bare `/model` query remains read-only in groups; `/models` is separately
+   * restricted because its catalog exposes model IDs and aliases.
    */
   private isDirectChat(meta: Record<string, string>): boolean {
     const kind = meta['chat_type'] ?? meta['line_chat_type'] ?? meta['slack_chat_type'];

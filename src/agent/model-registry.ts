@@ -61,9 +61,8 @@ export const DEFAULT_MODELS: ModelConfig[] = [
   { id: 'gpt-6-sol[1m]',             label: 'GPT 6 Sol',        alias: 'gpt6sol',     contextWindow: 1050000 },
   { id: 'gpt-6-astra[1m]',           label: 'GPT 6 Astra',      alias: 'gpt6astra',   contextWindow: 1050000 },
   { id: 'gpt-6-luna[1m]',            label: 'GPT 6 Luna',       alias: 'gpt6luna',    contextWindow: 1050000 },
-  { id: 'gpt-5.6-sol[1m]',           label: 'GPT 5.6 Sol',      alias: 'gpt56sol',    contextWindow: 1050000 },
   { id: 'gpt-5.6-terra[1m]',         label: 'GPT 5.6 Terra',    alias: 'gpt56terra',  contextWindow: 1050000 },
-  { id: 'gpt-5.6-luna[1m]',          label: 'GPT 5.6 Luna',     alias: 'gpt56luna',   contextWindow: 1050000 },
+  { id: 'gpt-6.1-sol[1m]',          label: 'GPT 6.1 Sol',      alias: 'gpt61sol',    contextWindow: 1050000 },
   { id: 'gpt-5.5[1m]',               label: 'GPT 5.5',          alias: 'gpt55',       contextWindow: 1050000 },
 ];
 
@@ -73,8 +72,8 @@ export type Effort = typeof EFFORT_LEVELS[number];
 export const isEffort = (value: unknown): value is Effort => EFFORT_LEVELS.includes(value as Effort);
 
 /**
- * The model list this gateway offers: the live catalog when one is reachable,
- * the configured/static list otherwise (issue #409). Cached upstream, so
+ * The model list this gateway offers: configured/static entries followed by
+ * live-only catalog entries when one is reachable (issue #409). Cached upstream, so
  * callers that only want one model's context window pay for at most one fetch
  * a minute between them.
  */
@@ -87,11 +86,9 @@ export async function availableModels(configured: ModelConfig[] | undefined): Pr
  * Models a name may resolve to: what the catalog offers, plus the configured
  * list.
  *
- * The union is only for *resolution*, never for the `/models` listing — the
- * listing has to reflect what upstream actually offers, or a model removed
- * upstream would linger in the picker forever, which is the bug this all
- * started from. Without the union a user who switches to a live-only model
- * is trapped: their previous configured model is no longer nameable.
+ * The catalog keeps configured entries in the listing, then appends live-only
+ * entries. The union also ensures a model selected from the live catalog stays
+ * addressable if a later catalog fetch fails.
  */
 export async function selectableModels(configured: ModelConfig[] | undefined): Promise<ModelConfig[]> {
   const live = await availableModels(configured);

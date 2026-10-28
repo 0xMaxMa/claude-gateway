@@ -28,7 +28,7 @@ import { resolveSharedConfig, sharedVaultDir, buildGraphModel, demoGraphModel, d
 import { createLogger } from '../logger';
 import { parseDreamReport } from '../agent/dreaming/report';
 import { acceptDreamProposals } from '../agent/dreaming/accept';
-import { resolveMemoryBudget } from '../agent/workspace-loader';
+import { agentMemoryBudget, resolveMemoryBudget } from '../agent/workspace-loader';
 import { DREAMING_DIR } from '../agent/dreaming/audit';
 import {
   generateCliDevicePage,
@@ -41,6 +41,9 @@ import { normalizePublicUrl } from '../cli-viewer/url';
 import { createApiRouter } from './router';
 import { createPstackRouter } from './pstack-router';
 import { VoiceApi } from './voice-router';
+import { createVoiceCallRouter } from './voice-call-router';
+import { voiceCallPairings } from '../voice/call-pairing';
+import { telegramStateDir } from '../telegram/access';
 import { createCronRouter } from './cron-router';
 import { createMetaRouter } from './meta-router';
 import { createCapabilitiesRouter } from './capabilities';
@@ -50,6 +53,7 @@ import { createSkillsRouter } from './skills-router';
 import { createPackagesRouter } from './packages';
 import { createWebhooksRouter } from './webhooks-router';
 import { createConnectorsRouter } from './connectors-router';
+import { createConnectorProxyRouter, handleConnectorUpgrade, setConnectorProxyOrigin } from '../connectors/proxy';
 import { createOauthConnectorsRouter, createOauthCallbackRouter } from './oauth-connectors-router';
 import { createCustomConnectorsStore, type CustomConnectorsStore } from '../connectors/custom-connectors-store';
 import { pendingOAuthStore } from '../connectors/pending-oauth-store';
@@ -633,6 +637,11 @@ export class GatewayRouter {
       createWebhooksRouter(this.agents, this.gatewayConfig?.gateway?.logDir ?? '/tmp'),
     );
 
+    // Loopback MCP proxy for connector credentials (#635). Before the JSON parser:
+    // it forwards the agent's request body as raw bytes. Authenticated by the
+    // per-spawn grant in its own handler, not by an API key.
+    this.app.use(createConnectorProxyRouter());
+
     // Jev evaluation parses its own body after authentication, against a limit
     // that fits the configurable maxInputBytes (see jev-router.ts).
     this.app.use(jsonExceptJevEvaluate());
@@ -641,6 +650,15 @@ export class GatewayRouter {
     // Registered here (after the body parser, before the /api auth router) so it
     // owns its own cookie/approval auth without the API-key gate intercepting.
     this.setupCliRoutes();
+
+    // Telegram `/call` voice Mini App. Its tickets are proven by Telegram
+    // initData, so voice calls work even on a gateway without API keys.
+    this.voiceApi = new VoiceApi(this.agents, this.configs, this.gatewayConfig?.gateway?.api?.keys ?? []);
+    this.app.use('/voice-call', createVoiceCallRouter({
+      agents: this.agents, configs: this.configs, voiceApi: this.voiceApi,
+      basePath: () => this.cliBasePath(),
+      telegramStateDir: agentId => telegramStateDir(this.configs.get(agentId)?.workspace, agentsDirForConfig(this.configPath), agentId),
+    }));
 
     // Share bridge (#70): a single reusable /shared/:token primitive. The store +
     // public fetch route mount UNCONDITIONALLY — the public route only serves tokens
@@ -666,6 +684,8 @@ export class GatewayRouter {
             this.gatewayConfig.gateway.api.keys,
             this.agentsRoot(),
             publicUrl,
+            undefined,
+            agentId => this.configs.get(agentId)?.isolateMemory === true,
           ),
         );
       }
@@ -717,7 +737,6 @@ export class GatewayRouter {
       this.app.use('/api', createBrowserBindingsRouter(this.gatewayConfig,this.agents,this.configPath));
       this.app.use('/api', createJevRouter(this.gatewayConfig, this.configs));
       this.app.use('/api', apiRouter);
-      this.voiceApi = new VoiceApi(this.agents, this.configs, this.gatewayConfig.gateway.api.keys);
       this.app.use('/api', this.voiceApi.router);
     }
 
@@ -958,7 +977,10 @@ export class GatewayRouter {
         if (!runner) { res.status(404).json({ error: 'Unknown agent' }); return; }
         try {
           const source = runner.getDashboardSource?.();
-          let report = source ? await this.dashboardReader.read('report', source.filename, {workspace:source.workspace, jevEnabled:Boolean(this.gatewayConfig && this.configs.get(agentId) && jevAllowed(this.gatewayConfig,this.configs.get(agentId)!)), sessionId, offset, since:dashboardSince(req.query.scope ?? (reportPath==='/token-report'?'all':'24h'),Date.now(),this.gatewayConfig?.gateway?.timezone), historyFilename:source.historyFilename}) : await runner.getTokenReport(sessionId);
+          // Isolate mode (#601): the footprint measures the conversation memory appended at spawn.
+          const agentConfig = this.configs.get(agentId);
+          const isolatedBudget = agentConfig?.isolateMemory && this.gatewayConfig ? agentMemoryBudget(this.gatewayConfig, agentConfig) : undefined;
+          let report = source ? await this.dashboardReader.read('report', source.filename, {workspace:source.workspace, jevEnabled:Boolean(this.gatewayConfig && this.configs.get(agentId) && jevAllowed(this.gatewayConfig,this.configs.get(agentId)!)), chatMemoryBudget:isolatedBudget, sessionId, offset, since:dashboardSince(req.query.scope ?? (reportPath==='/token-report'?'all':'24h'),Date.now(),this.gatewayConfig?.gateway?.timezone), historyFilename:source.historyFilename}) : await runner.getTokenReport(sessionId);
           if (!report) { res.status(404).json({ error: 'No recorded session token report' }); return; }
           if (runner.isSessionCompacting?.(sessionId)) report = {...report, activityStatus:'compacting'};
           if (report.contextWindow) report.contextWindow.total = report.contextWindow.model ? await runner.dashboardContextWindow?.(report.contextWindow.model) ?? null : null;
@@ -1328,6 +1350,12 @@ export class GatewayRouter {
           res.status(404).json({ error: 'Unknown agent' });
           return;
         }
+        // Isolate mode (#601): the root MEMORY.md/USER.md are no longer composed, and a
+        // promotion would copy what several conversations said into the shared KB.
+        if (this.configs.get(agentId)?.isolateMemory) {
+          res.status(409).json({ error: 'Dreaming proposals cannot be applied to an agent in isolated memory mode' });
+          return;
+        }
         if (!Number.isFinite(ts)) {
           res.status(400).json({ error: 'ts must be a finite number' });
           return;
@@ -1586,6 +1614,7 @@ export class GatewayRouter {
     }
     return new Promise((resolve, reject) => {
       this.server = this.app.listen(port, host, () => {
+        setConnectorProxyOrigin(this.server?.address());
         resolve();
       });
       this.server.on('error', (err: NodeJS.ErrnoException) => {
@@ -1616,6 +1645,8 @@ export class GatewayRouter {
           if (rec.resetAt < now) this.loginAttempts.delete(ip);
         }
         cliPairingStore.prune();
+        const liveVoice = this.voiceApi?.liveSessionIds() ?? new Set<string>();
+        voiceCallPairings.prune(id => liveVoice.has(id));
         pendingOAuthStore.prune();
         refreshExpiringOAuthConnectors(this.customConnectorsStore, this.agents).catch((err) => {
           console.error(`oauth-refresh-sweep: ${(err as Error).message}`);
@@ -1625,6 +1656,7 @@ export class GatewayRouter {
 
       this.server.on('upgrade', (req: http.IncomingMessage, socket, head) => {
         if (this.voiceApi?.upgrade(req, socket, head)) return;
+        if (handleConnectorUpgrade(req, socket, head)) return;
         const url = req.url ?? '';
         const match = url.match(/\/api\/v1\/agents\/([^/?]+)\/pty-stream(?:\?.*)?$/);
         if (!match) {

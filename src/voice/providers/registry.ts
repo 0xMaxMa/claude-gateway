@@ -1,7 +1,8 @@
 import { requireManagedVoiceCredit } from '../managed-quota';
+import { voiceTiming } from '../diagnostics';
 import { OpenRouterStt, OpenRouterTts } from './openrouter';
 import { canonicalVoiceProvider, nativeVoiceModel } from './model-ref';
-import { GeminiStt, GeminiTts } from './gemini';
+import { GeminiStt, GeminiTts, performsGeminiAudioTags } from './gemini';
 import { GeminiLiveStt } from './gemini-live-stt';
 import { PaxaLabsStt } from './paxalabs-stt';
 import { PaxaLabsLiveStt, isPaxaRealtimeSttModel } from './paxalabs-live-stt';
@@ -9,17 +10,20 @@ import { PaxaLabsTts, paxaConnection } from './paxalabs-tts';
 import { upstreamVoiceConnection, upstreamVoiceSocket, managedVoiceSocket } from './upstream';
 import { SttProvider, TtsProvider, VoiceError } from '../types';
 import { ElevenLabsStt } from './elevenlabs-stt';
-import { ElevenLabsTts } from './elevenlabs-tts';
+import { ElevenLabsTts, isElevenLabsDialogueModel } from './elevenlabs-tts';
+import { stripAudioTags, withoutAudioTags } from '../audio-tags';
 import { DeepgramStt } from './deepgram-stt';
 import { CartesiaTts } from './cartesia-tts';
 
-function makeSttProvider(config: { provider: string; model: string }): SttProvider {
+type SttConfig = { provider: string; model: string; filterBackgroundAudio?: boolean };
+function makeSttProvider(config: SttConfig): SttProvider {
   config = { ...config, provider: canonicalVoiceProvider(config.provider), model: nativeVoiceModel(config.provider, config.model) };
   if (['openrouter','upstream:openrouter'].includes(config.provider)) return new OpenRouterStt(config.provider,config.model);
   if (['gemini', 'upstream:gemini'].includes(config.provider)) return config.model === 'gemini-3.5-transcribe-live' ? new GeminiLiveStt(config.provider, config.model) : new GeminiStt(config.provider, config.model);
-  if (config.provider === 'managed:elevenlabs') return new ElevenLabsStt(upstreamVoiceConnection('elevenlabs', true).key, config.model, managedVoiceSocket, config.provider);
-  if (config.provider === 'upstream:elevenlabs') return new ElevenLabsStt(upstreamVoiceConnection().key, config.model, upstreamVoiceSocket, 'upstream:elevenlabs');
-  if (config.provider === 'elevenlabs') return new ElevenLabsStt(process.env.ELEVENLABS_API_KEY ?? '', config.model);
+  const elevenlabs = { filterBackgroundAudio: config.filterBackgroundAudio };
+  if (config.provider === 'managed:elevenlabs') return new ElevenLabsStt(upstreamVoiceConnection('elevenlabs', true).key, config.model, managedVoiceSocket, config.provider, elevenlabs);
+  if (config.provider === 'upstream:elevenlabs') return new ElevenLabsStt(upstreamVoiceConnection().key, config.model, upstreamVoiceSocket, 'upstream:elevenlabs', elevenlabs);
+  if (config.provider === 'elevenlabs') return new ElevenLabsStt(process.env.ELEVENLABS_API_KEY ?? '', config.model, undefined, undefined, elevenlabs);
   if (['paxalabs', 'upstream:paxalabs', 'managed:paxalabs'].includes(config.provider)) return isPaxaRealtimeSttModel(config.model) ? new PaxaLabsLiveStt(config.provider, config.model) : new PaxaLabsStt(config.provider, config.model);
   if (config.provider === 'deepgram') return new DeepgramStt(process.env.DEEPGRAM_API_KEY ?? '', config.model);
   throw new VoiceError('UNKNOWN_STT_PROVIDER');
@@ -36,7 +40,7 @@ function makeTtsProvider(config: { provider: string; model: string }): TtsProvid
   throw new VoiceError('UNKNOWN_TTS_PROVIDER');
 }
 
-export function sttProvider(config: { provider: string; model: string }): SttProvider {
+export function sttProvider(config: SttConfig): SttProvider {
   const provider = makeSttProvider(config);
   if (!config.provider.startsWith('managed:')) return provider;
   return { id: provider.id, capabilities: provider.capabilities, async open(options) {
@@ -44,16 +48,45 @@ export function sttProvider(config: { provider: string; model: string }): SttPro
     return provider.open(options);
   }};
 }
+/** Audio tags reach TTS in spoken text. Only the ElevenLabs dialogue models and Gemini 3.1 Flash TTS
+ * (natively or through OpenRouter) perform them; every other model could read the word aloud. */
+function performsAudioTags(config: { provider: string; model: string }): boolean {
+  const provider = canonicalVoiceProvider(config.provider), model = nativeVoiceModel(config.provider, config.model);
+  if (provider.endsWith('elevenlabs')) return isElevenLabsDialogueModel(model);
+  return /(?:^|:)(?:gemini|openrouter)$/.test(provider) && performsGeminiAudioTags(model);
+}
+function withAudioTagSupport(config: { provider: string; model: string }, provider: TtsProvider): TtsProvider {
+  if (performsAudioTags(config)) return provider;
+  return { id: provider.id, capabilities: provider.capabilities,
+    synthesizeFile: provider.synthesizeFile ? options => provider.synthesizeFile!({ ...options, text: stripAudioTags(options.text).trim() }) : undefined,
+    synthesize: options => provider.synthesize({ ...options, text: withoutAudioTags(options.text) }),
+  };
+}
 export function ttsProvider(config: { provider: string; model: string }): TtsProvider {
-  const provider = makeTtsProvider(config);
+  const provider = withAudioTagSupport(config, makeTtsProvider(config));
   if (!config.provider.startsWith('managed:')) return provider;
+  // A live reply is spoken piece by piece on one playback signal: check the wallet once for
+  // the reply. The next reply has a new signal and checks again, so an exhausted wallet is never reused.
+  const replyChecks = new WeakMap<AbortSignal, Promise<void>>();
+  const checkReply = (signal: AbortSignal) => {
+    let check = replyChecks.get(signal);
+    if (!check) {
+      check = (async () => {
+        voiceTiming('tts_credit_check_started');
+        await requireManagedVoiceCredit(config.provider, undefined, signal);
+        voiceTiming('tts_credit_check_finished');
+      })();
+      replyChecks.set(signal, check);
+    }
+    return check;
+  };
   return { id: provider.id, capabilities: provider.capabilities,
     synthesizeFile: provider.synthesizeFile ? async options => {
       await requireManagedVoiceCredit(config.provider, undefined, options.signal);
       return provider.synthesizeFile!(options);
     } : undefined,
     async *synthesize(options) {
-      await requireManagedVoiceCredit(config.provider, undefined, options.signal);
+      await checkReply(options.signal);
       yield* provider.synthesize(options);
     },
   };

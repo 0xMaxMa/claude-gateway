@@ -24,6 +24,14 @@ test('accepts valid rounded Jev distributions on the two-percent boundary',()=>{
  }
  expect(()=>readChoice({choice:'a',confidence:.8,probabilities:{a:.8,b:0,c:0,d:0}},criteria)).toThrow('INVALID_DECISION');
 });
+// Regression (#632): jev-1.14.0 names a choice one hundredth below the rounded top on low-confidence questions.
+test('accepts a rounded choice one hundredth below the top, but not a wider gap or a full-precision one',()=>{
+ const {readChoice}=require('../../../src/automation/computer-policy');
+ const criteria={a:'A',b:'B',c:'C'};
+ expect(readChoice({choice:'b',confidence:.33,probabilities:{a:.34,b:.33,c:.33}},criteria)).toMatchObject({choice:'b',confident:false});
+ expect(()=>readChoice({choice:'b',confidence:.32,probabilities:{a:.36,b:.32,c:.32}},criteria)).toThrow('INVALID_DECISION');
+ expect(()=>readChoice({choice:'b',confidence:.333,probabilities:{a:.3345,b:.333,c:.3325}},criteria)).toThrow('INVALID_DECISION');
+});
 test('reopening the active app needs an observed window or content change',()=>{
  expect(observedEffect(state,{...state,generation:'g2'},{kind:'open',app_id:'notes'})).toBe(false);
  expect(observedEffect(state,{...state,windowTitle:'New note'},{kind:'open',app_id:'notes'})).toBe(true);

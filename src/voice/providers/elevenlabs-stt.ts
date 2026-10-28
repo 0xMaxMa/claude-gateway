@@ -5,7 +5,9 @@ import { openProviderSocket, SocketFactory } from './socket';
 
 export class ElevenLabsStt implements SttProvider {
   readonly capabilities = { partials: true, manualCommit: true, speechActivityEvents: false };
-  constructor(private readonly key: string, private readonly model = 'scribe_v2_realtime', private readonly connect: SocketFactory = openProviderSocket, readonly id: string = 'elevenlabs') {}
+  /** filterBackgroundAudio asks ElevenLabs to drop background speech and noise before transcribing; it can also drop quiet speech from the user. */
+  constructor(private readonly key: string, private readonly model = 'scribe_v2_realtime', private readonly connect: SocketFactory = openProviderSocket, readonly id: string = 'elevenlabs',
+    private readonly options: { filterBackgroundAudio?: boolean } = {}) {}
   async open(options: { format: AudioFormat; language?: string; signal: AbortSignal }): Promise<SttSession> {
     validateAudioFormat(options.format);
     if (!this.key) throw new VoiceError('STT_CREDENTIALS_MISSING');
@@ -13,6 +15,7 @@ export class ElevenLabsStt implements SttProvider {
     url.searchParams.set('model_id', this.model); url.searchParams.set('audio_format', `pcm_${options.format.sampleRate}`);
     url.searchParams.set('commit_strategy', 'manual'); url.searchParams.set('include_timestamps', 'false');
     if (options.language) url.searchParams.set('language_code', options.language);
+    if (this.options.filterBackgroundAudio) url.searchParams.set('filter_background_audio', 'true');
     const socket = await this.connect(url.toString(), { 'xi-api-key': this.key }, options.signal);
     const events = new BoundedQueue<SttEvent>(65536, e => JSON.stringify(e).length);
     let commitId: string | undefined, segment = 0, closed = false;

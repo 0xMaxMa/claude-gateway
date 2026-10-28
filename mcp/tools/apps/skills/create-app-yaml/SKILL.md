@@ -95,7 +95,7 @@ Rules for environment variables:
 Show the generated `app.yaml` to the user and explain:
 1. They must fill in `commit:` with a 40-char hex commit hash before publishing
 2. They can add a `healthcheck:` if the service has a health endpoint
-3. If the app has an agent, they can add an `agent:` service block
+3. If the app has an agent, they can add an `agent:` service block (`path`, `name`). Add `isolate_memory: true` to it when the agent serves many unrelated users, so each conversation keeps its own memory. `path` must be a directory inside the app, such as `./agent`, never the app directory itself. The agent container gets none of the app's secrets by default; list the ones it needs, such as an API token, in `env: [AGENT_API_TOKEN]`. Each name must be a secret that another service declares in its `environment`
 4. The `rate_limit` is requests per second — adjust to match expected load
 5. **Validate before publishing** — run `POST /api/v1/apps/inspect` with `local_path` (or the `inspect_app` MCP tool) pointed at the app directory. This runs the same manifest validation as install without needing a pinned commit, so a missing `host` or other schema error is caught locally instead of failing the install wizard after publish.
 
