@@ -88,6 +88,24 @@ describe('token-env — a hostile value cannot forge another entry', () => {
   });
 });
 
+describe('token-env — a throwing write listener', () => {
+  it('does not fail the write it was told about, and the other listeners still run', () => {
+    const { onSecretsWritten, setSecret, getSecret } = require('../../src/connectors/token-env');
+    const errors: string[] = [];
+    const spy = jest.spyOn(console, 'error').mockImplementation((...args: unknown[]) => { errors.push(args.join(' ')); });
+    let ran = 0;
+    const off = [onSecretsWritten(() => { throw new Error('listener broke'); }), onSecretsWritten(() => { ran++; })];
+    try {
+      expect(() => setSecret('CUSTOM__fx__access_token', 'stored')).not.toThrow();
+      expect({ stored: getSecret('CUSTOM__fx__access_token'), ran, logged: errors.filter(l => l.includes('listener broke')).length })
+        .toEqual({ stored: 'stored', ran: 1, logged: 1 });
+    } finally {
+      off.forEach(unsubscribe => unsubscribe());
+      spy.mockRestore();
+    }
+  });
+});
+
 describe('connector id validation', () => {
   function makeApp() {
     const { createConnectorsRouter } = require('../../src/api/connectors-router');

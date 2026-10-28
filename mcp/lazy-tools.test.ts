@@ -3,7 +3,7 @@ import { createLazyToolCatalog } from './lazy-tools';
 import type { McpToolDefinition } from './types';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -22,12 +22,148 @@ describe('lazy gateway tools', () => {
     expect(parse(catalog.search({ query: 'ORIGINAL description 22' })).tools).toEqual([defs[22]]);
     expect(catalog.search({ limit: 21 }).isError).toBe(true);
   });
+  test('an empty or * query lists tools in name order, even names with an empty _ token', () => {
+    const catalog = createLazyToolCatalog(['zeta__x', 'omega_', 'beta', 'alpha'].map(name => ({ name, description: name, inputSchema: { type: 'object' } })));
+    const listed = (query: string) => parse(catalog.search({ query })).tools.map((tool: McpToolDefinition) => tool.name);
+    expect({ star: listed('*'), empty: listed('') }).toEqual({ star: ['alpha', 'beta', 'omega_', 'zeta__x'], empty: ['alpha', 'beta', 'omega_', 'zeta__x'] });
+  });
+  // Queries workers sent to tool_search against real workspace-mcp catalogs; each of these
+  // returned nothing under the every-word rule, costing the worker a whole model turn.
+  test('ranks tools by matching words when no tool matches every word, and treats * as an empty query', () => {
+    const catalogs = JSON.parse(readFileSync(join(import.meta.dir, 'fixtures/workspace-mcp-tools.json'), 'utf8')) as Record<string, McpToolDefinition[]>;
+    const search = (server: string, query: string) => parse(createLazyToolCatalog(catalogs[server]).search({ query }));
+    const top = (server: string, query: string) => search(server, query).tools.map((tool: McpToolDefinition) => tool.name);
+    expect({
+      'list events': top('google-calendar', 'list events')[0],
+      'list events calendar': top('google-calendar', 'list events calendar')[0],
+      'search messages list': top('gmail', 'search messages list')[0],
+      // The description says "updating", so manage_event ties get_events on "event" and sorts second.
+      'update event': top('google-calendar', 'update event').slice(0, 2),
+    }).toEqual({
+      'list events': 'get_events',
+      'list events calendar': 'get_events',
+      'search messages list': 'search_gmail_messages',
+      'update event': ['get_events', 'manage_event'],
+    });
+    for (const server of ['gmail', 'google-calendar']) {
+      const all = search(server, '*');
+      expect({ total: all.total, schemas: all.tools.some((tool: McpToolDefinition) => 'inputSchema' in tool) }).toEqual({ total: catalogs[server].length, schemas: false });
+    }
+    expect(top('gmail', 'search gmail messages')).toEqual(['search_gmail_messages']);
+    expect(search('gmail', 'zzz qqq').total).toBe(0);
+  });
+  describe('Drive, Docs and Sheets catalogs', () => {
+    const catalogs = JSON.parse(readFileSync(join(import.meta.dir, 'fixtures/workspace-mcp-tools.json'), 'utf8')) as Record<string, McpToolDefinition[]>;
+    const top = (server: string, query: string) => parse(createLazyToolCatalog(catalogs[server]).search({ query })).tools.map((tool: McpToolDefinition) => tool.name);
+    const disabled: Record<string, string[]> = {
+      gmail: ['modify_gmail_message_labels', 'batch_modify_gmail_message_labels', 'manage_gmail_label', 'list_gmail_filters', 'manage_gmail_filter'],
+      'google-calendar': ['create_calendar'],
+      'google-drive': ['manage_drive_access', 'set_drive_file_permissions'],
+      'google-docs': ['manage_document_comment'],
+      'google-sheets': ['manage_spreadsheet_comment'],
+    };
+    test('rank the tool a worker means first', () => {
+      expect({
+        'find and replace in doc': top('google-docs', 'find and replace in doc')[0],
+        'export doc to pdf': top('google-docs', 'export doc to pdf')[0],
+        'append rows': top('google-sheets', 'append rows')[0],
+        'search files': top('google-drive', 'search files')[0],
+        'create folder': top('google-drive', 'create folder')[0],
+        'copy file': top('google-drive', 'copy file')[0],
+        'list my files': top('google-drive', 'list my files')[0],
+        // No Drive tool contains all three words.
+        'show folder contents': top('google-drive', 'show folder contents')[0],
+      }).toEqual({
+        'find and replace in doc': 'find_and_replace_doc',
+        'export doc to pdf': 'export_doc_to_pdf',
+        'append rows': 'append_table_rows',
+        'search files': 'search_drive_files',
+        'create folder': 'create_drive_folder',
+        'copy file': 'copy_drive_file',
+        'list my files': 'list_drive_items',
+        'show folder contents': 'list_drive_items',
+      });
+    });
+    test('rank a name match above a description match when every query word matches', () => {
+      expect({
+        'read sheet values': top('google-sheets', 'read sheet values')[0],
+        'create spreadsheet': top('google-sheets', 'create spreadsheet')[0],
+        'download file': top('google-drive', 'download file')[0],
+      }).toEqual({
+        'read sheet values': 'read_sheet_values',
+        'create spreadsheet': 'create_spreadsheet',
+        'download file': 'get_drive_file_download_url',
+      });
+    });
+    // Known gap: modify_doc_text names "doc", not "document", so it ties batch_update_doc
+    // (whose name holds "update") and loses on name order. Only a doc/document prefix rule fixes it.
+    test.failing('known ranking gap: "update document text" should rank modify_doc_text first', () => {
+      expect(top('google-docs', 'update document text')[0]).toBe('modify_doc_text');
+    });
+    test('ranking only reorders: every query returns the same tools as the unranked filter', () => {
+      const unranked = (tools: McpToolDefinition[], rawQuery: string) => {
+        const query = rawQuery.trim().toLowerCase() === '*' ? '' : rawQuery.trim().toLowerCase();
+        const text = (tool: McpToolDefinition) => `${tool.name} ${tool.description}`.toLowerCase();
+        let matches = tools.filter(tool => query.split(/\s+/).every(word => text(tool).includes(word)));
+        if (!matches.length) {
+          const words = [...new Set(query.split(/[^a-z0-9]+/).filter(Boolean))];
+          matches = tools.filter(tool => words.some(word => text(tool).includes(word)));
+        }
+        return matches.map(tool => tool.name).sort();
+      };
+      const queries = ['*', '', 'list events', 'update event', 'list events calendar', 'search messages list', 'search gmail messages',
+        'update document text', 'read sheet values', 'create spreadsheet', 'download file', 'find and replace in doc', 'export doc to pdf',
+        'append rows', 'search files', 'create folder', 'copy file', 'list my files', 'show folder contents', 'doc', 'sheet', 'read',
+        'send email', 'draft reply', 'attachment', 'free busy', 'out of office', 'comments', 'zzz qqq', 'get_doc_content', 'DRIVE file permissions'];
+      for (const [server, tools] of Object.entries(catalogs)) for (const query of queries) {
+        const catalog = createLazyToolCatalog(tools);
+        const first = parse(catalog.search({ query, limit: 20 }));
+        const names: string[] = [];
+        for (let offset = 0; offset < first.total; offset += 20) {
+          names.push(...parse(catalog.search({ query, offset, limit: 20 })).tools.map((tool: McpToolDefinition) => tool.name));
+        }
+        const listing = query === '' || query === '*';
+        expect({ server, query, total: first.total, names: listing ? names : [...names].sort() })
+          .toEqual({ server, query, total: unranked(tools, query).length, names: listing ? tools.map(tool => tool.name).sort((a, b) => a.localeCompare(b)) : unranked(tools, query) });
+        expect(new Set(names).size).toBe(names.length);
+      }
+    });
+    test('hide every disabled tool and list the full catalog for * without schemas', () => {
+      expect(Object.keys(catalogs).sort()).toEqual(Object.keys(disabled).sort());
+      for (const [server, names] of Object.entries(disabled)) {
+        expect(catalogs[server].map(tool => tool.name).filter(name => name === 'start_google_auth' || names.includes(name))).toEqual([]);
+      }
+      const listed = Object.fromEntries(Object.keys(disabled).map(server => {
+        const all = parse(createLazyToolCatalog(catalogs[server]).search({ query: '*', limit: 20 }));
+        return [server, { total: all.total, schemas: all.tools.some((tool: McpToolDefinition) => 'inputSchema' in tool) }];
+      }));
+      expect(listed).toEqual({
+        gmail: { total: 9, schemas: false }, 'google-calendar': { total: 6, schemas: false },
+        'google-drive': { total: 14, schemas: false }, 'google-docs': { total: 18, schemas: false }, 'google-sheets': { total: 15, schemas: false },
+      });
+    });
+  });
   test('unauthorized, task and recursive tools never reach dispatcher', async () => {
     let calls = 0; const dispatch = async () => { calls++; return { content: [] }; };
     const catalog = createLazyToolCatalog(defs);
     for (const name of ['missing', 'task_spawn', 'tool_call', 'tool_search']) expect((await catalog.call({ name, arguments: {} }, dispatch)).isError).toBe(true);
     expect((await catalog.call({ name: 'tool_00', arguments: [] }, dispatch)).isError).toBe(true);
+    expect((await catalog.call({ name: 'tool_00', arguments: '{"target":' }, dispatch)).isError).toBe(true);
+    expect((await catalog.call({ tool_name: 'task_spawn', arguments: {} }, dispatch)).isError).toBe(true);
     expect(calls).toBe(0);
+  });
+  test('tolerates tool_name and JSON-string arguments, and names a wrong call shape', async () => {
+    const seen: Array<[string, Record<string, unknown>]> = [];
+    const dispatch = async (name: string, input: Record<string, unknown>) => { seen.push([name, input]); return { content: [] }; };
+    const catalog = createLazyToolCatalog(defs);
+    expect((await catalog.call({ tool_name: 'tool_01', arguments: { target: 'a' } }, dispatch)).isError).toBeFalsy();
+    expect((await catalog.call({ tool_name: 'tool_02', arguments: '{"target":"b"}' }, dispatch)).isError).toBeFalsy();
+    expect(seen).toEqual([['tool_01', { target: 'a' }], ['tool_02', { target: 'b' }]]);
+    const missing = await catalog.call({ tool: 'tool_01', args: {} }, dispatch);
+    expect(missing.isError).toBe(true);
+    expect(missing.content[0].text).toContain('received keys: tool, args');
+    expect((await catalog.call({ name: 'nope', arguments: {} }, dispatch)).content[0].text).toContain('"nope"');
+    expect(seen).toHaveLength(2);
   });
   test('excludeReserved filters an underlying tool literally named tool_search/tool_call; the connector opt-out does not', async () => {
     const collision: McpToolDefinition[] = [...defs,

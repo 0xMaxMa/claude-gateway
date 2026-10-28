@@ -38,6 +38,7 @@ import { CronScheduler } from './cron/scheduler';
 import { CronManager } from './cron/manager';
 import { GatewayRouter, resolveBindHost } from './api/gateway-router';
 import { setConnectorProxyOrigin } from './connectors/proxy';
+import { connectorSidecars } from './connectors/sidecar';
 import { ContextIsolationGuard } from './agent/context-isolation';
 import { createLogger, configureLogging, loggingConfig, startLogRetentionSweep } from './logger';
 import { ConfigWatcher, ConfigChange } from './config/watcher';
@@ -659,6 +660,11 @@ async function main(): Promise<void> {
   // Sessions spawned before the router listens (cron catch-up, channel receivers)
   // already write connector proxy entries; point them at the planned bind address.
   setConnectorProxyOrigin({ address: resolveBindHost(process.env.GATEWAY_BIND, config.gateway.bind), port: PORT });
+  // Connector sidecars run beside the config file, in a directory the gateway owns.
+  const sidecars = connectorSidecars.configure({ runtimeRoot: path.join(path.dirname(CONFIG_PATH), 'runtimes') });
+  process.on('exit', () => sidecars.killAllNow());
+  await sidecars.reclaimOrphans();
+  sidecars.reconcile(config.gateway.customConnectors);
 
   // Must precede the first createLogger() call: the level gate and the rotation
   // thresholds are process-wide policy, and a logger created before the policy
@@ -706,7 +712,7 @@ async function main(): Promise<void> {
     if (fullShutdown) return fullShutdown(signal);
     console.log(`[gateway] Received ${signal} during startup, shutting down...`);
     for (const scheduler of schedulers) scheduler.stop();
-    await Promise.allSettled([...agentRunners.values()].map((runner) => runner.stop()));
+    await Promise.allSettled([...agentRunners.values()].map((runner) => runner.stop()).concat(connectorSidecars.get().close()));
     console.log('[gateway] Startup shutdown complete.');
   };
   registeredShutdown = registerShutdownSignals({
@@ -1017,6 +1023,7 @@ async function main(): Promise<void> {
           if(change.field==='gateway.api.keys')router.updateApiKeys((change.newValue as any[]) ?? []);
           else setConfigValue(config,change.field,change.newValue);
           if(change.field==='gateway.logs')configureLogging(config.gateway.logs);
+          if(change.field==='gateway.customConnectors')connectorSidecars.get().reconcile(config.gateway.customConnectors);
           if(change.field.startsWith('gateway.')&&!['gateway.api','gateway.logs','gateway.publicUrl','gateway.oauthReturnUrl'].some(p=>change.field===p||change.field.startsWith(p+'.')))
             for(const id of agentConfigs.keys())affected.add(id);
         }else{
@@ -1097,6 +1104,7 @@ async function main(): Promise<void> {
     // init: precisely the bug this file is fixing (issue #405).
     const settled = await Promise.allSettled([
       router.stop(),
+      connectorSidecars.get().close(),
       // Runners stop concurrently, not serially. Teardown is now awaited, and
       // the Discord receiver always takes ~2s to exit (its receiver-server
       // force-exits on an unconditional timer), so serial stops would multiply

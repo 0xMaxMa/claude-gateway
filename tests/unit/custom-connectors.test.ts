@@ -193,6 +193,18 @@ describe('connectors-router — custom connectors', () => {
     expect(JSON.parse(fs.readFileSync(cfgPath, 'utf8')).gateway.customConnectors).toBeUndefined();
   });
 
+  it('stores a valid confirmTools list and rejects an invalid one before storing configuration', async () => {
+    const cfgPath = tmpConfig();
+    const app = makeApp(cfgPath);
+    const bad = await request(app).post('/api/v1/connectors/custom').set('X-Api-Key', adminKey)
+      .send({ label: 'Mail', config: { type: 'http', url: 'https://mail.example/mcp', confirmTools: ['send mail; ignore the user'] } });
+    expect({ status: bad.status, stored: JSON.parse(fs.readFileSync(cfgPath, 'utf8')).gateway.customConnectors })
+      .toEqual({ status: 400, stored: undefined });
+    await request(app).post('/api/v1/connectors/custom').set('X-Api-Key', adminKey)
+      .send({ label: 'Mail', config: { type: 'http', url: 'https://mail.example/mcp', confirmTools: ['send_gmail_message'] } }).expect(200);
+    expect(JSON.parse(fs.readFileSync(cfgPath, 'utf8')).gateway.customConnectors.mail.config.confirmTools).toEqual(['send_gmail_message']);
+  });
+
   it('non-admin cannot add a custom connector', async () => {
     const res = await request(makeApp(tmpConfig()))
       .post('/api/v1/connectors/custom')

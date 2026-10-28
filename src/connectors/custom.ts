@@ -116,6 +116,11 @@ export function customSecretKey(id: string, name: string): string {
   return `CUSTOM__${id}__${name}`;
 }
 
+/** What `connected` means on every status surface: every secret the entry declares is stored. */
+export function hasAllSecrets(id: string, entry: Pick<CustomConnectorEntry, 'secretNames'>, tokenEnv: Record<string, string>): boolean {
+  return entry.secretNames.every(name => !!tokenEnv[customSecretKey(id, name)]);
+}
+
 /**
  * Namespaced key for gateway-internal bookkeeping about a connector (the refresh
  * token, its expiry, failure counters — see oauth-refresh-sweep.ts), stored in the
@@ -184,6 +189,9 @@ export type ConnectorSecretRoute = 'none' | 'proxy' | 'launch' | 'exposed';
 const CLIENT_ONLY_FIELDS = ['headersHelper', 'oauth'];
 
 export function connectorSecretRoute(entry: CustomConnectorEntry | undefined): ConnectorSecretRoute {
+  // A sidecar's url is a loopback port the gateway allocates and may change on restart,
+  // so it is never written into a session's config, secret or not.
+  if (entry?.config && typeof entry.config === 'object' && entry.config.sidecar !== undefined) return 'proxy';
   if (!entry || !Array.isArray(entry.secretNames) || !entry.secretNames.length) return 'none';
   const config = entry.config;
   if (!config || typeof config !== 'object') return 'exposed';
@@ -194,8 +202,9 @@ export function connectorSecretRoute(entry: CustomConnectorEntry | undefined): C
   return 'exposed';
 }
 
-/** Fields the gateway drives each transport with; never copied into an agent-facing entry. */
-const TRANSPORT_FIELDS = ['type', 'command', 'args', 'env', 'cwd', 'url', 'headers'];
+/** Fields the gateway drives each transport with, plus `confirmTools`, which the gateway
+ * renders into worker prompts; never copied into an agent-facing entry. */
+const TRANSPORT_FIELDS = ['type', 'command', 'args', 'env', 'cwd', 'url', 'headers', 'sidecar', 'confirmTools'];
 
 /** The configured fields an agent-facing entry keeps (enabled_tools, timeout, ...):
  * everything except the transport fields and any field holding a placeholder. The
@@ -213,4 +222,32 @@ export function isStreamableHttpType(type: unknown): boolean {
 /** True when resolving this connector still writes its secret into an agent-readable file. */
 export function exposesSecretToAgent(entry: CustomConnectorEntry): boolean {
   return connectorSecretRoute(entry) === 'exposed';
+}
+
+const CONFIRM_TOOL_RE = /^[A-Za-z0-9_.-]{1,64}$/;
+const MAX_CONFIRM_TOOLS = 64;
+
+/**
+ * `config.confirmTools`: tool names a worker must confirm with the user before calling.
+ * Structured data only, so the worker prompt line built from it is a fixed template and
+ * a connector's free text never reaches a worker as an instruction. `undefined` when
+ * absent. Run at the API boundary (a 400) and again when rendering, since config.json
+ * can also be edited by hand.
+ */
+export function parseConfirmTools(config: Record<string, unknown>): string[] | { error: string } | undefined {
+  const raw = config.confirmTools;
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw) || !raw.every(name => typeof name === 'string' && CONFIRM_TOOL_RE.test(name))) {
+    return { error: 'confirmTools must be an array of tool names matching [A-Za-z0-9_.-]{1,64}' };
+  }
+  if (raw.length > MAX_CONFIRM_TOOLS) return { error: `confirmTools must list at most ${MAX_CONFIRM_TOOLS} tools` };
+  if (new Set(raw).size !== raw.length) return { error: 'confirmTools must not repeat a tool name' };
+  return raw as string[];
+}
+
+/** Without confirmTools: the gateway reads it, the connector's MCP server never does. */
+export function withoutConfirmTools(server: Record<string, unknown>): Record<string, unknown> {
+  if (server.confirmTools === undefined) return server;
+  const { confirmTools: _confirmTools, ...rest } = server;
+  return rest;
 }

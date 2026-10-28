@@ -9,8 +9,9 @@
 import type { AgentConfig, CustomConnectorEntry } from '../types';
 import { type ConnectorStatus } from './types';
 import { parseCounter, readTokenEnv } from './token-env';
-import { customSecretKey, substitutePlaceholders } from './custom';
+import { customSecretKey, hasAllSecrets, substitutePlaceholders, withoutConfirmTools } from './custom';
 import { secretExposureFields } from './exposure';
+import { connectorSidecars } from './sidecar';
 import {
   refreshTransientCountSecretKey,
   refreshFailCountSecretKey,
@@ -95,7 +96,7 @@ export function resolveEnabledConnectors(
       }
       if (!allPresent) continue; // enabled but not fully connected — skip
 
-      out[id] = substitutePlaceholders(entry.config, secrets);
+      out[id] = withSidecarUrl(id, withoutConfirmTools(substitutePlaceholders(entry.config, secrets)));
     } catch (err) {
       // A malformed pasted config (see CustomConnectorEntry's doc comment:
       // admin-trusted, not code-reviewed) must not take down every other
@@ -106,6 +107,17 @@ export function resolveEnabledConnectors(
   }
 
   return out;
+}
+
+/**
+ * A sidecar entry resolves to a plain HTTP entry: no `sidecar` field, and the url of
+ * the running sidecar, which is absent until it is ready (the proxy waits for it).
+ */
+function withSidecarUrl(id: string, server: Record<string, unknown>): Record<string, unknown> {
+  if (server.sidecar === undefined) return server;
+  const { sidecar: _sidecar, ...rest } = server;
+  const url = connectorSidecars.get().urlOf(id);
+  return url ? { ...rest, url } : rest;
 }
 
 /**
@@ -174,9 +186,7 @@ export function listConnectorStatus(
 
   return Object.entries(customConnectors).map(([id, entry]) => {
     try {
-      const connected = entry.secretNames.every(
-        (name: string) => !!tokenEnv[customSecretKey(id, name)],
-      );
+      const connected = hasAllSecrets(id, entry, tokenEnv);
       // Omitted rather than set to undefined when refresh is healthy: the single-status
       // route omits it too, and a caller doing `'refresh' in status` should get the same
       // answer from both.
@@ -185,6 +195,7 @@ export function listConnectorStatus(
       // pushed it — this gateway holds no refresh_token for it, so the sweep skips it
       // and every counter here would read a constant 0.
       const refresh = entry.credentialOwner === 'gateway' ? refreshStatusOf(id, tokenEnv) : undefined;
+      const sidecar = connectorSidecars.get().statusOf(id);
       return {
         id,
         label: entry.label,
@@ -196,6 +207,7 @@ export function listConnectorStatus(
         ...(entry.defaultEnabled !== undefined ? { defaultEnabled: entry.defaultEnabled } : {}),
         ...(entry.paused === true ? { paused: true } : {}),
         ...(refresh ? { refresh } : {}),
+        ...(sidecar ? { sidecar } : {}),
         ...secretExposureFields(id, entry),
       } as ConnectorStatus;
     } catch (err) {
