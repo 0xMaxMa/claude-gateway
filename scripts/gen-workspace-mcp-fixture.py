@@ -1,7 +1,7 @@
 # Regenerates mcp/fixtures/workspace-mcp-tools.json: the {name, description} of
-# every tool GetPod's Google connectors expose, as the MCP tools/list returns them.
+# every tool the Google Workspace connectors expose, as the MCP tools/list returns them.
 #
-# Mirrors GetPod's sidecar spec (services/api/internal/workspacemcp/sidecar.go):
+# Mirrors the sidecar spec a client pushes for these connectors:
 #   workspace-mcp==2.1.1 --transport streamable-http --tools <service>
 #     --tool-tier complete --disabled-tools start_google_auth <DISABLED[service]>
 #
