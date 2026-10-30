@@ -2,6 +2,7 @@ import { batchableInput, inputBatch } from './input-batch';
 import {compactComputerPromptState} from './computer-prompt';
 import {CURRENT_CONTROL_ROUND_SQL} from './control-notification';
 import {attachComputerEndScreenshot} from './computer-end-screenshot';
+import {computerProgressLabel} from './computer-progress-label';
 import {handDirectCommandToAgent,liveExecutionInput,liveControlReceipt} from './live-execution-input';
 import {agentHandoffRequested,directCommandSpeech,readRequested} from '../automation/command-speech';
 import {ComputerTaskAdapter} from './gateway-tasks/computer';
@@ -327,7 +328,7 @@ export class AgentOrchestrationRuntime {
       evaluate:computerEvaluator(gateway,agent,task=>{try{store.assertMember(task.conversationId,task.ownerPrincipalId);return true;}catch{return false;}}),
       vision:computerVision(gateway,agent,task=>{try{store.assertMember(task.conversationId,task.ownerPrincipalId);return true;}catch{return false;}}),
       needsInput:(task,question)=>{const current=store.task(task.taskId),attempt=task.activeAttemptId?store.attempt(task.activeAttemptId):undefined;if(!current||!attempt||current.activeAttemptId!==task.activeAttemptId||current.revision!==attempt.revision||!['starting','running','interrupting'].includes(current.state))return false;if(current.state==='starting')tasks.started(attempt.attemptId,attempt.generation);tasks.requestInput(attempt.attemptId,attempt.generation,question,undefined,task.computerReport);return true;},
-      progress:(task,report)=>store.transaction(()=>{const current=store.task(task.taskId);if(!current||current.activeAttemptId!==task.activeAttemptId||!['starting','running','interrupting'].includes(current.state))return;current.computerReport=report;current.latestProgress={source:'runtime',observedAt:Date.now(),text:`Computer Use: ${report.phase} · ${report.steps} actions · ${report.evaluations??0} evaluations.${current.queuedCommands?.length?` ${current.queuedCommands.length} queued command${current.queuedCommands.length===1?'':'s'} waiting.`:''}`};store.saveTask(current,current.stateVersion);})
+      progress:(task,report)=>store.transaction(()=>{const current=store.task(task.taskId);if(!current||current.activeAttemptId!==task.activeAttemptId||!['starting','running','interrupting'].includes(current.state))return;current.computerReport=report;current.latestProgress={source:'runtime',observedAt:Date.now(),text:`${computerProgressLabel(report)}${current.queuedCommands?.length?` ${current.queuedCommands.length} queued command${current.queuedCommands.length===1?'':'s'} waiting.`:''}`};store.saveTask(current,current.stateVersion);})
     }));
     const bridge = new TaskBridge(tasks, files, workerShares(files, agent, gateway), host.skills ? () => host.skills!() : undefined, agent.type === 'app-agent' ? { agent, spool: join(root, 'container-files') } : undefined, workerCrons(files, agent, gateway), gatewayAdapters);
     const voiceConfig = () => resolveOrchestrationConfig(agent.orchestration, agent.voice ?? { enabled: false }).voice;
