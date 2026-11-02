@@ -19,7 +19,8 @@ export class TaskControls {
     const finishedAt = ['completed','failed','cancelled'].includes(task.state) ? Number(timing?.finished_at ?? task.updatedAt) : undefined;
     const latestProgress = task.latestProgress?.source === 'runtime' && task.latestProgress.text.startsWith('Queued after task ') && task.state !== 'queued' ? undefined : task.latestProgress;
     // A closed computer session keeps device access until the device confirms revocation.
-    const revocationNote = task.computerRevocation ? 'Session closed; waiting for the device to confirm access stopped.' : undefined;
+    const revocationNote = task.computerRevocation ? 'Session closed; waiting for the device to confirm access stopped.'
+      : task.computerAccessReleased && task.computerAccessReleased.requestId === task.gatewayDispatch?.requestId && !task.activeAttemptId ? 'Device access released while idle; the next command asks the device again.' : undefined;
     const progressText = [task.failure ? `${task.failure.code}: ${task.failure.message}` : latestProgress?.text.slice(0,1500), revocationNote, task.replacedByTaskId ? `Replaced by task ${task.replacedByTaskId}` : undefined].filter(Boolean).join('\n');
     const activityDetails = task.execution && ['running','starting'].includes(task.state) ? executionDetails(task.execution) : undefined;
     const attemptRow = this.store.get('SELECT payload_json FROM task_attempts WHERE task_id=? ORDER BY generation DESC LIMIT 1', task.taskId);

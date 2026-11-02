@@ -661,12 +661,29 @@ export class TaskService {
     return task;
   }
   /** A settled computer round still owns device access until explicit revocation. */
+  /** Records a settled computer session's idle expiry; the save revokes its device access (syncAutomationSession). */
+  expireIdleComputerSession(taskId:string,expectedVersion:number):void {
+    this.store.transaction(()=>{
+      const task=this.store.task(taskId);
+      if(!task||task.stateVersion!==expectedVersion||task.automationSession?.status==='closed'||automationSession(task)?.closedReason!=='idle_timeout')return;
+      this.store.saveTask(task,task.stateVersion);
+    });
+  }
+  /** The controller ended an idle round's device session; recorded so it ends once. */
+  recordIdleComputerRelease(taskId:string,requestId:string):void {
+    this.store.transaction(()=>{
+      const task=this.store.task(taskId);
+      if(!task||task.activeAttemptId||task.gatewayDispatch?.requestId!==requestId)return;
+      task.computerAccessReleased={requestId,releasedAt:Date.now()};
+      this.store.saveTask(task,task.stateVersion);
+    });
+  }
   finishIdleComputerCleanup(taskId:string,requestId:string):void {
     this.store.transaction(()=>{
       const task=this.store.task(taskId);
       if(!task||task.activeAttemptId||task.gatewayTarget?.adapter!=='computer'||task.gatewayDispatch?.requestId!==requestId)throw new OrchestrationError('STALE_ATTEMPT');
       // A terminal round keeps its reported outcome; only the pending revocation is settled.
-      if(TERMINAL_TASK_STATES.has(task.state)&&task.computerRevocation?.requestId===requestId){delete task.computerRevocation;this.store.saveTask(task,task.stateVersion);return;}
+      if((TERMINAL_TASK_STATES.has(task.state)||task.state==='waiting_input')&&task.computerRevocation?.requestId===requestId){delete task.computerRevocation;this.store.saveTask(task,task.stateVersion);return;}
       if(task.state!=='cancel_requested')throw new OrchestrationError('STALE_ATTEMPT');
       task.state='cancelled';task.latestProgress={source:'runtime',observedAt:Date.now(),text:'Computer Use disconnected.'};
       this.store.saveTask(task,task.stateVersion);this.notify(task);

@@ -16,7 +16,8 @@ function fixture(endSession:'stopped'|'error'='stopped',needsInput:(...args:any[
  const task={agentId:'a',taskId:'t',ownerPrincipalId:'p',conversationId:'c',revision:1,automationController:'user',gatewayTarget:{adapter:'computer',sessionId:'target'}} as any;
  const run=async(t:any,request:string,goal:string)=>{await adapter.submit(t,request,goal);for(let i=0;i<50;i++){const outcome=await adapter.inspect(t,request);if(typeof outcome==='object')return outcome as any;await new Promise(r=>setImmediate(r));}throw Error('not settled');};
  const ended=()=>callTool.mock.calls.filter(([c]:any)=>c.name==='computer_end_session');
- return {adapter,task,run,ended,close:async()=>{await adapter.close();rmSync(root,{recursive:true,force:true});}};
+ const calls=()=>callTool.mock.calls.map(([c]:any)=>c);
+ return {adapter,task,run,ended,calls,close:async()=>{await adapter.close();rmSync(root,{recursive:true,force:true});}};
 }
 const observe=(deps:any)=>deps.observation({generation:'g',application:'com.google.Chrome',controls:[],apps:[],truncated:false});
 
@@ -131,4 +132,54 @@ test('device_shell on the same Mac leaves the session to a computer run still in
   // The run itself still ends the session once its goal is reached.
   expect(callTool.mock.calls.filter(([c]:any)=>c.name==='computer_end_session')).toHaveLength(1);
  }finally{await f.close();}
+});
+
+// Pod-jinawong Windows: a settled round waiting for the next command kept the PC "Being
+// controlled". GatewayTaskController calls endSession once the round is idle.
+describe('endSession for an idle settled round',()=>{
+ const dispatched=(t:any,requestId:string)=>({...t,gatewayDispatch:{requestId,submittedAt:Date.now()}});
+ test('ends the device session, and the next command asks the device for access again',async()=>{
+  const f=fixture();try{
+   runComputerUse.mockImplementationOnce(async()=>({status:'needs_input',reason:'COMMAND_WAITING_INPUT',steps:1,evaluations:1}));
+   expect((await f.run(f.task,'r1','open Chrome')).type).toBe('paused');expect(f.ended()).toHaveLength(0);
+   expect(await f.adapter.endSession(dispatched(f.task,'r1'),'r1')).toBe(true);
+   expect(f.ended()).toEqual([[{name:'computer_end_session',arguments:{device_id:'d',grant_id:'g'}},undefined,expect.anything()]]);
+   runComputerUse.mockImplementationOnce(async()=>({status:'needs_input',reason:'COMMAND_WAITING_INPUT',steps:1,evaluations:1}));
+   const before=f.calls().length;
+   await f.run({...f.task,revision:2,executionControl:{revision:2}},'r2','open youtube.com');
+   // The new round's first relay call is computer_request_access: a stored grant re-approves it silently.
+   expect(f.calls().slice(before)[0]).toMatchObject({name:'computer_request_access',arguments:{device_id:'d',grant_id:'g',request_id:'r2'}});
+  }finally{await f.close();}
+ });
+ test('an unconfirmed action keeps the session',async()=>{
+  const f=fixture();try{
+   runComputerUse.mockImplementationOnce(async(_input:any,deps:any)=>{observe(deps);await deps.beforeMutation('op-1',{});return {status:'needs_reconciliation',reason:'OUTCOME_UNKNOWN',steps:1,evaluations:1};});
+   await f.run(f.task,'r1','click Send');
+   expect(await f.adapter.endSession(dispatched(f.task,'r1'),'r1')).toBeUndefined();expect(f.ended()).toHaveLength(0);
+  }finally{await f.close();}
+ });
+ test('a round still running on the device keeps the session',async()=>{
+  const f=fixture();try{
+   runComputerUse.mockImplementationOnce(async()=>({status:'needs_input',reason:'COMMAND_WAITING_INPUT',steps:1,evaluations:1}));
+   await f.run(f.task,'r1','open Chrome');
+   let finish!:()=>void;
+   runComputerUse.mockImplementationOnce(()=>new Promise(resolve=>{finish=()=>resolve({status:'needs_input',reason:'COMMAND_WAITING_INPUT',steps:1,evaluations:1});}));
+   const next={...f.task,revision:2,executionControl:{revision:2}};
+   await f.adapter.submit(next,'r2','open youtube.com');
+   for(let i=0;i<20&&!finish;i++)await new Promise(r=>setImmediate(r));
+   expect(await f.adapter.endSession(dispatched(f.task,'r1'),'r1')).toBeUndefined();
+   // r2 itself has not ended yet either.
+   expect(await f.adapter.endSession(dispatched(next,'r2'),'r2')).toBeUndefined();
+   expect(f.ended()).toHaveLength(0);
+   finish();for(let i=0;i<50&&typeof await f.adapter.inspect(next,'r2')!=='object';i++)await new Promise(r=>setImmediate(r));
+   expect(await f.adapter.endSession(dispatched(next,'r2'),'r2')).toBe(true);
+  }finally{await f.close();}
+ });
+ test('a request that is not the task\'s current round is never ended',async()=>{
+  const f=fixture();try{
+   runComputerUse.mockImplementationOnce(async()=>({status:'needs_input',reason:'COMMAND_WAITING_INPUT',steps:1,evaluations:1}));
+   await f.run(f.task,'r1','open Chrome');
+   expect(await f.adapter.endSession(dispatched(f.task,'r2'),'r1')).toBeUndefined();expect(f.ended()).toHaveLength(0);
+  }finally{await f.close();}
+ });
 });

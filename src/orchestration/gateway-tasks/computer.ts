@@ -121,7 +121,7 @@ export class ComputerTaskAdapter implements GatewayTaskAdapter {
    // unless a computer run or another command still uses it. The owner's access and shell
    // grants stay, so the next command is approved again without a prompt. A shell prompt still
    // open (CONSENT_PENDING) or a command that may still run (SHELL_OUTCOME_UNKNOWN) keeps it.
-   const accessReleased=result.error!=='CONSENT_PENDING'&&result.error!=='SHELL_OUTCOME_UNKNOWN'&&this.holders.get(hold)===1&&permitted()?await this.endSession(client,b.scope):undefined;
+   const accessReleased=result.error!=='CONSENT_PENDING'&&result.error!=='SHELL_OUTCOME_UNKNOWN'&&this.holders.get(hold)===1&&permitted()?await this.endRelaySession(client,b.scope):undefined;
    const released=accessReleased===undefined?{}:{accessReleased};
    if(result.error)return {error:result.error,...released,instruction:SHELL_ERROR_HINTS[result.error]??'The device refused the command; report this code to the user. Do not claim it ran.'};
    const {exitCode,signal:killedBy,stdout,stderr,truncated,durationMs,timedOut,killed}=result.value;
@@ -268,7 +268,7 @@ export class ComputerTaskAdapter implements GatewayTaskAdapter {
    result??=await (steps?runComputerSteps:runComputerUse)(axInput,deps,AbortSignal.any([signal,AbortSignal.timeout(125000)]));
    // A reached goal ends the device session too: the Mac stops showing it as
    // controlled and the owner's next request asks for access again.
-   const accessReleased=result.status==='succeeded'&&result.reason==='GOAL_REACHED'&&!receipt.operationId&&authorized()?await this.endSession(client,b.scope):undefined;
+   const accessReleased=result.status==='succeeded'&&result.reason==='GOAL_REACHED'&&!receipt.operationId&&authorized()?await this.endRelaySession(client,b.scope):undefined;
    const report={...(accessReleased?{accessReleased}:{}),status:result.status,reason:result.reason,steps:result.steps,evaluations:result.evaluations,phase:'terminal',trace:receipt.trace?.slice(-12),...(fieldRequest??result.fieldRequest?{fieldRequest:fieldRequest??result.fieldRequest}:{}),...(result.stepRun?{stepRun:result.stepRun}:{}),...(result.lastAction?{lastAction:result.lastAction}:{})};
    let outcome:WorkerOutcome;
    const validation=[...(result.trace?.events??[])].reverse().find(e=>e.validationReason)?.validationReason;
@@ -392,8 +392,24 @@ export class ComputerTaskAdapter implements GatewayTaskAdapter {
    if(stopped){x.ended=true;x.outcome={type:'stopped',computerReport:x.outcome?.computerReport};this.write(t,r,x);}
   }catch{/* Keep cancellation pending until access revocation is confirmed. */}
  }
+ /** Ends an idle settled round's device session (GatewayTaskController): the Mac or PC stops
+  * showing it as controlled. The task stays open; its next command asks for access again, which a
+  * stored grant approves without a prompt. undefined: not ended, the round may still act (no
+  * receipt end, an unconfirmed operation) or a shell call or another run holds the device. */
+ async endSession(t:TaskSnapshot,r:string):Promise<boolean|undefined>{
+  if(!this.permitted(t.ownerPrincipalId,t.conversationId)||t.gatewayDispatch?.requestId!==r)return;
+  const x=this.read(t,r);if(!x?.ended||x.operationId)return;
+  try{
+   let b:ReturnType<ComputerConnectors['get']>;
+   try{b=this.options.connectors.get(t.gatewayTarget!.sessionId,t.ownerPrincipalId,t.conversationId);}
+   catch{await this.options.connectors.discover({principalId:t.ownerPrincipalId,conversationId:t.conversationId},()=>this.permitted(t.ownerPrincipalId,t.conversationId));b=this.options.connectors.get(t.gatewayTarget!.sessionId,t.ownerPrincipalId,t.conversationId);}
+   const held=()=>this.holders.has(`${b.connectorId}|${JSON.stringify(b.scope)}`);
+   if(held())return;
+   return await withComputerConnection(this.options.connectors.connection(b.connectorId),async client=>held()||!this.permitted(t.ownerPrincipalId,t.conversationId)?undefined:this.endRelaySession(client,b.scope),AbortSignal.timeout(6000));
+  }catch{return false;}
+ }
  /** Ends the relay session after a reached goal; false when the relay does not confirm it. */
- private async endSession(client:Parameters<Parameters<typeof withComputerConnection>[1]>[0],scope:Record<string,unknown>):Promise<boolean>{
+ private async endRelaySession(client:Parameters<Parameters<typeof withComputerConnection>[1]>[0],scope:Record<string,unknown>):Promise<boolean>{
   try{
    const response=await client.callTool({name:'computer_end_session',arguments:scope},undefined,{signal:AbortSignal.timeout(5000),timeout:5000});
    const text=(response.content as any[])?.find(v=>v.type==='text')?.text;

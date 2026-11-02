@@ -1,4 +1,4 @@
-import {automationSession} from '../tasks/automation-session';
+import {automationSession,confirmationAsked} from '../tasks/automation-session';
 import { GatewayTaskTarget, PublicTaskSnapshot, TaskSnapshot, WorkerOutcome, CommandContext, TaskAttempt } from '../types';
 import { TaskService } from '../tasks/service';
 import { taskFailure } from '../tasks/failure';
@@ -27,7 +27,14 @@ export interface GatewayTaskAdapter {
   inspect(task: TaskSnapshot, requestId: string, attempt?:TaskAttempt): Promise<WorkerOutcome | 'running' | 'pending'>;
   interrupt?(task:TaskSnapshot,requestId:string):void;
   cancel(task: TaskSnapshot, requestId: string): Promise<void>;
+  /** Ends a settled round's device session while the task stays open; undefined when something still uses the device. */
+  endSession?(task: TaskSnapshot, requestId: string): Promise<boolean | undefined>;
 }
+
+/** A settled computer round releases the device after this long idle: the owner's Mac
+ * or PC stops showing it as controlled. The next command asks for access again, which
+ * a stored grant approves without a prompt. */
+export const DEVICE_IDLE_RELEASE_MS = 90_000;
 
 /** Durable tracking of existing external execution. No model or worker is spawned
  * by this controller. Adapters own transport; the normal task service owns
@@ -41,9 +48,11 @@ export class GatewayTaskController {
   private recoveries=new Map<string,Promise<void>>();
   private stopCheckAfter=new Map<string,number>();
   private recoveryAfter=new Map<string,number>();
+  private releaseAfter=new Map<string,number>();
   constructor(private readonly tasks: TaskService, private readonly adapters: Map<string, GatewayTaskAdapter>, private readonly reportError: (e: unknown) => void = e => console.warn(JSON.stringify({event:'gateway_task_tracking_error',code:taskFailure(e).code})),
     /** A finished round, with the user input that started it when it was a direct command. */
-    private readonly settled?: (task: TaskSnapshot, round: {revision: number; inputId?: string; outcome: WorkerOutcome}) => void) {}
+    private readonly settled?: (task: TaskSnapshot, round: {revision: number; inputId?: string; outcome: WorkerOutcome}) => void,
+    private readonly deviceIdleReleaseMs = DEVICE_IDLE_RELEASE_MS) {}
   start(): void {
     this.timer = setInterval(() => { void this.tick().catch(this.reportError); }, 1000);
     this.timer.unref();
@@ -92,6 +101,15 @@ export class GatewayTaskController {
           if(typeof outcome==='object'&&outcome.type==='stopped')this.tasks.finishIdleComputerCleanup(task.taskId,requestId);
         }catch(error){this.reportError(error);}
         continue;
+      }
+      if(task.gatewayTarget?.adapter==='computer'&&['waiting_input','completed','failed'].includes(task.state)&&!task.activeAttemptId&&task.gatewayDispatch){
+        const session=automationSession(task);
+        // An expired session ends the device session too, whoever controlled it (service.ts cancelOwned).
+        if(session?.status==='closed'&&session.closedReason==='idle_timeout'&&task.automationSession?.status!=='closed'){
+          try{this.tasks.expireIdleComputerSession(task.taskId,task.stateVersion);this.again=true;}catch(error){this.reportError(error);}
+          continue;
+        }
+        if(session&&session.status!=='closed'&&session.status!=='active'&&Date.now()-(session.idleSince??task.updatedAt)>=this.deviceIdleReleaseMs)await this.releaseIdleDevice(task);
       }
       if(!task.gatewayTarget||task.state==='waiting_input'||task.state==='cancelled'||task.state==='completed'||task.state==='failed')continue;
       if(task.state==='needs_reconciliation'){
@@ -182,6 +200,24 @@ export class GatewayTaskController {
         this.tasks.finish(attempt.attemptId, attempt.generation, {type: task.gatewayDispatch && !(error instanceof GatewayRequestNotSentError) ? 'unknown' : 'failed',failure:taskFailure(error, task.gatewayDispatch && !(error instanceof GatewayRequestNotSentError) ? 'GATEWAY_REQUEST_UNCONFIRMED' : 'GATEWAY_REQUEST_DENIED')});
       }
     }
+  }
+  /** Ends an idle settled round's device session once; the task and its automation session stay open. */
+  private async releaseIdleDevice(task: TaskSnapshot): Promise<void> {
+    const requestId=task.gatewayDispatch!.requestId,adapter=this.adapters.get('computer'),report=task.computerReport;
+    if(!adapter?.endSession||task.computerAccessReleased?.requestId===requestId||report?.accessReleased)return;
+    // Something may still act or answer on the device: an unconfirmed action, a yes/no or
+    // field value the owner owes, or an access prompt still open on the device.
+    if(report?.status==='needs_reconciliation'||report?.fieldRequest||confirmationAsked(task)||task.failure?.code==='COMPUTER_ACCESS_TIMEOUT'||task.computerConnection==='waiting_access')return;
+    if(Date.now()<(this.releaseAfter.get(task.taskId)??0))return;
+    if(this.releaseAfter.size>1000)this.releaseAfter.clear();
+    this.releaseAfter.set(task.taskId,Date.now()+5000);
+    try{
+      const released=await adapter.endSession(task,requestId);
+      if(released===undefined)return;
+      if(!released){this.releaseAfter.set(task.taskId,Date.now()+60000);return;}
+      this.releaseAfter.delete(task.taskId);
+      this.tasks.recordIdleComputerRelease(task.taskId,requestId);
+    }catch(error){this.reportError(error);}
   }
   private targetBusy(task: TaskSnapshot): boolean {
     return Boolean(this.tasks.store.get(`SELECT id FROM tasks WHERE id!=? AND active_attempt_id IS NOT NULL

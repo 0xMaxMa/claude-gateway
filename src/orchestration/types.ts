@@ -77,6 +77,8 @@ export interface TaskSnapshot {
   gatewayDispatch?: { requestId: string; submittedAt: number };
   /** End session on a settled computer round: device access still to revoke. The round's outcome stays as reported. */
   computerRevocation?: { requestId: string; requestedAt: number };
+  /** The idle settled round whose device session the gateway ended; the task stays open (GatewayTaskController). */
+  computerAccessReleased?: { requestId: string; releasedAt: number };
 
   continueTaskId?: string;
   continuationPolicy?: 'after_success' | 'after_terminal';

@@ -113,6 +113,16 @@ function commandLines(lines:string[]) {
   return body;
 }
 
+/** First paragraph of a GetPod Desktop composer message sent with the Computer Use tag
+ * (getpod-app src/shared/computer-use-mode.ts, Mac and PC): agent instructions, not the user's steps. */
+const COMPUTER_USE_DIRECTIVE = '[Computer Use] Do this on my ';
+/** The user's own text after the GetPod Desktop Computer Use directive, or the text unchanged. */
+export function withoutComputerUseDirective(command:string) {
+  if (!command.startsWith(COMPUTER_USE_DIRECTIVE)) return command;
+  const end = command.indexOf('\n\n');
+  return end < 0 ? '' : command.slice(end + 2);
+}
+
 /**
  * Returns ordered atomic steps only for an unmistakable explicit step list.
  * A numbered or bulleted list yields exactly its items; otherwise commas and
@@ -120,7 +130,9 @@ function commandLines(lines:string[]) {
  * single-step or ambiguous stays on the normal path.
  */
 export function parseCommandSteps(command:string):string[] | undefined {
-  if (typeof command !== 'string' || command.length > 4000) return;
+  if (typeof command !== 'string') return;
+  command = withoutComputerUseDirective(command);
+  if (command.length > 4000) return;
   const lines = command.split(/\r?\n/u).map(line => META.test(line.trim()) ? '' : line);
   // Conditions anywhere, including an ignored preamble, need reasoning between steps.
   if (lines.some(line => CONDITIONAL.test(maskQuotes(line)))) return;

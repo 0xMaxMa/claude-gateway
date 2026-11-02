@@ -20,9 +20,9 @@ export function automationSession(task: TaskSnapshot, now = Date.now()): Automat
     ['completed','failed'].includes(task.state) || (task.state === 'waiting_input' && !task.activeAttemptId) ? 'idle' : 'active';
   if (status === 'active') return {status,idleTimeoutMs};
   const idleSince = prior?.idleSince ?? task.updatedAt;
-  // A user-driven conversation stays open while it waits for their next command;
-  // a failed round expires like any other, whoever controlled it.
-  if ((task.automationController !== 'user' || task.state === 'failed') && now - idleSince >= idleTimeoutMs) return {status:'closed',idleTimeoutMs,idleSince,closedAt:idleSince+idleTimeoutMs,closedReason:'idle_timeout'};
+  // Every session expires, whoever controlled it: an open session must not hold the
+  // device forever (the controller ends a computer session's device access on expiry).
+  if (now - idleSince >= idleTimeoutMs) return {status:'closed',idleTimeoutMs,idleSince,closedAt:idleSince+idleTimeoutMs,closedReason:'idle_timeout'};
   return {status,idleTimeoutMs,idleSince};
 }
 /** The agent's own goal run: its spawn text opens a session the user drives
@@ -73,7 +73,7 @@ export function parkedGoalRunNote(task: TaskSnapshot): string {
   ].filter(Boolean).join(' ');
 }
 /** The run stopped to ask the owner yes or no before a high-impact action. */
-function confirmationAsked(task: TaskSnapshot): boolean {
+export function confirmationAsked(task: TaskSnapshot): boolean {
   return !!task.computerReport?.lastAction?.confirm||task.browserReport?.commandOutcome?.reason==='CONFIRMATION_REQUIRED'
     ||!!task.computerReport?.trace?.some(e=>e.reason==='CONFIRMATION_REQUIRED');
 }
@@ -119,5 +119,10 @@ export function syncAutomationSession(task: TaskSnapshot, now = Date.now()): voi
   if (task.automationSession?.status === 'active' && ['completed','failed','waiting_input','needs_reconciliation'].includes(task.state)) {
     task.automationSession.idleSince = now;
   }
-  task.automationSession = automationSession(task,now);
+  const next = automationSession(task,now);
+  // Whichever save first records the expiry also revokes the device access of a settled
+  // computer round, as an explicit close does (TaskService.cancelOwned).
+  if (next?.closedReason === 'idle_timeout' && task.automationSession?.status !== 'closed' && task.gatewayTarget?.adapter === 'computer' && task.gatewayDispatch && !task.activeAttemptId)
+    task.computerRevocation ??= {requestId:task.gatewayDispatch.requestId,requestedAt:now};
+  task.automationSession = next;
 }
