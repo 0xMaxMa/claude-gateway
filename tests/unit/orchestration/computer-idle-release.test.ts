@@ -7,7 +7,7 @@ import {TaskService} from '../../../src/orchestration/tasks/service';
 import {DecisionService} from '../../../src/orchestration/decisions';
 import {TaskControls} from '../../../src/orchestration/task-controls';
 import {GatewayTaskController,DEVICE_IDLE_RELEASE_MS,type GatewayTaskAdapter} from '../../../src/orchestration/gateway-tasks/controller';
-import {AUTOMATION_IDLE_TIMEOUT_MS,automationSession} from '../../../src/orchestration/tasks/automation-session';
+import {AUTOMATION_IDLE_TIMEOUT_MS,automationSession,computerAccess,computerDevice} from '../../../src/orchestration/tasks/automation-session';
 import type {TaskSnapshot} from '../../../src/orchestration/types';
 
 // Pod-jinawong, getpod-app Windows: "[Computer Use] เปิด Chrome" opened Chrome, the round
@@ -135,4 +135,38 @@ test.each([['user','a save'],['agent','a save'],['user','no save'],['agent','no 
   expect(f.get().computerRevocation).toBeUndefined();expect(f.get().state).toBe('waiting_input');
   expect(f.ended()).toBe(0);
  }finally{await f.close();}
+});
+
+// Pod-jinawong, getpod-app Windows (DESKTOP-MINVS33): after the idle release the task card still
+// counted "1 active task" and said "Access stopped" about "the Mac". The card reads computerAccess.
+test('the task card reads computerAccess: released while idle, cleared by the next round, stopped by the owner',async()=>{
+ const f=fixture();try{
+  await f.controller.tick();await f.controller.tick();
+  const view=()=>new TaskControls(f.store,f.tasks).list('s','u',0,10).tasks[0] as any;
+  expect(computerAccess(f.get())).toBeUndefined();expect(view().computerAccess).toBeUndefined();
+  f.idleFor(DEVICE_IDLE_RELEASE_MS+1000);await f.controller.tick();
+  expect(computerAccess(f.get())).toBe('released');expect(view().computerAccess).toBe('released');
+  expect(view().computerDevice).toBe('PC');
+  // A follow-up continues the same task: its new round is live work again.
+  f.send('Open youtube.com');
+  expect(computerAccess(f.get())).toBeUndefined();
+  await f.controller.tick();await f.controller.tick();
+  expect(f.get().state).toBe('waiting_input');expect(computerAccess(f.get())).toBeUndefined();
+  f.tasks.cancelByUser(f.accepted.conversationId,'u',f.get().taskId);
+  expect(computerAccess(f.get())).toBe('stopped');expect(view().computerAccess).toBe('stopped');
+ }finally{await f.close();}
+});
+
+test('an idle-timeout close and an agent close are neither released nor stopped by the owner',async()=>{
+ const f=fixture(async()=>undefined);try{
+  await f.controller.tick();await f.controller.tick();
+  f.idleFor(AUTOMATION_IDLE_TIMEOUT_MS+1000);
+  expect(computerAccess(f.get())).toBeUndefined();
+ }finally{await f.close();}
+});
+
+test('computerDevice is the device label of a computer target only',()=>{
+ expect(computerDevice({gatewayTarget:{adapter:'computer',sessionId:'x',name:'Computer Use · DESKTOP-MINVS33'}})).toBe('DESKTOP-MINVS33');
+ expect(computerDevice({gatewayTarget:{adapter:'browser',sessionId:'x',name:'Chrome'}})).toBeUndefined();
+ expect(computerDevice({})).toBeUndefined();
 });

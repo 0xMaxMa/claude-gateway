@@ -25,6 +25,22 @@ export function automationSession(task: TaskSnapshot, now = Date.now()): Automat
   if (now - idleSince >= idleTimeoutMs) return {status:'closed',idleTimeoutMs,idleSince,closedAt:idleSince+idleTimeoutMs,closedReason:'idle_timeout'};
   return {status,idleTimeoutMs,idleSince};
 }
+/** Device access of a computer task, for the task card: 'released' when the gateway ended an
+ * idle settled round's device session (the task stays open and the next command asks the device
+ * again, so it is not active work), 'stopped' when the owner ended it (Disconnect, or Stop or
+ * panic on the device, which the controller turns into a user cancel). */
+export function computerAccess(task: Omit<TaskSnapshot,'skill'>, now = Date.now()): 'released' | 'stopped' | undefined {
+  if (task.gatewayTarget?.adapter !== 'computer') return;
+  const session = automationSession(task, now);
+  if (task.cancellation?.requestedBy === 'user' || (session?.status === 'closed' && session.closedReason === 'user')) return 'stopped';
+  if (session?.status !== 'closed' && !task.activeAttemptId && ['waiting_input','completed','failed'].includes(task.state)
+    && task.computerAccessReleased?.requestId === task.gatewayDispatch?.requestId && task.computerAccessReleased) return 'released';
+}
+/** The device a computer task controls, by its own label ("Computer Use · DESKTOP-1" → "DESKTOP-1"). */
+export function computerDevice(task: Pick<TaskSnapshot,'gatewayTarget'>): string | undefined {
+  if (task.gatewayTarget?.adapter !== 'computer') return;
+  return task.gatewayTarget.name.replace(/^Computer Use · /, '').trim().slice(0, 80) || undefined;
+}
 /** The agent's own goal run: its spawn text opens a session the user drives
  * (revision 1, no user command yet). Later revisions are the user's own commands. */
 export function agentGoalRun(task: TaskSnapshot): boolean {
