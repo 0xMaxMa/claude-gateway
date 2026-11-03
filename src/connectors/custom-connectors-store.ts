@@ -1,6 +1,7 @@
 import * as fsp from 'fs/promises';
 import type { CustomConnectorEntry } from '../types';
 import { withConfigWriteLock, writeConfigAtomic } from '../config/config-write-lock';
+import { connectorSidecars } from './sidecar';
 
 /**
  * Read-modify-write access to config.json's `gateway.customConnectors` subtree,
@@ -126,6 +127,8 @@ export function createCustomConnectorsStore(configPath?: string): CustomConnecto
       config.gateway.customConnectors = connectors;
       fn(connectors);
       await writeConfigAtomic(configPath, config);
+      // Every route that creates, replaces or pauses an entry writes through here.
+      connectorSidecars.get().reconcile(connectors);
     });
   }
 
@@ -251,7 +254,10 @@ export function createCustomConnectorsStore(configPath?: string): CustomConnecto
         // read. Surfaces as a 500 instead.
         throw new Error(`Cannot remove connector '${connectorId}': ${configPath} is unreadable`);
       }
-      if (dropConnector(config, connectorId)) await writeConfigAtomic(configPath, config);
+      if (dropConnector(config, connectorId)) {
+        await writeConfigAtomic(configPath, config);
+        connectorSidecars.get().reconcile(config.gateway?.customConnectors);
+      }
       return result;
     });
   }

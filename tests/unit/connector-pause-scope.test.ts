@@ -143,7 +143,7 @@ describe('pause / resume', () => {
     expect(fs.readFileSync(TOKEN_ENV, 'utf8')).toBe(tokenBefore);
 
     const list = await request(app).get('/api/v1/connectors').set('X-Api-Key', adminKey);
-    expect(list.body.capabilities).toMatchObject({ connectorPause: true, connectorScope: true });
+    expect(list.body.capabilities).toMatchObject({ connectorPause: true, connectorScope: true, connectorSidecar: true });
     expect(list.body.connectors[0]).toMatchObject({ id, connected: true, paused: true });
     const status = await request(app).get(`/api/v1/connectors/${id}/status`).set('X-Api-Key', adminKey);
     expect(status.body).toMatchObject({ id, connected: true, paused: true });

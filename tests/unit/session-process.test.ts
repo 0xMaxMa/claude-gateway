@@ -920,14 +920,33 @@ describe('SessionProcess', () => {
         expect(sp.connectorConfigChanged('github', undefined)).toBe(true);
       });
 
-      it('rotated: a new access_token in the same shape is a change', async () => {
+      // The file holds a proxy entry and the proxy resolves the token per request,
+      // so a control plane's token refresh must not respawn the session.
+      it('rotated: a new access_token behind the proxy is not a change', async () => {
         const sp = await spawnWithGithub();
         expect(
           sp.connectorConfigChanged('github', {
             ...resolvedGithub,
             headers: { Authorization: 'Bearer ghp_rotated' },
           }),
-        ).toBe(true);
+        ).toBe(false);
+      });
+
+      it('proxied: a field the session reads from its file entry is a change', async () => {
+        const sp = await spawnWithGithub();
+        gatewayConfig.gateway.customConnectors = { github: { ...githubCustomConnector, config: { ...githubCustomConnector.config, timeout: 5000 } } };
+        expect(sp.connectorConfigChanged('github', { ...resolvedGithub, timeout: 5000 })).toBe(true);
+      });
+
+      it('rotated: a launched connector holds its token from spawn, so rotation is a change', async () => {
+        fs.writeFileSync(TOKEN_ENV, 'CUSTOM__github__access_token=ghp_inject\n', { mode: 0o600 });
+        agentConfig.connectors = { github: { enabled: true } };
+        const stdio = { label: 'GitHub', config: { command: 'github-mcp', env: { TOKEN: '{access_token}' } }, secretNames: ['access_token'], credentialOwner: 'static' as const };
+        gatewayConfig.gateway.customConnectors = { github: stdio };
+        const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+        await sp.start();
+        expect(sp.connectorConfigChanged('github', { command: 'github-mcp', env: { TOKEN: 'ghp_inject' } })).toBe(false);
+        expect(sp.connectorConfigChanged('github', { command: 'github-mcp', env: { TOKEN: 'ghp_rotated' } })).toBe(true);
       });
 
       it('newly connected: absent at spawn, present now, is a change', async () => {

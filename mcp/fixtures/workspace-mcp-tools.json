@@ -1,0 +1,260 @@
+{
+ "gmail": [
+  {
+   "name": "search_gmail_messages",
+   "description": "Searches messages in a user's Gmail account based on a query.\nReturns both Message IDs and Thread IDs for each found message, along with Gmail web interface links for manual verification.\nSupports pagination via page_token parameter."
+  },
+  {
+   "name": "get_gmail_message_content",
+   "description": "Retrieves the full content (subject, sender, recipients, body) of a specific Gmail message.\n\nBodies are returned inline and truncated at 20,000 characters. Set full=True to\nget the complete, untruncated message instead: it is exported to storage and the\nresponse carries a short-lived download URL (HTTP transport) or file path (stdio\ntransport) rather than the body, so large messages never stream through the model\ncontext. Stateless deployments without GCS staging have no storage, so there\nfull=True returns the untruncated body inline; with GCS staging configured it\nreturns a signed download URL like any other HTTP deployment."
+  },
+  {
+   "name": "get_gmail_messages_content_batch",
+   "description": "Retrieves the content of multiple Gmail messages in a single batch request.\nSupports up to 25 messages per batch to prevent SSL connection exhaustion."
+  },
+  {
+   "name": "get_gmail_attachment_content",
+   "description": "Downloads an email attachment and saves it to local disk.\n\nIn stdio mode, returns the local file path for direct access.\nIn HTTP mode, returns a temporary download URL (valid for 1 hour).\nMay re-fetch message metadata to resolve filename and MIME type."
+  },
+  {
+   "name": "send_gmail_message",
+   "description": "Sends an email using the user's Gmail account. Supports new emails, replies, and\nforwards, with optional attachments. Supports Gmail's \"Send As\" feature to send\nfrom configured alias addresses.\n\nTo forward an existing message, pass forward_message_id. The original subject,\nbody (quoted with a \"Forwarded message\" header), and attachments are carried over.\nIn forward mode, body (if any) is prepended as a note and subject is optional.\nThreading, reply, and signature options do not apply when forwarding.\n\nTHIS TOOL SENDS IMMEDIATELY AND CANNOT SCHEDULE. Gmail's REST API exposes no\nsend-time parameter; Schedule send is a web-UI feature with no API equivalent,\nso no argument to this tool can defer delivery. Never tell a user a message\nwas scheduled. For \"prepare now, deliver later\", create a draft with\ndraft_gmail_message. An external scheduler must retain the message data to\ncreate and send a new message via send_gmail_message at the chosen time, or\ncall users.drafts.send with the draft ID returned by draft_gmail_message.\nAlternatively, let the user schedule that draft in the Gmail UI."
+  },
+  {
+   "name": "draft_gmail_message",
+   "description": "Creates a draft email in the user's Gmail account. Supports new, reply, and forward\ndrafts with optional attachments. Supports Gmail's \"Send As\" feature to draft from\nconfigured alias addresses.\n\nTo save a forward as a draft for review, pass forward_message_id. The original\nsubject, body (quoted with a \"Forwarded message\" header), and attachments are\ncarried over. In forward mode, body (if any) is prepended as a note, subject is\noptional, and threading, reply, and signature options do not apply.\n\nSCHEDULED SEND IS NOT AVAILABLE. Gmail's REST API exposes no send-time\nparameter; the Schedule send feature is web-UI only, and a message cannot be\nplaced in the Scheduled folder through the API. Do not claim a message was\nscheduled. To deliver at a chosen time, create a draft with\ndraft_gmail_message. An external scheduler must retain the message data to\ncreate and send a new message via send_gmail_message then, or call\nusers.drafts.send with the draft ID returned by draft_gmail_message.\nAlternatively, let the user schedule the draft in the Gmail UI."
+  },
+  {
+   "name": "get_gmail_thread_content",
+   "description": "Retrieves the complete content of a Gmail conversation thread, including all messages.\n\nOptionally also returns structured ownership analysis so a caller can\ndetermine who sent the last message and who owes whom a response without\nre-parsing the formatted string or making a second tool call."
+  },
+  {
+   "name": "get_gmail_threads_content_batch",
+   "description": "Retrieves the content of multiple Gmail threads in a single batch request.\nSupports up to 25 threads per batch to prevent SSL connection exhaustion."
+  },
+  {
+   "name": "list_gmail_labels",
+   "description": "Lists labels in the user's Gmail account."
+  }
+ ],
+ "google-calendar": [
+  {
+   "name": "list_calendars",
+   "description": "Retrieves a list of calendars accessible to the authenticated user."
+  },
+  {
+   "name": "get_events",
+   "description": "Retrieves events from a specified Google Calendar. Can retrieve a single event by ID or multiple events within a time range.\nYou can also search for events by keyword by supplying the optional \"query\" param."
+  },
+  {
+   "name": "manage_event",
+   "description": "Manages calendar events. Supports creating, updating, deleting, and RSVP."
+  },
+  {
+   "name": "manage_out_of_office",
+   "description": "Manages Out of Office events on Google Calendar. These special events auto-decline\nmeeting invitations and set the user's status to \"Out of office\" across Google Workspace."
+  },
+  {
+   "name": "manage_focus_time",
+   "description": "Manages Focus Time events on Google Calendar. These special events auto-decline\nmeeting invitations and, by default, set the user's chat status to Do Not\nDisturb, helping protect blocks of uninterrupted work time."
+  },
+  {
+   "name": "query_freebusy",
+   "description": "Returns free/busy information for a set of calendars."
+  }
+ ],
+ "google-docs": [
+  {
+   "name": "search_docs",
+   "description": "Searches for Google Docs by name using Drive API (mimeType filter)."
+  },
+  {
+   "name": "get_doc_content",
+   "description": "Retrieves content of a Google Doc or a Drive file (like .docx) identified by document_id.\n- Native Google Docs: Fetches content via Docs API.\n- Office files (.docx, etc.) stored in Drive: Downloads via Drive API and extracts text.\n\nBy default, native Google Docs text is index-aligned with the document:\nempty paragraphs are preserved and every non-text element that occupies an\nindex (inline object, page break, footnote reference, ...) is rendered as one\nU+FFFC placeholder per index. The document body starts at index 1, so an\noffset n into the text that follows \"--- CONTENT ---\" is document index n + 1,\nand that index can be passed straight to format_text or delete_text. Tables\nand multi-tab documents interleave separators, so alignment holds up to the\nfirst table or tab header.\n\nSet preserve_context=True for readable link destinations, internal targets,\nsmart-chip values, table boundaries, headers, footers, footnotes, and object\ncontext exposed by the Docs API. This output is plain text, not Markdown,\nand its offsets must not be used as document editing indices. Comments,\nrevision history, exact visual layout, and chip details hidden by the API\nare not included. Use get_doc_as_markdown for formatting or comments."
+  },
+  {
+   "name": "list_docs_in_folder",
+   "description": "Lists Google Docs within a specific Drive folder."
+  },
+  {
+   "name": "create_doc",
+   "description": "Creates a new Google Doc and optionally inserts initial content.\n\nAfter creation, the document body starts at index 1. A new empty doc\nhas total length 2 (one section break at index 0, one newline at index 1).\n\nTo build a rich document after creation, use batch_update_doc with\ninsert_text operations using end_of_segment=true to append content\nsequentially without calculating indices. Then call inspect_doc_structure\nto get exact positions before applying formatting in a separate batch call."
+  },
+  {
+   "name": "modify_doc_text",
+   "description": "Modifies text in a Google Doc - can insert/replace text and/or apply formatting in a single operation.\n\nTIP: To append text to the end of the document without calculating indices,\nset end_of_segment=true. This avoids index calculation errors.\n\nFor ordinary header/footer text, prefer update_doc_headers_footers.\nOnly pass segment_id when you already have a real header/footer/footnote\nsegment ID from inspect_doc_structure output. Do not guess IDs such as\n\"kix.header\" or \"kix.footer\"."
+  },
+  {
+   "name": "find_and_replace_doc",
+   "description": "Finds and replaces text throughout a Google Doc. No index calculation required.\n\nThis is the safest way to update specific text in a document because it\ndoes not require knowing any indices. Use this tool when you need to:\n- Replace placeholder text (e.g., {{TITLE}}) with real content\n- Update specific words or phrases throughout the document\n- Make targeted text changes without risk of index errors\n\nFor building documents from scratch, consider inserting text with unique\nplaceholders via batch_update_doc, then using this tool to replace them."
+  },
+  {
+   "name": "insert_doc_elements",
+   "description": "Inserts structural elements like tables, lists, or page breaks into a Google Doc."
+  },
+  {
+   "name": "insert_doc_image",
+   "description": "Inserts an image into a Google Doc from Drive or a URL."
+  },
+  {
+   "name": "update_doc_headers_footers",
+   "description": "Safely creates or updates header/footer text in a Google Doc.\n\nThis is the default tool for header/footer content. Do NOT use\nbatch_update_doc with create_header_footer just to set header/footer text;\nthat low-level operation is only for advanced section-break workflows and\ncan fail when the default header/footer already exists.\n\nThis tool handles both creation and update in one call:\n- If the header/footer does not exist, it is automatically created first.\n- If the header/footer already exists, its content is replaced.\n\nYou do NOT need to create a header/footer separately before calling this tool.\nSimply call it with the desired content and it will work whether the\nheader/footer exists or not."
+  },
+  {
+   "name": "batch_update_doc",
+   "description": "Executes multiple low-level document operations in a single atomic batch update.\n\nFor normal header/footer text, prefer update_doc_headers_footers.\nOnly use create_header_footer here for advanced section-break layouts.\n\nRECOMMENDED WORKFLOW FOR BUILDING DOCUMENTS:\n=============================================\nTo avoid index calculation errors, build documents in phases:\n\nPHASE 1 - INSERT ALL CONTENT (use end_of_segment=true, no index math):\n  Append text, section breaks, and page breaks sequentially.\n  Each operation appends to the end of the body. No index needed.\n  Example batch: [\n    {\"type\": \"insert_text\", \"end_of_segment\": true, \"text\": \"Report Title\\n\"},\n    {\"type\": \"insert_text\", \"end_of_segment\": true, \"text\": \"\\nExecutive Summary\\n\"},\n    {\"type\": \"insert_text\", \"end_of_segment\": true, \"text\": \"Revenue grew 15%.\\n\"},\n    {\"type\": \"insert_section_break\", \"end_of_segment\": true, \"section_type\": \"NEXT_PAGE\"},\n    {\"type\": \"insert_text\", \"end_of_segment\": true, \"text\": \"Detailed Analysis\\n\"}\n  ]\n\nPHASE 2 - CREATE HEADERS/FOOTERS (if needed):\n  For normal header/footer text, use update_doc_headers_footers\n  (it auto-creates if missing and writes the content for you).\n  Only include create_header_footer operations in a batch when you are\n  intentionally managing advanced section-break-specific layouts."
+  },
+  {
+   "name": "inspect_doc_structure",
+   "description": "Essential tool for finding safe insertion points and understanding document structure.\n\nUSE THIS FOR:\n- Finding the correct index for table insertion\n- Understanding document layout before making changes\n- Locating existing tables and their positions\n- Getting document statistics and complexity info\n- Inspecting structure of specific tabs\n\nCRITICAL FOR TABLE OPERATIONS:\nALWAYS call this BEFORE creating tables to get a safe insertion index.\n\nWHAT THE OUTPUT SHOWS:\n- total_elements: Number of document elements\n- total_length: Maximum safe index for insertion\n- tables: Number of existing tables\n- table_details: Position and dimensions of each table\n- headers / footers: Real segment IDs and previews for header/footer editing\n- tabs: List of available tabs in the document (if no tab_id specified)\n- empty_paragraphs: newline-only count, excluding existing/suggested object anchors\n- empty_paragraph_ranges: start/end extents, capped at 100\n- empty_paragraph_ranges_truncated: whether ranges were omitted\n- last_paragraph: is_list_item and is_empty, or null if no body paragraphs\n\nParagraph statistics cover top-level body paragraphs and appear at the top\nlevel in basic mode or under \"statistics\" in detailed mode.\nRanges can include required empty paragraphs. Before cleanup, use detailed=true\nto check adjacent elements, formatting, and object anchors. Preserve the final\nnewline and newlines before tables, tables of contents, or section breaks.\nThe final range has end == total_length and may be omitted by truncation.\n\nWORKFLOW FOR TABLE INSERTION:\nStep 1: Call this function\nStep 2: Note the \"total_length\" value\nStep 3: Use an index < total_length for table insertion\nStep 4: Create your table\n\nFORMATTING WORKFLOW:\nAfter inserting all text via batch_update_doc with end_of_segment=true,\ncall this tool with detailed=true to get exact start_index and end_index\nfor every paragraph. Use those indices directly in format_text and\nupdate_paragraph_style operations in a second batch_update_doc call.\n\nHEADER/FOOTER WORKFLOW:\nFor ordinary header/footer text, use update_doc_headers_footers.\nIf you need low-level segment editing, call this tool first and use the\nreal segment_id values returned under headers/footers. Do not invent IDs.\n\nThe detailed output includes elements[].start_index and elements[].end_index\nwith text_preview for each paragraph, making it easy to identify which\nranges to format.\n\nSUB-PARAGRAPH FORMATTING:\ntext_preview is truncated to 100 characters by default. To compute the index\nof a token inside a longer paragraph, pass preview_chars=0 or None for untruncated\ntext, then add the token's UTF-16 offset within that text to the paragraph's\nstart_index (non-BMP characters such as emoji occupy two UTF-16 units)."
+  },
+  {
+   "name": "create_table_with_data",
+   "description": "Creates a table and populates it with data in one reliable operation.\n\nCRITICAL: YOU MUST CALL inspect_doc_structure FIRST TO GET THE INDEX!\n\nMANDATORY WORKFLOW - DO THESE STEPS IN ORDER:\n\nStep 1: ALWAYS call inspect_doc_structure first\nStep 2: Use the 'total_length' value from inspect_doc_structure as your index\nStep 3: Format data as 2D list: [[\"col1\", \"col2\"], [\"row1col1\", \"row1col2\"]]\nStep 4: Call this function with the correct index and data\n\nEXAMPLE DATA FORMAT:\ntable_data = [\n    [\"Header1\", \"Header2\", \"Header3\"],    # Row 0 - headers\n    [\"Data1\", \"Data2\", \"Data3\"],          # Row 1 - first data row\n    [\"Data4\", \"Data5\", \"Data6\"]           # Row 2 - second data row\n]\n\nCRITICAL INDEX REQUIREMENTS:\n- NEVER use index values like 1, 2, 10 without calling inspect_doc_structure first\n- ALWAYS get index from inspect_doc_structure 'total_length' field\n- Index must be a valid insertion point in the document\n\nDATA FORMAT REQUIREMENTS:\n- Must be 2D list of strings only\n- Each inner list = one table row\n- All rows MUST have same number of columns\n- Use empty strings \"\" for empty cells, never None\n- Use debug_table_structure after creation to verify results"
+  },
+  {
+   "name": "debug_table_structure",
+   "description": "ESSENTIAL DEBUGGING TOOL - Use this whenever tables don't work as expected.\n\nUSE THIS IMMEDIATELY WHEN:\n- Table population put data in wrong cells\n- You get \"table not found\" errors\n- Data appears concatenated in first cell\n- Need to understand existing table structure\n- Planning to use populate_existing_table\n\nWHAT THIS SHOWS YOU:\n- Exact table dimensions (rows \u00d7 columns)\n- Each cell's position coordinates (row,col)\n- Current content in each cell\n- Insertion indices for each cell\n- Table boundaries and ranges\n\nHOW TO READ THE OUTPUT:\n- \"dimensions\": \"2x3\" = 2 rows, 3 columns\n- \"position\": \"(0,0)\" = first row, first column\n- \"current_content\": What's actually in each cell right now\n- \"insertion_index\": Where new text would be inserted in that cell\n\nWORKFLOW INTEGRATION:\n1. After creating table \u2192 Use this to verify structure\n2. Before populating \u2192 Use this to plan your data format\n3. After population fails \u2192 Use this to see what went wrong\n4. When debugging \u2192 Compare your data array to actual table structure"
+  },
+  {
+   "name": "export_doc_to_pdf",
+   "description": "Exports a Google Doc to PDF format and saves it to Google Drive."
+  },
+  {
+   "name": "update_paragraph_style",
+   "description": "Apply paragraph-level formatting, heading styles, and/or list formatting to a range in a Google Doc.\n\nThis tool can apply named heading styles (H1-H6) for semantic document structure,\ncreate bulleted or numbered lists with nested indentation, and customize paragraph\nproperties like alignment, spacing, and indentation. All operations can be applied\nin a single call."
+  },
+  {
+   "name": "get_doc_as_markdown",
+   "description": "Reads a Google Doc and returns it as clean Markdown with optional comment context.\n\nUnlike get_doc_content which returns plain text, this tool preserves document\nformatting as Markdown: headings, bold/italic/strikethrough, links, code spans,\nordered/unordered lists with nesting, and tables.\n\nWhen comments are included (the default), each comment's anchor text \u2014 the specific\ntext the comment was attached to \u2014 is preserved, giving full context for the discussion."
+  },
+  {
+   "name": "manage_doc_tab",
+   "description": "Manage document tabs: create, rename, delete, or populate from Markdown."
+  },
+  {
+   "name": "list_document_comments",
+   "description": "List all comments from a Google Document (optional max_comments to limit results)."
+  }
+ ],
+ "google-drive": [
+  {
+   "name": "search_drive_files",
+   "description": "Searches for files and folders within a user's Google Drive, including shared drives."
+  },
+  {
+   "name": "get_drive_file_content",
+   "description": "Retrieves the content of a specific Google Drive file by ID, supporting files in shared drives.\n\n\u2022 Native Google Docs, Sheets, Slides \u2192 exported as text / CSV.\n\u2022 Office files (.docx, .xlsx, .pptx) \u2192 unzipped & parsed with std-lib to\n  extract readable text.\n\u2022 PDFs \u2192 text extracted with pypdf when possible; scanned/image-only PDFs\n  fall back to a download hint.\n\u2022 Images \u2192 returned as base64 with MIME metadata for multimodal clients.\n\u2022 Any other file \u2192 downloaded; tries UTF-8 decode, else notes binary."
+  },
+  {
+   "name": "get_drive_file_download_url",
+   "description": "Downloads a Google Drive file and saves it to local disk.\n\nIn stdio mode, returns the local file path for direct access.\nIn HTTP mode, returns a temporary download URL (valid for 1 hour).\nIn stateless mode (no file storage), returns the file itself as an embedded\nresource, up to WORKSPACE_MCP_STATELESS_INLINE_MAX_BYTES (default 10 MiB,\nand never more than WORKSPACE_MCP_MAX_FILE_BYTES when that is set).\n\nFor Google native files (Docs, Sheets, Slides), exports to a useful format:\n- Google Docs -> PDF (default) or DOCX if export_format='docx'\n- Google Sheets -> XLSX (default), PDF if export_format='pdf', or CSV if export_format='csv'\n- Google Slides -> PDF (default) or PPTX if export_format='pptx'\n\nFor other files, downloads the original file format."
+  },
+  {
+   "name": "list_drive_items",
+   "description": "Lists files/folders or shared drive containers, supporting shared drives.\nIf `drive_id` is specified, lists items within that shared drive. `folder_id` is then relative to that drive (or use drive_id as folder_id for root).\nIf `drive_id` is not specified, lists items from user's \"My Drive\" and accessible shared drives (if `include_items_from_all_drives` is True).\nSet `resource_type` to \"shared_drives\" to list shared drive containers instead of folder contents."
+  },
+  {
+   "name": "create_drive_folder",
+   "description": "Creates a new folder in Google Drive, supporting creation within shared drives."
+  },
+  {
+   "name": "create_drive_file",
+   "description": "Creates a new file in Google Drive, supporting creation within shared drives.\nAccepts direct text content, inline base64 bytes, or a fileUrl to fetch content from.\nWhere local file access is disabled it can instead return an upload URL for the\ncaller to PUT file bytes to.\nThis stores the supplied bytes without converting them to Google Docs, Sheets, or\nSlides. Use the matching import_to_google_* tool for Google-native conversion."
+  },
+  {
+   "name": "import_to_google_doc",
+   "description": "Imports a file (Markdown, DOCX, TXT, HTML, RTF, ODT) into Google Docs format with automatic conversion.\n\nGoogle Drive automatically converts the source file to native Google Docs format,\npreserving formatting like headings, lists, bold, italic, etc.\nBinary sources may be passed directly as base64_content. On a local server a\nfile on disk can also be passed by path (preferred for batch operations, so\ncallers do not need to load full file contents into their context)."
+  },
+  {
+   "name": "import_to_google_slides",
+   "description": "Imports a presentation (PPTX, PPT, ODP) into Google Slides format with automatic conversion.\n\nGoogle Drive automatically converts the source presentation to native Google Slides format,\npreserving slides, layouts, text, and images.\nBinary sources may be passed directly as base64_content. On a local server a\nfile on disk can also be passed by path (preferred for batch operations, so\ncallers do not need to load full file contents into their context)."
+  },
+  {
+   "name": "import_to_google_sheets",
+   "description": "Imports a spreadsheet (XLSX, XLS, ODS, CSV, TSV) into Google Sheets format with automatic conversion.\n\nGoogle Drive automatically converts the source spreadsheet to native Google Sheets format,\npreserving rows, columns, sheets, and values.\nBinary sources may be passed directly as base64_content. On a local server a\nfile on disk can also be passed by path (preferred for batch operations, so\ncallers do not need to load full file contents into their context)."
+  },
+  {
+   "name": "get_drive_file_permissions",
+   "description": "Gets detailed metadata about a Google Drive file including sharing permissions,\nparent folder IDs, ownership, and lifecycle timestamps."
+  },
+  {
+   "name": "check_drive_file_public_access",
+   "description": "Searches for a file by name and checks if it has public link sharing enabled."
+  },
+  {
+   "name": "update_drive_file",
+   "description": "Updates metadata, properties, and/or content of a Google Drive file.\n\nProviding new content (inline as ``content``, fetched from ``file_url``, or on a\nlocal server read from a file path) replaces the file's content in place,\npreserving the existing file ID, sharing, comments, and links.\nFor native Google Docs/Sheets/Slides the source is uploaded with its source MIME\ntype so the Drive API applies the same format conversion as import_to_google_doc\n(markdown headings, tables, bold, etc.). For any other file (.md, .txt, .pdf, ...)\nthere is nothing to convert, so the bytes are written back as-is under the file's\nown MIME type. Metadata and content can be updated in a single call.\n\n``mode='append'``/``'prepend'`` splice ``content`` onto the file's existing text\nserver-side, so only the new text has to be supplied \u2014 no need to send the whole\nfile back to rewrite it.\n\nDrive shortcuts are handled according to the kind of update: supported\nresource-local metadata changes (rename, move, trash, star, description, and\ncustom properties) apply to the supplied shortcut, while content replacement\nfollows the shortcut and updates its target. To avoid applying metadata to the\nwrong resource, a shortcut call cannot combine content with resource-local\nmetadata. Update the shortcut metadata and target content in separate calls."
+  },
+  {
+   "name": "get_drive_shareable_link",
+   "description": "Gets the shareable link for a Google Drive file or folder."
+  },
+  {
+   "name": "copy_drive_file",
+   "description": "Creates a copy of an existing Google Drive file.\n\nThis tool copies the template document to a new location with an optional new name.\nThe copy maintains all formatting and content from the original file."
+  }
+ ],
+ "google-sheets": [
+  {
+   "name": "list_spreadsheets",
+   "description": "Lists spreadsheets from Google Drive that the user has access to."
+  },
+  {
+   "name": "get_spreadsheet_info",
+   "description": "Gets information about a specific spreadsheet including its sheets."
+  },
+  {
+   "name": "read_sheet_values",
+   "description": "Reads values from a specific range in a Google Sheet."
+  },
+  {
+   "name": "modify_sheet_values",
+   "description": "Modifies values in a specific range of a Google Sheet - can write, update, or clear values,\nor insert Smart Chips (Drive files/folders or People)."
+  },
+  {
+   "name": "format_sheet_range",
+   "description": "Applies formatting to a range: colors, number formats, text wrapping,\nalignment, and text styling.\n\nColors accept hex strings (#RRGGBB). Number formats follow Sheets types\n(e.g., NUMBER, CURRENCY, DATE, PERCENT). If no sheet name is provided,\nthe first sheet is used."
+  },
+  {
+   "name": "manage_conditional_formatting",
+   "description": "Manages conditional formatting rules on a Google Sheet. Supports adding,\nupdating, and deleting conditional formatting rules via a single tool."
+  },
+  {
+   "name": "create_spreadsheet",
+   "description": "Creates a new Google Spreadsheet."
+  },
+  {
+   "name": "create_sheet",
+   "description": "Creates a new sheet or duplicates an existing sheet (user_google_email: str, spreadsheet_id: str, sheet_name: Optional[str] = None, source_sheet_name: Optional[str] = None, insert_sheet_index: Optional[int] = None)."
+  },
+  {
+   "name": "list_sheet_tables",
+   "description": "Lists all structured tables in a spreadsheet with their IDs, names, ranges,\nand column details. Use this to find table IDs for append_table_rows."
+  },
+  {
+   "name": "append_table_rows",
+   "description": "Appends rows to a structured table in a Google Sheet. The rows are added\nto the end of the table body, automatically extending the table range.\n\nUse list_sheet_tables first to find the table ID."
+  },
+  {
+   "name": "manage_sheet_tab",
+   "description": "Manages the lifecycle of an existing sheet tab: rename, delete, hide, unhide or reorder.\n\nUse create_sheet to add a tab, and resize_sheet_dimensions for row and column\nlevel changes. This tool operates on the tab itself."
+  },
+  {
+   "name": "resize_sheet_dimensions",
+   "description": "Manages sheet-level dimension properties: resize columns/rows, auto-resize\nto fit content, freeze rows/columns, hide/unhide rows/columns, and\ninsert/delete rows/columns."
+  },
+  {
+   "name": "move_sheet_rows",
+   "description": "Moves rows from one sheet to another within the same spreadsheet. The move\nis performed in a single batchUpdate (copyPaste followed by\ndeleteDimension). Note: batchUpdate executes requests sequentially but does\nnot roll back on partial failure \u2014 if the copy succeeds but the delete\nfails, rows may be duplicated. Formulas, data types, and formatting are\npreserved (unlike a values.get/append round-trip).\nRow numbers are 1-based (matching the spreadsheet UI)."
+  },
+  {
+   "name": "manage_named_range",
+   "description": "Manages the lifecycle of named ranges in a Google Sheet: list, create, update, or delete."
+  },
+  {
+   "name": "list_spreadsheet_comments",
+   "description": "List all comments from a Google Spreadsheet (optional max_comments to limit results)."
+  }
+ ]
+}

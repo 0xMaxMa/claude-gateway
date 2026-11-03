@@ -670,7 +670,7 @@ describe('capabilities follow orchestration', () => {
     try {
       const res = await supertest(h.app).get('/api/v1/capabilities').set('Authorization', `Bearer ${KEYS.admin!.key}`);
       expect(res.body.capabilities.sessions).toEqual(cwd ? ['cwd'] : []);
-      expect(res.body.capabilities.files).toEqual(['list', 'create', 'delete', 'marks']);
+      expect(res.body.capabilities.files).toEqual(['list', 'create', 'delete', 'marks', 'cleanup']);
     } finally {
       await teardown(h);
     }

@@ -197,6 +197,14 @@ export function hasSecret(envName: string): boolean {
   return getSecret(envName) !== null;
 }
 
+const writeListeners = new Set<() => void>();
+
+/** Run `listener` after each rewrite of the file by this process. Returns the unsubscribe. */
+export function onSecretsWritten(listener: () => void): () => void {
+  writeListeners.add(listener);
+  return () => { writeListeners.delete(listener); };
+}
+
 /** Atomically rewrite the file (mode 0600) from a map. */
 function writeAll(map: Record<string, string>): void {
   const file = tokenEnvPath();
@@ -223,6 +231,14 @@ function writeAll(map: Record<string, string>): void {
       /* nothing better to do — surface the rename failure below */
     }
     throw err;
+  }
+  // The write succeeded; a listener's failure is its own.
+  for (const listener of writeListeners) {
+    try {
+      listener();
+    } catch (err) {
+      console.error(`token-env: a secrets-written listener failed: ${(err as Error).message}`);
+    }
   }
 }
 

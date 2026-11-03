@@ -31,7 +31,7 @@ import { userInfo } from 'os';
 import * as path from 'path';
 import { pipeline, type Duplex } from 'node:stream';
 import type { AddressInfo } from 'node:net';
-import express, { Router, type Request, type Response } from 'express';
+import express, { Router, type NextFunction, type Request, type Response } from 'express';
 import type { AgentConfig, GatewayConfig } from '../types';
 import type { CustomConnectorEntry } from './types';
 import { resolveEnabledConnectors } from './resolve';
@@ -39,6 +39,7 @@ import { agentFacingFields, connectorSecretRoute, isStreamableHttpType } from '.
 import { sanitizeJevChildEnv } from '../jev/child-env';
 import { clearRuntimeExposure, recordRuntimeExposure } from './exposure';
 import { MAX_REDIRECTS, sameOriginRedirect } from './redirect';
+import { connectorSidecars, type SidecarStatus } from './sidecar';
 
 export const CONNECTOR_PROXY_PATH = '/internal/mcp/connectors';
 
@@ -122,13 +123,17 @@ function proxyBaseUrl(): string {
  * container cannot: it keeps the resolved entries, since nothing else in the container
  * can reach the gateway. Either fallback is recorded for the status API, which then
  * reports this agent's secrets as agent-readable (connectors/exposure.ts).
+ *
+ * `proxied` names the connectors written as proxy entries. Their file entry holds no
+ * resolved value, so only `proxiedShape` changing needs a respawn (see
+ * SessionProcess.connectorConfigChanged).
  */
 export function agentFacingConnectors(
   agent: Pick<AgentConfig, 'id' | 'connectors' | 'isolateMemory'>,
   gateway: GatewayConfig,
   resolved: Record<string, unknown>,
   options: { container?: ContainerLaunch; containerUnavailable?: boolean; sanitizeEnv?: boolean } = {},
-): { servers: Record<string, unknown>; grant?: string } {
+): { servers: Record<string, unknown>; grant?: string; proxied: ReadonlySet<string> } {
   const entries = gateway.gateway?.customConnectors ?? {};
   const entryOf = (id: string): CustomConnectorEntry | undefined =>
     Object.prototype.hasOwnProperty.call(entries, id) ? entries[id] : undefined;
@@ -140,7 +145,8 @@ export function agentFacingConnectors(
     if (route === 'proxy') routes.set(id, options.container ? 'launch' : 'proxy');
     else if (route === 'launch') routes.set(id, 'launch');
   }
-  const fallBack = (): { servers: Record<string, unknown>; grant: string } => {
+  const proxied = new Set<string>();
+  const fallBack = (): { servers: Record<string, unknown>; grant: string; proxied: ReadonlySet<string> } => {
     // A direct-entry fallback is still owned by this live session. Keep its
     // exposure until that session ends; a later discovery or spawn is independent.
     const exposureGrant = randomBytes(32).toString('base64url');
@@ -152,9 +158,9 @@ export function agentFacingConnectors(
       bridges: new Set(),
     });
     recordRuntimeExposure(exposureGrant, agent.id, routes.keys());
-    return { servers, grant: exposureGrant };
+    return { servers, grant: exposureGrant, proxied };
   };
-  if (!routes.size) return { servers };
+  if (!routes.size) return { servers, proxied };
   if (options.containerUnavailable && !options.container) {
     console.warn(`connector-proxy: agent=${agent.id} container cannot launch connectors; ${[...routes.keys()].join(', ')} keep their resolved entries`);
     return fallBack();
@@ -196,7 +202,8 @@ export function agentFacingConnectors(
     const config = entryOf(id)!.config;
     const kept = agentFacingFields(config);
     if (route === 'proxy') {
-      servers[id] = { ...kept, type: config.type, url: `${base}${CONNECTOR_PROXY_PATH}/${encodeURIComponent(id)}`, headers: { Authorization: `Bearer ${grant}` } };
+      servers[id] = { ...proxiedShape(entryOf(id)!), url: `${base}${CONNECTOR_PROXY_PATH}/${encodeURIComponent(id)}`, headers: { Authorization: `Bearer ${grant}` } };
+      proxied.add(id);
       continue;
     }
     const launchPath = `${CONNECTOR_PROXY_PATH}/${encodeURIComponent(id)}/stdio`;
@@ -204,7 +211,12 @@ export function agentFacingConnectors(
       ? { ...kept, command: 'node', args: [`${options.container.containerDir}/connector-launcher.mjs`], env: { GATEWAY_CONNECTOR_SOCKET: `${options.container.containerDir}/${socketName}`, GATEWAY_CONNECTOR_PATH: launchPath, GATEWAY_CONNECTOR_GRANT: grant } }
       : { ...kept, command: process.execPath, args: [LAUNCHER], env: { GATEWAY_CONNECTOR_URL: `${base}${launchPath}`, GATEWAY_CONNECTOR_GRANT: grant } };
   }
-  return { servers, grant };
+  return { servers, grant, proxied };
+}
+
+/** A proxy entry without its per-spawn url and grant: everything a session reads from it. */
+export function proxiedShape(entry: CustomConnectorEntry): Record<string, unknown> {
+  return { ...agentFacingFields(entry.config), type: entry.config.type };
 }
 
 /** A container's private channel for launcher upgrades and live authorization checks. */
@@ -297,6 +309,23 @@ export function createConnectorProxyRouter(): Router {
     if (!bridgeable(resolved)) { res.status(403).end(); return; }
     res.status(204).end();
   });
+  // A sidecar that is still starting has no url yet: hold the request until it
+  // listens rather than failing a session that spawned alongside it.
+  router.all(`${CONNECTOR_PROXY_PATH}/:id`, (req: Request, res: Response, next: NextFunction) => {
+    const match = /^Bearer (\S+)$/.exec(req.headers.authorization ?? '');
+    const id = req.params['id'] ?? '';
+    const sidecars = connectorSidecars.get();
+    if (!match || grants.get(match[1])?.routes.get(id) !== 'proxy' || !isSameHost(req) || !sidecars.statusOf(id) || sidecars.urlOf(id)) { next(); return; }
+    const gone = new AbortController();
+    const leave = (): void => gone.abort();
+    req.once('close', leave);
+    res.once('close', leave);
+    void sidecars.waitUntilReady(id, gone.signal).then(() => {
+      req.off('close', leave);
+      res.off('close', leave);
+      if (!gone.signal.aborted) next();
+    });
+  });
   router.all(`${CONNECTOR_PROXY_PATH}/:id`, (req: Request, res: Response) => {
     if (!isSameHost(req)) { res.status(403).json({ error: 'Forbidden' }); return; }
     const match = /^Bearer (\S+)$/.exec(req.headers.authorization ?? '');
@@ -306,15 +335,23 @@ export function createConnectorProxyRouter(): Router {
     if (grant.routes.get(id) !== 'proxy') { res.status(403).json({ error: 'Forbidden' }); return; }
     if (!['GET', 'POST', 'DELETE'].includes(req.method)) { res.status(405).json({ error: 'Method not allowed' }); return; }
     let upstream: ReturnType<typeof upstreamOf>;
+    // A connected sidecar entry that is crashed, backing off or restarting has no url
+    // for now. That is temporary, and MCP clients treat a 403 as permanent. One with an
+    // invalid spec stays down until an admin fixes config.json, so it is no 503.
+    let sidecarDown: SidecarStatus | undefined;
     try {
       const resolved = grant.resolve(id);
       upstream = upstreamOf(resolved);
+      const sidecar = connectorSidecars.get().statusOf(id);
+      if (resolved !== undefined && !upstream && sidecar && sidecar.state !== 'ready') sidecarDown = sidecar;
       // Disconnected/disabled resolves to nothing, which is normal; a resolved entry
       // the proxy cannot use is a configuration error worth a line.
-      if (resolved !== undefined && !upstream) console.error(`connector-proxy: connector=${id} has no usable http url/headers`);
+      if (resolved !== undefined && !upstream && !sidecarDown) console.error(`connector-proxy: connector=${id} has no usable http url/headers`);
     } catch (err) {
       console.error(`connector-proxy: connector=${id} resolve failed: ${(err as Error).message}`);
     }
+    if (sidecarDown?.state === 'invalid') { res.status(500).json({ error: `Connector sidecar configuration is invalid: ${sidecarDown.lastError}` }); return; }
+    if (sidecarDown) { res.status(503).setHeader('Retry-After', '5').json({ error: 'Connector sidecar is not ready yet' }); return; }
     if (!upstream) { res.status(403).json({ error: 'Connector is not available' }); return; }
 
     const headers: Record<string, string> = {};
