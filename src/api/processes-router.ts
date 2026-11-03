@@ -89,8 +89,9 @@ export function createProcessesRouter(apiKeys: ApiKey[], root: string, deps: Pro
 
   defineRoute(
     router,
-    { method: 'GET', path: '/v1/processes', auth: 'key', summary: 'The TCP listeners of processes working in a folder under the files root', cli: null },
+    { method: 'GET', path: '/v1/processes', auth: 'admin', summary: 'The TCP listeners of processes working in a folder under the files root', cli: null },
     auth,
+    requireAdmin,
     async (req: Request, res: Response) => {
       const rel = projectPath(req.query.path);
       if (!rel.ok) return fail(res, rel.error);

@@ -140,7 +140,7 @@ describe('GET /v1/processes', () => {
     project('other');
     const { port, pid } = await listenIn(path.join(dir, 'server'), 0, ['api_key=abcdef123456', 'plain-arg']);
 
-    const res = await get('app', 'k-read');
+    const res = await get('app');
     expect(res.status).toBe(200);
     expect(res.body).toEqual({
       path: 'app',
@@ -151,6 +151,12 @@ describe('GET /v1/processes', () => {
     expect(res.body.listeners[0].command).not.toContain('abcdef123456');
 
     expect((await get('other')).body).toEqual({ path: 'other', running: false, listeners: [] });
+  });
+
+  it('needs an admin key, so a read-only key cannot see what runs on the pod', async () => {
+    project('app');
+    const res = await get('app', 'k-read');
+    expect([res.status, res.body.code]).toEqual([403, 'forbidden_key']);
   });
 
   it('truncates a long command', async () => {
