@@ -5,6 +5,7 @@ import {
 import { IMPACT_CRITERIA, IMPACT_QUESTION } from '../../../src/automation/computer-command';
 import { runComputerUse, type ComputerUseDependencies } from '../../../src/automation/computer-use';
 import { modelRequestBody, rejectsForcedToolChoice, validateComputerUseConfig } from '../../../src/automation/model-choice-evaluator';
+import { visionRequestProblems } from '../../helpers/vision-request-shape';
 
 const CAPS_RAW = { pointer: ['click', 'double_click', 'right_click', 'move', 'drag'], pointerModifiers: ['alt', 'cmd', 'ctrl', 'shift'], scrollAt: true, keyChord: true, typeFocused: true, screenshotGeometry: true };
 const caps = rawCapabilities({ capabilities: CAPS_RAW })!;
@@ -126,6 +127,30 @@ describe('request shape', () => {
     expect(events[0]).toMatchObject({ outcome: 'completed', images: 1, usage: { input_tokens: 10, output_tokens: 2 } });
     expect(JSON.stringify(events)).not.toContain(TOKEN);
   });
+
+  test('a non-OK response logs the provider error type and a bounded, redacted message, never the request', async () => {
+    const secret = 'sk-ant-api03-' + 'A'.repeat(40);
+    const message = `messages.4.content.0.tool_result: image blocks are not allowed when is_error is true ${secret} ` + 'x'.repeat(5000);
+    const fetch = (async () => new Response(JSON.stringify({ type: 'error', error: { type: 'invalid_request_error', message } }), { status: 400, headers: { 'content-type': 'application/json' } })) as unknown as typeof globalThis.fetch;
+    const events: any[] = [];
+    const decide = visionModelDecider({ model: 'claude-sonnet-5', timeoutMs: 2000, fetch, authorize: () => true, onDecision: e => events.push(e),
+      connection: async () => ({ baseUrl: 'https://proxy.example.test', apiKey: TOKEN, scheme: 'bearer' }) });
+    await expect(decide([{ role: 'user', content: [{ type: 'text', text: 'SCREEN-TEXT-MARKER' }] }], new AbortController().signal, { goal: 'x', state: { generation: 'g1' } as any, shot }))
+      .rejects.toMatchObject({ code: 'INVALID_REQUEST' });
+    expect(events[0]).toMatchObject({ outcome: 'failed', errorCode: 'INVALID_REQUEST', providerError: { type: 'invalid_request_error', message: expect.stringContaining('image blocks are not allowed when is_error is true') } });
+    expect(events[0].providerError.message.length).toBeLessThanOrEqual(300);
+    const logged = JSON.stringify(events);
+    for (const hidden of [secret, TOKEN, 'SCREEN-TEXT-MARKER']) expect(logged).not.toContain(hidden);
+  });
+
+  test('a non-JSON error body still fails with the status code only', async () => {
+    const fetch = (async () => new Response('<html>bad gateway</html>', { status: 502, headers: { 'content-type': 'text/html' } })) as unknown as typeof globalThis.fetch;
+    const events: any[] = [];
+    const decide = visionModelDecider({ model: 'claude-sonnet-5', timeoutMs: 2000, fetch, authorize: () => true, onDecision: e => events.push(e),
+      connection: async () => ({ baseUrl: 'https://proxy.example.test', apiKey: TOKEN, scheme: 'bearer' }) });
+    await expect(decide([], new AbortController().signal, { goal: 'x', state: { generation: 'g1' } as any, shot })).rejects.toMatchObject({ code: 'PROVIDER_UNAVAILABLE' });
+    expect(events[0]).not.toHaveProperty('providerError');
+  });
 });
 
 describe('shared evaluator', () => {
@@ -179,12 +204,13 @@ function device(options: { caps?: unknown; receipts?: Array<Record<string, unkno
   });
   return { calls, deps, judged, actions: () => calls.filter(c => c.name === 'computer_action').map(c => c.args), released: () => calls.some(c => c.name === 'computer_release') };
 }
-/** A scripted model: one tool_use per turn; records every request. */
+/** A scripted model: one tool_use per turn; records every request and rejects one the provider would answer with a 400. */
 function model(script: Array<{ name: string; input?: unknown; toolset?: boolean } | 'text'>) {
   const seen: unknown[][] = [];
   let n = 0;
   const decide = async (messages: unknown[]): Promise<VisionTurn> => {
     seen.push(structuredClone(messages));
+    expect(visionRequestProblems(messages)).toEqual([]);
     const step = script[n++];
     if (!step) throw Error('script exhausted');
     if (step === 'text') return { content: [{ type: 'text', text: 'Thinking out loud.' }], stopReason: 'end_turn' };
@@ -229,9 +255,23 @@ describe('vision loop', () => {
     const result = await runVisionComputerUse({ goal: 'click it' }, d.deps(m.decide), signal()) as any;
     expect(result).toMatchObject({ status: 'succeeded', reason: 'GOAL_REACHED', steps: 1 });
     expect(d.actions().map(a => a.generation)).toEqual(['g1', 'g2']);
-    const reply = lastUser(m.seen[1]).content[0];
-    expect(reply).toMatchObject({ is_error: true, toolset_name: 'computer' });
-    expect(reply.content[0].text).toContain(error);
+    // The error tool_result is text only; the new state and screenshot follow it in the same message.
+    const [reply, state, image, ...rest] = lastUser(m.seen[1]).content;
+    expect(reply).toMatchObject({ type: 'tool_result', is_error: true, toolset_name: 'computer', content: [{ type: 'text', text: expect.stringContaining(error) }] });
+    expect(reply.content).toHaveLength(1);
+    expect(state).toMatchObject({ type: 'text', text: expect.stringContaining('<screen_state>') });
+    expect(image).toMatchObject({ type: 'image', source: { data: '/9j/g2' } });
+    expect(rest).toEqual([]);
+  });
+
+  test('the request validator catches an image inside an is_error tool_result', () => {
+    const img = { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: '/9j/' } };
+    const ask = { role: 'assistant', content: [{ type: 'tool_use', id: 'u1', name: 'type', input: {} }] };
+    expect(visionRequestProblems([{ role: 'user', content: [img] }, ask, { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'u1', is_error: true, content: [{ type: 'text', text: 'FOCUS_REQUIRED' }, img] }] }]))
+      .toEqual(['messages.2.content.0: image inside an is_error tool_result']);
+    expect(visionRequestProblems([{ role: 'user', content: [img] }, ask, { role: 'user', content: [img, { type: 'tool_result', tool_use_id: 'u1', content: 'x' }] }]))
+      .toEqual(['messages.2: tool_result after another block', 'messages.2: answers [] for tool_use ["u1"]']);
+    expect(visionRequestProblems([{ role: 'user', content: [img] }, ask, { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'u1', is_error: true, content: [{ type: 'text', text: 'FOCUS_REQUIRED' }] }, img] }])).toEqual([]);
   });
 
   test('repeated refusals end the run instead of looping', async () => {

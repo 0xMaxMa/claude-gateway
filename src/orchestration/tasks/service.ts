@@ -2,7 +2,7 @@ import {CURRENT_CONTROL_ROUND_SQL} from '../control-notification';
 import {preparedBrowserAnswers} from '../browser-fields';
 import {ComputerInputs} from '../../jev/computer-inputs';
 import {AUTOMATION_IDLE_TIMEOUT_MS,agentGoalRunParked,automationSession,expiredWaitingRound,pausedForCommand,stoppedForCommand} from './automation-session';
-import {ANSWERED_FROM_SCREEN,computerActionText,computerOutcomeText,computerRoundDone} from '../../automation/computer-outcome';
+import {ANSWERED_FROM_SCREEN,computerActionText,computerOutcomeText,computerProgressText,computerRoundDone} from '../../automation/computer-outcome';
 import {browserOutcomeText} from '../../automation/browser-outcome';
 import {textCommand} from '../../automation/direct-command';
 import { parentVerifiableBrowserResult, parkedVerifiableBrowserResult } from '../../jev/browser-contract';
@@ -1156,6 +1156,9 @@ export class TaskService {
       // A paused or superseded-revision result skips the failure branch above;
       // a stalled stop still ends failed, so it must carry the stall reason.
       if (task.state === 'failed' && stalled) { attempt.failure = stalled; task.failure = stalled; task.latestProgress = { source: 'runtime', observedAt: Date.now(), text: stalled.message }; }
+      // An ended computer round leaves its own last line on the card, not the running progress it stopped at.
+      else if (task.gatewayTarget?.adapter === 'computer' && outcome.computerReport && (task.state === 'failed' || task.state === 'completed'))
+        task.latestProgress = { source: 'runtime', observedAt: Date.now(), text: task.state === 'completed' ? computerOutcomeText(outcome.computerReport) : computerProgressText({ ...outcome.computerReport, phase: 'terminal' }) };
       // After every failure reassignment above, so a stop or stall reason cannot drop them.
       if (refusals?.length && attempt.failure && !attempt.failure.providerRefusals) {
         attempt.failure = { ...attempt.failure, providerRefusals: refusals };

@@ -1,5 +1,5 @@
 import {computerContinuationContext} from './computer-context';
-import {computerActionText,computerOutcomeText} from '../../automation/computer-outcome';
+import {computerActionText,computerOutcomeText,computerReasonText} from '../../automation/computer-outcome';
 import {thinkingProvider,thinkingFailure} from '../../jev/thinking-provider';
 import {thinkComputerField} from '../../../lib/automation/computer-thinking.cjs';
 import {createHash,randomUUID} from 'crypto';
@@ -28,6 +28,8 @@ const DEVICE_CODE=/^[A-Z][A-Z0-9_]{0,79}$/;
 /** A vision fallback that could not start for lack of raw input: the app's switch is off, an older helper, or no advertised capabilities. */
 const VISION_RAW_UNAVAILABLE=new Set([...RAW_UNAVAILABLE,'RAW_CAPABILITIES_MISSING']);
 /** The reason the round's last wait gave (the decision model's BLOCKED is NO_SUPPORTED_ACTION). */
+/** An event of a run that continues `base` (the vision fallback after its Accessibility round), on the round's own counts. */
+const continued=(base:ComputerUseResult,e:ComputerProgress):ComputerProgress=>({...e,steps:base.steps+e.steps,evaluations:base.evaluations+e.evaluations,sequence:(base.trace?.events.at(-1)?.sequence??0)+e.sequence});
 const lastWait=(result:ComputerUseResult)=>[...(result.trace?.events??[])].reverse().find(e=>e.phase==='waiting')?.reason;
 /** The device's own error codes behind a stop (an unknown code is thrown as
  * COMPUTER_TOOL_FAILED), so the agent can name the real cause instead of guessing.
@@ -260,8 +262,10 @@ export class ComputerTaskAdapter implements GatewayTaskAdapter {
    const reply=vision&&visionAsked?await confirmationReply(asked.label,goal,deps,AbortSignal.any([signal,AbortSignal.timeout(125000)])):undefined;
    if(reply){deps.confirmed!(reply);if(reply==='OTHER'){const {confirmation:_c,resumeGoal:_r,...rest}=input as Record<string,unknown>;axInput=rest;}else axInput={...input,confirmation:{...asked!,reply}};}
    // One vision run on this round's device session: the screenshot of the observed window only, raw input, its own budget.
-   const visionRun=(config:NonNullable<typeof vision>,visionInput:Record<string,unknown>)=>runVisionComputerUse(visionInput,{
-    mode:config.mode,decide:config.decide(t,authorized),authorized,interruptSignal:interrupt.signal,call:deps.call,evaluate:deps.evaluate,decisionMode:deps.decisionMode,observation:deps.observation,beforeMutation:deps.beforeMutation,progress:deps.progress,
+   // A run that continues this round (the fallback) counts on from it: its progress carries the round's totals, not its own from 0.
+   const visionRun=(config:NonNullable<typeof vision>,visionInput:Record<string,unknown>,base?:ComputerUseResult)=>runVisionComputerUse(visionInput,{
+    mode:config.mode,decide:config.decide(t,authorized),authorized,interruptSignal:interrupt.signal,call:deps.call,evaluate:deps.evaluate,decisionMode:deps.decisionMode,observation:deps.observation,beforeMutation:deps.beforeMutation,
+    progress:base?e=>deps.progress!(continued(base,e)):deps.progress,
     screenshot:async(state,s)=>{
       if(!authorized())throw Error('ACCESS_DENIED');
       let text:unknown,image:ReturnType<ComputerTaskAdapter['parseScreenshot']>;
@@ -300,13 +304,13 @@ export class ComputerTaskAdapter implements GatewayTaskAdapter {
     const done=result.lastAction&&!result.lastAction.blocked?` Its last: ${computerActionText(result.lastAction)}.`:'';
     const note=`Accessibility already took ${result.steps} action${result.steps===1?'':'s'} toward this goal in this round and then found no control it could use.${done} Continue from the current screen; do not repeat what is done.`;
     const outcome=await visionRun(fallback,{goal:input.goal,revision:t.revision,maxSteps:budget,interactionContext:[contextNote,note].filter(Boolean).join('\n\n').slice(-8000),
-     impact:t.automationController!=='agent',yieldAfterAction:false,literalText:true,approvedOnly:true});
+     impact:t.automationController!=='agent',yieldAfterAction:false,literalText:true,approvedOnly:true},result);
     if('fallback' in outcome){
      // The Windows helper has no raw input yet: nothing for the user to turn on there.
      const reason=!VISION_RAW_UNAVAILABLE.has(outcome.fallback)?'SCREEN_CAPTURE_REQUIRED':observed?.platform?.os==='windows'?'RAW_INPUT_UNAVAILABLE':'RAW_INPUT_REQUIRED';
      const event={phase:'waiting' as const,reason,sequence:(result.trace?.events.at(-1)?.sequence??0)+1,round:result.trace?.events.at(-1)?.round??1,at:Date.now(),revision:t.revision,steps:result.steps,evaluations:result.evaluations};
      deps.progress?.(event);result={...result,trace:{events:[...(result.trace?.events??[]),event],truncated:result.trace?.truncated??false}};
-    }else result={...outcome,steps:result.steps+outcome.steps,evaluations:result.evaluations+outcome.evaluations,trace:{events:[...(result.trace?.events??[]),...outcome.trace.events],truncated:!!(result.trace?.truncated||outcome.trace.truncated)},...(outcome.lastAction??result.lastAction?{lastAction:outcome.lastAction??result.lastAction}:{})};
+    }else result={...outcome,steps:result.steps+outcome.steps,evaluations:result.evaluations+outcome.evaluations,trace:{events:[...(result.trace?.events??[]),...outcome.trace.events.map(e=>continued(result!,e))],truncated:!!(result.trace?.truncated||outcome.trace.truncated)},...(outcome.lastAction??result.lastAction?{lastAction:outcome.lastAction??result.lastAction}:{})};
    }
    // A reached goal ends the device session too: the Mac stops showing it as
    // controlled and the owner's next request asks for access again.
@@ -324,7 +328,7 @@ export class ComputerTaskAdapter implements GatewayTaskAdapter {
    else if(result.status==='needs_input')outcome={type:'paused'};
    else if(result.status==='needs_verification'){outcome={type:'paused'};}
    else if(result.reason==='STEP_LIMIT')outcome={type:'failed',failure:{code:'COMPUTER_STEP_LIMIT',message:`Computer goal not finished: stopped after ${result.steps} desktop actions, the limit for one goal (${COMPUTER_GOAL_MAX_STEPS}). Each action completed, but the goal is not reached yet and the Mac is still under control. Check the screen and send the next command to continue. Agent: read task_status computer_evidence=recorded for the current screen, then continue with task_update or tell the user what is left.`,observedAt:Date.now()}};
-   else outcome={type:'failed',failure:{code:result.reason.startsWith('COMPUTER_')?result.reason:'COMPUTER_'+result.reason,message:`Computer work stopped: ${result.reason}.${validation?` Validation: ${validation}.`:''}${computerToolErrorNote(receipt)}${withheld?' '+SCREEN_WITHHELD_NOTE:''} ${result.steps} desktop actions; goal completion is not confirmed. ${result.reason==='NO_SUPPORTED_ACTION'?'The decision engine found no supported next action in the accessibility observation. This does not indicate an account restriction or provider rejection.':'Only the recorded reason is confirmed; do not infer a permission or account problem.'} Read task_status computer_evidence=recorded, then task_status computer_trace_offset=0 (the trace and every recorded device tool error), before diagnosing. COMPUTER_TEXT_UNGROUNDED means generated text failed validation, not an OS permission denial. Keep ownership of the task; prepare known field values and continue with task_update when authorized. Do not ask the user to perform the requested search or typing themselves. Only actual OS consent, missing personal facts, or unresolved action outcomes require owner input.`,observedAt:Date.now()}};
+   else outcome={type:'failed',failure:{code:result.reason.startsWith('COMPUTER_')?result.reason:'COMPUTER_'+result.reason,message:`Computer work stopped after ${result.steps} desktop action${result.steps===1?'':'s'}: ${computerReasonText(result.reason)} Tell the user this sentence, not the code. Code for diagnosis: ${result.reason}.${validation?` Validation: ${validation}.`:''}${computerToolErrorNote(receipt)}${withheld?' '+SCREEN_WITHHELD_NOTE:''} Goal completion is not confirmed. ${result.reason==='NO_SUPPORTED_ACTION'?'The decision engine found no supported next action in the accessibility observation. This does not indicate an account restriction or provider rejection.':'Only the recorded reason is confirmed; do not infer a permission or account problem.'} Read task_status computer_evidence=recorded, then task_status computer_trace_offset=0 (the trace and every recorded device tool error), before diagnosing. COMPUTER_TEXT_UNGROUNDED means generated text failed validation, not an OS permission denial. Keep ownership of the task; prepare known field values and continue with task_update when authorized. Do not ask the user to perform the requested search or typing themselves. Only actual OS consent, missing personal facts, or unresolved action outcomes require owner input.`,observedAt:Date.now()}};
    if(asked&&!answered&&result.reason!=='REVISION_SUPERSEDED'&&!interrupt.signal.aborted){const context=this.read(t,'interaction-context')??previousContext!;this.write(t,'interaction-context',{...context,...(observedRound?{command:command.slice(0,2000),goalRun,lastAction:undefined}:{lastAction:{...previousContext!.lastAction!,confirm:false}})});}
    if(result.lastAction){const context=this.read(t,'interaction-context');if(context)this.write(t,'interaction-context',{...context,lastAction:result.lastAction});}
    outcome.computerReport=report;receipt.ended=true;receipt.outcome=outcome;this.write(t,r,receipt);

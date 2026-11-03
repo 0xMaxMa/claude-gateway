@@ -75,6 +75,8 @@ test('a failed agent goal run reaches the agent although the user controls the s
   const failed=f.finish({type:'failed',failure:{code:'COMPUTER_UNSUPPORTED_ACTION',message:'Computer work stopped: UNSUPPORTED_ACTION.',observedAt:Date.now()},computerReport:{...report,steps:1,status:'blocked',reason:'UNSUPPORTED_ACTION'}});
   expect(failed.state).toBe('failed');expect(failed.automationController).toBe('user');
   expect(f.notified()).toBe(1);expect(f.delivered()).toBe(1);
+  // The card ends on the round's own stop, not the running progress it stopped at.
+  expect(failed.latestProgress?.text).toBe('Stopped after 1 action. The computer does not support that kind of action.');
  }finally{f.close();}
 });
 

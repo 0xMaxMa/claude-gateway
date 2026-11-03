@@ -64,7 +64,7 @@ test('a recovered APPLICATION_PROTECTED is not presented as the cause of a later
 test('APPLICATION_PROTECTED is a known code: the real loop stops with it, and the message explains it',async()=>{
  const {outcome}=await run({computer_observe:[failed('APPLICATION_PROTECTED','FRONTMOST_PROTECTED')]});
  expect(outcome.failure.code).toBe('COMPUTER_APPLICATION_PROTECTED');
- expect(outcome.failure.message).toContain('Computer work stopped: APPLICATION_PROTECTED. Device tool errors (most recent first): computer_observe APPLICATION_PROTECTED (FRONTMOST_PROTECTED).');
+ expect(outcome.failure.message).toContain('Computer work stopped after 0 desktop actions: The screen was hidden because a protected app such as GetPod was in front. Tell the user this sentence, not the code. Code for diagnosis: APPLICATION_PROTECTED. Device tool errors (most recent first): computer_observe APPLICATION_PROTECTED (FRONTMOST_PROTECTED).');
  expect(outcome.failure.message).toContain(PROTECTED_NOTE);
 });
 
