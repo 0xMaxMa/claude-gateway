@@ -15,6 +15,8 @@ const DU_TIMEOUT_MS = 8_000;
 const SIZE_TTL_MS = 60_000;
 const execFileAsync = promisify(execFile);
 const sizeCache = new Map<string, { at: number; size: number | null }>();
+/** The measurement under way per folder, so concurrent lists share one `du` instead of each starting another. */
+const sizeInFlight = new Map<string, Promise<number | null>>();
 
 export interface Entry {
   name: EntryName;
@@ -82,9 +84,17 @@ export async function reportedRoot(root: string): Promise<string | null> {
  * but still prints the total, so that total is used. Only a folder with no total at all, or one past the time limit,
  * reports null.
  */
-export async function folderSize(realDir: string): Promise<number | null> {
+export function folderSize(realDir: string): Promise<number | null> {
   const hit = sizeCache.get(realDir);
-  if (hit && Date.now() - hit.at < SIZE_TTL_MS) return hit.size;
+  if (hit && Date.now() - hit.at < SIZE_TTL_MS) return Promise.resolve(hit.size);
+  const pending = sizeInFlight.get(realDir);
+  if (pending) return pending;
+  const measured = measureFolder(realDir).finally(() => sizeInFlight.delete(realDir));
+  sizeInFlight.set(realDir, measured);
+  return measured;
+}
+
+async function measureFolder(realDir: string): Promise<number | null> {
   let size: number | null = null;
   try {
     const { stdout } = await execFileAsync('du', ['-s', '-B1', '-x', realDir], { timeout: DU_TIMEOUT_MS });

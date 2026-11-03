@@ -2,7 +2,7 @@ import { execFileSync } from "child_process";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
-import { listDir, makeDir, parseDuTotal, resolveDir } from "../../src/files/fs";
+import { folderSize, listDir, makeDir, parseDuTotal, resolveDir } from "../../src/files/fs";
 import { RelPath } from "../../src/files/paths";
 import { silentLogger } from "../helpers/silent-logger";
 
@@ -77,6 +77,15 @@ describe("listDir", () => {
     expect(res.value.entries.map((p) => p.abs)).toEqual([
       path.join(root, "alpha"),
     ]);
+  });
+});
+
+describe("folderSize", () => {
+  it("shares one measurement between callers that ask at the same time", async () => {
+    const dir = makeDirs("app", { "a.txt": "x".repeat(4096) });
+    const first = folderSize(dir);
+    expect(folderSize(dir)).toBe(first);
+    expect(await first).toEqual(expect.any(Number));
   });
 });
 
