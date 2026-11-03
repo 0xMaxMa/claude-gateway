@@ -13,6 +13,7 @@ import type {CommandContext,TaskSnapshot,TaskAttempt,TaskRevision,WorkerOutcome,
 import {GatewayRequestNotSentError,type GatewayTaskAdapter} from './controller';
 import {OrchestrationError} from '../types';
 import {agentGoalRun} from '../tasks/automation-session';
+import {ComputerLiveRuns} from '../computer-live';
 /** How long an unanswered owner approval prompt may hold the session. */
 export const COMPUTER_ACCESS_WAIT_MS=5*60*1000;
 const {runComputerUse,confirmationReply}=require('../../automation/computer-use') as {runComputerUse:(input:unknown,deps:ComputerUseDependencies,signal:AbortSignal)=>Promise<ComputerUseResult>;confirmationReply:(label:string,reply:string,deps:ComputerUseDependencies,signal:AbortSignal)=>Promise<'YES'|'NO'|'OTHER'>};
@@ -63,6 +64,8 @@ export class ComputerTaskAdapter implements GatewayTaskAdapter {
  readonly name='computer';private runs=new Map<string,{abort:AbortController;interrupt:AbortController;done:Promise<void>}>();
  /** Device sessions in use (connector + scope) by computer runs and device_shell calls; device_shell ends a session only when it is the last user. */
  private holders=new Map<string,number>();
+ /** What each device's current run is doing, for the device's own overlay (computer-live.ts). */
+ readonly live=new ComputerLiveRuns();
  constructor(private options:{agentId:string;root:string;connectors:ComputerConnectors;allowed:()=>boolean;stepMode?:()=>boolean;settled?:()=>void;userSteps?:(task:TaskSnapshot)=>string|undefined;accessWaitMs?:number;thinking?:()=>import('../../jev/browser-contract').BrowserTextHelperConfig|{resolve:()=>Promise<import('../../../lib/automation/thinking.cjs').ThinkingConfig>}|undefined;timezone?:()=>string;member:(principal:string,conversation:string)=>boolean;active:(task:TaskSnapshot)=>boolean;evaluate:(task:TaskSnapshot,request:Parameters<ComputerUseDependencies['evaluate']>[0],signal:AbortSignal)=>ReturnType<ComputerUseDependencies['evaluate']>;needsInput:(task:TaskSnapshot,question:string)=>boolean;progress?:(task:TaskSnapshot,report:import('../types').ComputerTaskReport)=>void;decisionMode?:()=>'jev'|'model';
   /** gateway.computerUse.mode vision|hybrid with a toolset-capable model: agent goals decided from the screenshot. */
   vision?:()=>{mode:'vision'|'hybrid';decide:(task:TaskSnapshot,authorized:()=>boolean)=>VisionDecide}|undefined}){}
@@ -161,6 +164,7 @@ export class ComputerTaskAdapter implements GatewayTaskAdapter {
   const interrupt=new AbortController(),abort=new AbortController(),signal=AbortSignal.any([abort.signal,AbortSignal.timeout(725000)]),key=this.file(t,r);
   const fence=setInterval(()=>{if(!authorized())abort.abort();},250);fence.unref();
   const hold=this.hold(b);
+  const grantId=typeof b.scope.grant_id==='string'?b.scope.grant_id:'';if(grantId)this.live.start(grantId,t.taskId,r);
   const done=withComputerConnection(connection,async client=>{
    const consentSignal=AbortSignal.any([signal,interrupt.signal]);
    let access='pending',waitingForOwner=false;
@@ -173,7 +177,7 @@ export class ComputerTaskAdapter implements GatewayTaskAdapter {
     const text=(response.content as any[])?.find(x=>x.type==='text')?.text;
     if(response.isError||typeof text!=='string')throw Error('COMPUTER_ACCESS_UNAVAILABLE');
     access=JSON.parse(text).state;
-    if(access==='pending'&&!waitingForOwner){waitingForOwner=true;this.options.progress?.(t,{status:'waiting_access',reason:'OWNER_APPROVAL_REQUIRED',steps:0,evaluations:0,phase:'awaiting_access'});}
+    if(access==='pending'&&!waitingForOwner){waitingForOwner=true;this.options.progress?.(t,{status:'waiting_access',reason:'OWNER_APPROVAL_REQUIRED',steps:0,evaluations:0,phase:'awaiting_access'});this.live.awaitingAccess(grantId,r);}
     if(access!=='approved'&&access!=='pending')throw Error(access==='denied'?'COMPUTER_ACCESS_DENIED':access==='stopped'?'COMPUTER_ACCESS_STOPPED':'COMPUTER_ACCESS_UNAVAILABLE');
    }
    consentSignal.throwIfAborted();
@@ -231,6 +235,7 @@ export class ComputerTaskAdapter implements GatewayTaskAdapter {
      // A dispatch event is not a receipt. Preserve the fence until a known result.
      if(e.phase==='acted'&&e.operationId&&e.operationId===receipt.operationId&&['completed','not_executed'].includes(e.outcome??''))delete receipt.operationId;
      receipt.trace=[...(receipt.trace??[]),e].slice(-2000);this.write(t,r,receipt);
+     this.live.progress(grantId,r,e,steps);
      this.options.progress?.(t,{status:'running',reason:e.reason??e.phase,steps:e.steps,evaluations:e.evaluations,phase:e.phase,trace:receipt.trace.slice(-12)});
     }
    };

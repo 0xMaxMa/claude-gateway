@@ -5,6 +5,7 @@ import {attachComputerEndScreenshot} from './computer-end-screenshot';
 import {handDirectCommandToAgent,liveExecutionInput,liveControlReceipt} from './live-execution-input';
 import {agentHandoffRequested,directCommandSpeech,readRequested} from '../automation/command-speech';
 import {ComputerTaskAdapter} from './gateway-tasks/computer';
+import {computerLiveView} from './computer-live';
 import {ComputerConnectors} from '../jev/computer-connector';
 import { AutomaticBrowserBindings } from '../jev/automatic-browser-bindings';
 import { BrowserConnectorRegistry, resolveBrowserConnection } from '../jev/browser-connector';
@@ -453,6 +454,15 @@ export class AgentOrchestrationRuntime {
       runtime.resourceTimer.unref();
       return runtime;
     } catch (error) { admissionStore?.close(); await bridge.close(); store.close(); releaseLock(); throw error; }
+  }
+  /** What the Computer Use run on relay grant `grantId` is doing, for that device's overlay. Undefined when none ran
+   *  since start, or when `principalId` is not a member of its conversation: a grant ID alone reads nothing. */
+  computerActivity(grantId: string, principalId: string) {
+    const run = this.computerAdapter?.live.get(grantId);
+    const task = run && this.store.task(run.taskId);
+    if (!run || !task) return undefined;
+    try { this.store.assertMember(task.conversationId, principalId); } catch { return undefined; }
+    return computerLiveView(run, task);
   }
   activity(sessionId: string, principalId: string, after = 0) {
     const conversation = this.store.get('SELECT * FROM conversations WHERE agent_session_id=?', sessionId);
