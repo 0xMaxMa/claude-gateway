@@ -15,14 +15,14 @@ import type {TaskSnapshot} from '../../../src/orchestration/types';
 // ended the device session of an idle round, and a user-driven session never expired.
 const PAUSED={type:'paused' as const,computerReport:{status:'needs_input',reason:'COMMAND_WAITING_INPUT',steps:1,evaluations:1,phase:'terminal'}};
 
-function fixture(endSession:()=>Promise<boolean|undefined>=async()=>true){
+function fixture(endSession:()=>Promise<boolean|undefined>=async()=>true,round:object=PAUSED){
  const root=mkdtempSync(join(tmpdir(),'computer-idle-')),store=new OrchestrationStore(join(root,'db'),'a'),tasks=new TaskService(store);
  const accepted=store.acceptInput({scope:{agentId:'a',agentSessionId:'s',source:'api',accountId:'u',chatId:'c',threadKey:'',principalId:'u'},text:'open chrome',capabilities:{execute:true,writeMemory:false}});
  const decision=new DecisionService(store).begin(accepted.conversationId,'u',[accepted.inputId]);
  const task=tasks.spawn({...accepted,...decision,principalId:'u',execute:true,writeMemory:false,actionId:'spawn'},{title:'Chrome',instructions:'Open Chrome',targetProfile:'gateway-managed',gatewayTarget:{adapter:'computer',sessionId:'pc',name:'PC'}});
  const outcomes=new Map<string,any>(),submitted:string[]=[],cancelled:string[]=[];
  const adapter:GatewayTaskAdapter={name:'computer',discover:()=>({}),resolve:()=>({adapter:'computer',sessionId:'pc',name:'PC'}),
-  submit:async(_t,requestId)=>{submitted.push(requestId);outcomes.set(requestId,PAUSED);},
+  submit:async(_t,requestId)=>{submitted.push(requestId);outcomes.set(requestId,round);},
   inspect:async(_t,requestId)=>outcomes.get(requestId)??'running',
   cancel:async(_t,requestId)=>{cancelled.push(requestId);outcomes.set(requestId,{type:'stopped'});},
   endSession:jest.fn(async()=>endSession())};
@@ -129,12 +129,81 @@ test.each([['user','a save'],['agent','a save'],['user','no save'],['agent','no 
    expect(f.get().automationSession?.status).toBe('idle');expect(f.get().computerRevocation).toBeUndefined();
   }
   for(let i=0;i<3;i++)await f.controller.tick();
-  // adapter.cancel → computer_end_session once, then the revocation is settled; the round keeps its state.
+  // adapter.cancel → computer_end_session once, then the revocation is settled. The round that took no
+  // more commands ends with its outcome: it had acted ("Done: the action was sent"), so it completed.
   expect(f.cancelled).toEqual([f.submitted[0]]);
   expect(f.get().automationSession).toMatchObject({status:'closed',closedReason:'idle_timeout'});
-  expect(f.get().computerRevocation).toBeUndefined();expect(f.get().state).toBe('waiting_input');
+  expect(f.get().computerRevocation).toBeUndefined();expect(f.get().state).toBe('completed');
+  expect(f.get().result?.summary).toBe('The Computer Use session ended after 30 minutes without a new command. Last round: Done: the action was sent. Send the next command.');
   expect(f.ended()).toBe(0);
  }finally{await f.close();}
+});
+
+// Pod-jinawong, tasks 2f65b7cf and d1b6f841 (r7): the session expired at 30 min, the device was released, and the
+// task stayed waiting_input, so the web and app cards counted "1 active task" and the overlay waited forever.
+const NOT_DONE={type:'paused' as const,computerReport:{status:'needs_input',reason:'COMMAND_WAITING_INPUT',steps:0,evaluations:1,phase:'terminal',
+ trace:[{sequence:1,round:1,at:1,revision:2,steps:0,evaluations:1,phase:'waiting',reason:'NO_SUPPORTED_ACTION'}]}};
+describe('an expired session ends its waiting round',()=>{
+ const expire=async(f:ReturnType<typeof fixture>)=>{await f.controller.tick();await f.controller.tick();f.edit(t=>{t.automationController='user';});f.idleFor(AUTOMATION_IDLE_TIMEOUT_MS+1000);for(let i=0;i<3;i++)await f.controller.tick();};
+ test('a round that did not do its command fails COMPUTER_SESSION_EXPIRED and keeps its last outcome',async()=>{
+  const f=fixture(async()=>undefined,NOT_DONE);try{
+   await expire(f);
+   const t=f.get();
+   expect(t.state).toBe('failed');expect(t.failure?.code).toBe('COMPUTER_SESSION_EXPIRED');
+   const line='Not done: no visible control matches this command. Check that the right window is in front, or name the item as it appears on screen.';
+   expect(t.failure?.message).toContain('Last round: '+line);
+   expect(t.latestProgress?.text).toBe('The Computer Use session ended after 30 minutes without a new command. '+line);
+   expect(t.computerReport).toMatchObject({reason:'COMMAND_WAITING_INPUT',steps:0});
+   // The device session is still ended once, and the ended task leaves the composer and the card's active count.
+   expect(f.cancelled).toEqual([f.submitted[0]]);expect(t.computerRevocation).toBeUndefined();
+   const listed=new TaskControls(f.store,f.tasks).list('s','u',0,10).tasks as any[];
+   expect(listed.some(x=>x.taskId===t.taskId&&x.state==='waiting_input')).toBe(false);
+  }finally{await f.close();}
+ });
+ test('a genuine question for the owner keeps the task waiting',async()=>{
+  const f=fixture(async()=>undefined,NOT_DONE);try{
+   await f.controller.tick();await f.controller.tick();
+   f.edit(t=>{t.automationController='user';t.pendingQuestion={questionId:'q',text:'Which account?',revision:t.revision} as any;});
+   f.idleFor(AUTOMATION_IDLE_TIMEOUT_MS+1000);for(let i=0;i<3;i++)await f.controller.tick();
+   expect(f.get().state).toBe('waiting_input');expect(f.get().pendingQuestion?.questionId).toBe('q');
+   expect(f.get().failure).toBeUndefined();
+   // The device session is still ended (unchanged).
+   expect(f.cancelled).toEqual([f.submitted[0]]);expect(f.get().computerRevocation).toBeUndefined();
+  }finally{await f.close();}
+ });
+ test('a task left waiting by an earlier gateway (closed, revocation settled) ends on the next tick, with no device call',async()=>{
+  const f=fixture(async()=>undefined,NOT_DONE);try{
+   await f.controller.tick();await f.controller.tick();
+   // The r7 state: session closed by idle_timeout, the revocation already settled, the task still waiting_input.
+   f.edit(t=>{t.automationController='user';t.automationSession={status:'closed',idleTimeoutMs:AUTOMATION_IDLE_TIMEOUT_MS,idleSince:Date.now()-2*AUTOMATION_IDLE_TIMEOUT_MS,closedAt:Date.now()-AUTOMATION_IDLE_TIMEOUT_MS,closedReason:'idle_timeout'};delete t.computerRevocation;});
+   expect(f.get().state).toBe('waiting_input');
+   await f.controller.tick();
+   expect(f.get().state).toBe('failed');expect(f.get().failure?.code).toBe('COMPUTER_SESSION_EXPIRED');
+   expect(f.cancelled).toEqual([]);
+   // Once: later ticks change nothing.
+   const version=f.get().stateVersion;for(let i=0;i<3;i++)await f.controller.tick();
+   expect(f.get().stateVersion).toBe(version);
+  }finally{await f.close();}
+ });
+ test('an offline device does not keep the task waiting: it ends, and the revocation is retried',async()=>{
+  const f=fixture(async()=>undefined,NOT_DONE);try{
+   f.adapter.cancel=async()=>{throw Error('DEVICE_OFFLINE');};
+   const errors=jest.spyOn(f.controller as any,'reportError').mockImplementation(()=>{});
+   await expire(f);
+   expect(f.get().state).toBe('failed');expect(f.get().computerRevocation?.requestId).toBe(f.submitted[0]);
+   errors.mockRestore();
+  }finally{await f.close();}
+ });
+ test('a round that is still running or needs reconciliation is not ended by this rule',()=>{
+  const {expiredWaitingRound}=require('../../../src/orchestration/tasks/automation-session');
+  const closed={status:'closed',idleTimeoutMs:1,closedReason:'idle_timeout'};
+  const base={gatewayTarget:{adapter:'computer',sessionId:'s',name:'PC'},state:'waiting_input',automationSession:closed};
+  expect(expiredWaitingRound(base)).toBe(true);
+  expect(expiredWaitingRound({...base,activeAttemptId:'a'})).toBe(false);
+  expect(expiredWaitingRound({...base,state:'needs_reconciliation'})).toBe(false);
+  expect(expiredWaitingRound({...base,automationSession:{...closed,closedReason:'user'}})).toBe(false);
+  expect(expiredWaitingRound({...base,gatewayTarget:{adapter:'browser',sessionId:'s',name:'Chrome'}})).toBe(false);
+ });
 });
 
 // Pod-jinawong, getpod-app Windows (DESKTOP-MINVS33): after the idle release the task card still

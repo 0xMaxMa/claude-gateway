@@ -1,4 +1,4 @@
-import {automationSession,confirmationAsked} from '../tasks/automation-session';
+import {automationSession,confirmationAsked,expiredWaitingRound} from '../tasks/automation-session';
 import { GatewayTaskTarget, PublicTaskSnapshot, TaskSnapshot, WorkerOutcome, CommandContext, TaskAttempt } from '../types';
 import { TaskService } from '../tasks/service';
 import { taskFailure } from '../tasks/failure';
@@ -92,6 +92,10 @@ export class GatewayTaskController {
             task=this.tasks.store.task(task.taskId)!;
           }
         }catch(error){this.reportError(error);}
+      }
+      // An expired session takes no command: its waiting round ends now; the revocation below still releases the device.
+      if(expiredWaitingRound(task)){
+        try{this.tasks.endExpiredComputerRound(task.taskId,task.stateVersion);task=this.tasks.store.task(task.taskId)!;}catch(error){this.reportError(error);}
       }
       if((task.state==='cancel_requested'||(task.computerRevocation&&task.computerRevocation.requestId===task.gatewayDispatch?.requestId))&&!task.activeAttemptId&&task.gatewayTarget?.adapter==='computer'&&task.gatewayDispatch){
         const adapter=this.adapters.get('computer'),requestId=task.gatewayDispatch.requestId;

@@ -501,3 +501,49 @@ describe('an agent goal run types the command it was given in backticks',()=>{
   expect(waited(r)).toBe('FIELD_TEXT_REQUIRED');
  });
 });
+
+// Pod-jinawong r7, task 2f65b7cf: the user typed "play it on Spotify" in GetPod, so GetPod was in front and its
+// screen was withheld (no controls). The agent's hand-off command ran as one interaction and stopped
+// NO_SUPPORTED_ACTION. It runs as a short goal now (gateway-tasks/computer.ts agentHandoff), with the same gates.
+describe('an agent hand-off command runs as a short goal',()=>{
+ const withheld=()=>({application:'unapproved',truncated:false,apps:APPS,controls:[],screenshotAvailable:false,frontmostProtected:true,reason:'The frontmost application is protected on this computer; open or switch to an allowed application.'});
+ const play=()=>({application:'com.google.Chrome',windowTitle:'Song - Spotify',truncated:false,apps:APPS,controls:[{ref:'p1',role:'AXButton',label:'Play',actions:['press']}]});
+ // The input gateway-tasks/computer.ts builds for a hand-off round.
+ const handoff=(f:ReturnType<typeof fixture>,goal:string)=>runComputerUse({goal,yieldAfterAction:false,yieldAfterInteraction:true,readRequest:false,agentCommand:true,runToGoal:true,maxSteps:8},f.deps,new AbortController().signal);
+ test('opens the browser from a withheld screen, then carries on to the goal',async()=>{
+  const f=fixture([withheld,play,play],[{pick:'open:com.google.Chrome'},{pick:'press:p1'},{pick:'DONE'}]);
+  const r=await handoff(f,'play "Song" on Spotify in Chrome');
+  expect(f.actions()).toEqual([{kind:'open',app_id:'com.google.Chrome'},{kind:'press',ref:'p1'}]);
+  expect(r).toMatchObject({status:'succeeded',reason:'GOAL_REACHED',steps:2});
+  // The model was told why the screen was empty, not that the app is unapproved.
+  expect(f.requests[0].state.desktop).toMatchObject({application:'unapproved',frontmostProtected:true});
+  expect(f.requests[0].state.desktop.screenWithheld).toContain('not a missing approval');
+ });
+ test('without runToGoal the same command stops after its first action (the r7 behaviour)',async()=>{
+  const f=fixture([withheld,play],[{pick:'open:com.google.Chrome'},{pick:'press:p1'}]);
+  const r=await runComputerUse({goal:'play "Song" on Spotify in Chrome',yieldAfterInteraction:true,agentCommand:true},f.deps,new AbortController().signal);
+  expect(f.actions()).toEqual([{kind:'open',app_id:'com.google.Chrome'}]);expect(waited(r)).toBe('ACTION_DISPATCHED');
+ });
+ test('the impact gate is unchanged: a high-impact first action asks the user',async()=>{
+  const f=fixture([()=>notes(1)],[{pick:'press:c9',impact:'HIGH_IMPACT'}]);
+  const r=await handoff(f,'delete this note');
+  expect(f.requests[0].questions.impact).toBeDefined();
+  expect(f.actions()).toEqual([]);expect(waited(r)).toBe('CONFIRMATION_REQUIRED');
+ });
+ test('the impact gate holds on every later step too',async()=>{
+  const f=fixture([withheld,()=>notes(1)],[{pick:'open:com.apple.Notes'},{pick:'press:c9',impact:'HIGH_IMPACT'}]);
+  const r=await handoff(f,'delete my note');
+  expect(f.actions()).toEqual([{kind:'open',app_id:'com.apple.Notes'}]);expect(waited(r)).toBe('CONFIRMATION_REQUIRED');
+ });
+ test('the first action keeps the hand-off\'s best-choice rule; an unsure later step stops (confidence gate)',async()=>{
+  const f=fixture([withheld,()=>notes(1)],[{pick:'open:com.apple.Notes',confidence:0.5},{pick:'press:c10',confidence:0.4}]);
+  const r=await handoff(f,'share my note');
+  expect(f.actions()).toEqual([{kind:'open',app_id:'com.apple.Notes'}]);expect(waited(r)).toBe('LOW_CONFIDENCE');
+ });
+ test('stops at the goal step limit',async()=>{
+  const f=fixture([withheld,play,play,play],[{pick:'open:com.google.Chrome'},{pick:'press:p1'},{pick:'press:p1'}]);
+  const r=await runComputerUse({goal:'play',yieldAfterInteraction:true,readRequest:false,agentCommand:true,runToGoal:true,maxSteps:2},f.deps,new AbortController().signal);
+  expect(r).toMatchObject({status:'blocked',reason:'STEP_LIMIT',steps:2});
+ });
+});
+

@@ -210,3 +210,79 @@ test('a typed command that Jev gives up on is handed off without speech',async()
   expect(f.heard).not.toHaveBeenCalled();
  }finally{await f.close();}
 });
+
+// Pod-jinawong r7, task 2f65b7cf: the user typed in GetPod, the agent's one command for the hand-off
+// ended NO_SUPPORTED_ACTION, and nobody said anything (only live voice heard the outcome).
+describe.each(['browser','computer'] as const)('%s: a typed hand-off command that ends not done',adapter=>{
+ const handOff=async(f:Awaited<ReturnType<typeof fixture>>,applied:{inputId:string},onReport:(inputId:string)=>void=()=>{})=>{
+  let sent=false;
+  f.onTurn(()=>{
+   const revision=f.runtime.store.task(f.taskId)!.revision;
+   if(!sent){sent=true;f.runtime.tasks.update(f.agentContext(applied.inputId),f.taskId,revision,'play "Song" on Spotify in Chrome','when_ready');return;}
+   const report=f.runtime.store.get("SELECT id FROM conversation_inputs WHERE json_extract(ingress_json,'$.ingressKey') LIKE 'handoff-not-done:%' ORDER BY input_seq DESC LIMIT 1");
+   if(report)onReport(String(report.id));
+  });
+  f.settle(gaveUp(adapter));
+  await until(()=>sent);await f.idle();
+  return f.prompts.length;
+ };
+ test('wakes the agent once, report-only: it cannot send a command, and a replayed settle never wakes it again',async()=>{
+  const f=await fixture(adapter);try{
+   const applied=f.command(odd,'text');
+   const refused:unknown[]=[];
+   const turns=await handOff(f,applied,inputId=>{
+    const revision=f.runtime.store.task(f.taskId)!.revision;
+    // The report turn runs without execute, as the bridge gives it.
+    try{f.runtime.tasks.update({...f.agentContext(inputId),execute:false},f.taskId,revision,'try again','when_ready');refused.push('ok');}catch(error){refused.push((error as {code?:string}).code);}
+   });
+   const revision=f.runtime.store.task(f.taskId)!.revision;
+   f.settle(gaveUp(adapter));
+   await until(()=>f.prompts.length===turns+1);await f.idle();
+   const prompt=f.prompts.at(-1)!;
+   expect(prompt).toContain('has ended without doing it');expect(prompt).toContain('report-only');
+   expect(prompt).toContain('Execution eligible: false');
+   expect(refused).toEqual(['USER_CONTROLS_AUTOMATION']);
+   expect(f.runtime.store.task(f.taskId)!.revision).toBe(revision);
+   // At most one wake for this round; no new hand-off and nothing spoken.
+   f.settle(gaveUp(adapter));f.settle(gaveUp(adapter));
+   await new Promise(r=>setTimeout(r,50));await f.idle();
+   expect(f.prompts).toHaveLength(turns+1);
+   expect(f.handoffs()).toHaveLength(1);
+   // Only the agent's own replies (the fixture's "Opening it.") reach the listener; no gateway line is spoken.
+   expect(spoken(f.heard).every(text=>text==='Opening it.')).toBe(true);
+  }finally{await f.close();}
+ });
+ test('live voice speaks the outcome instead: no extra agent turn',async()=>{
+  const f=await fixture(adapter);try{
+   const applied=f.command(odd,'live_voice');
+   const turns=await handOff(f,applied);
+   f.settle(gaveUp(adapter));
+   await new Promise(r=>setTimeout(r,50));await f.idle();
+   expect(f.prompts).toHaveLength(turns);
+   expect(spoken(f.heard)).toHaveLength(1);
+  }finally{await f.close();}
+ });
+ test('a question for the user (confirm a high-impact action) is not reported',async()=>{
+  const f=await fixture(adapter);try{
+   const applied=f.command(odd,'text');
+   const turns=await handOff(f,applied);
+   f.settle(gaveUp(adapter,'CONFIRMATION_REQUIRED'));
+   await new Promise(r=>setTimeout(r,50));await f.idle();
+   expect(f.prompts).toHaveLength(turns);
+  }finally{await f.close();}
+ });
+});
+
+test('a computer hand-off goal that reached its goal is not reported',async()=>{
+ const f=await fixture('computer');try{
+  const applied=f.command(odd,'text');
+  let sent=false;
+  f.onTurn(()=>{if(sent)return;sent=true;f.runtime.tasks.update(f.agentContext(applied.inputId),f.taskId,f.runtime.store.task(f.taskId)!.revision,'play "Song" on Spotify in Chrome','when_ready');});
+  f.settle(gaveUpComputer());
+  await until(()=>sent);await f.idle();
+  const turns=f.prompts.length;
+  f.settle({status:'succeeded',reason:'GOAL_REACHED',steps:3,evaluations:4,phase:'terminal',accessReleased:true,trace:[]});
+  await new Promise(r=>setTimeout(r,50));await f.idle();
+  expect(f.prompts).toHaveLength(turns);
+ }finally{await f.close();}
+});

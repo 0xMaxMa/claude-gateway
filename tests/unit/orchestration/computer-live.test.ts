@@ -63,6 +63,18 @@ describe('computer live runs (the device overlay label)',()=>{
   expect(view({state:'needs_reconciliation'}).phase).toBe('waiting_for_user');
  });
 
+ // Pod-jinawong, task 2f65b7cf: the session expired at 30 min but the task stayed waiting_input, so the overlay waited for the user forever.
+ test('a closed or expired automation session is ended, not waiting for the user',()=>{
+  const run={taskId:'t',requestId:'r',updatedAt:9,phase:'acting' as const,label:'Opening Spotify'};
+  const now=10_000_000,idle={taskId:'t',state:'waiting_input',automationController:'user',gatewayTarget:{adapter:'computer',sessionId:'s',name:'Computer Use · Mac'},updatedAt:now-1000};
+  const view=(task:Record<string,unknown>)=>computerLiveView(run,{...idle,...task} as any,now).phase;
+  expect(view({automationSession:{status:'idle',idleTimeoutMs:1_800_000,idleSince:now-1000}})).toBe('waiting_for_user');
+  expect(view({automationSession:{status:'closed',idleTimeoutMs:1_800_000,idleSince:now-1_900_000,closedAt:now-100_000,closedReason:'idle_timeout'}})).toBe('ended');
+  // Expired by time before any save recorded it.
+  expect(view({automationSession:{status:'idle',idleTimeoutMs:1_800_000,idleSince:now-1_800_000}})).toBe('ended');
+  expect(view({automationSession:{status:'closed',idleTimeoutMs:1_800_000,closedReason:'agent'}})).toBe('ended');
+ });
+
  test('a submitted round records its progress under the relay grant it runs on',async()=>{
   const root=mkdtempSync(join(tmpdir(),'computer-live-'));
   const callTool=jest.fn(async()=>({content:[{type:'text',text:'{"state":"approved"}'}]}));

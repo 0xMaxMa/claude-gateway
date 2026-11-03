@@ -110,6 +110,14 @@ export const agentGoalRunParkedSql=(alias:string)=>{
   AND COALESCE(${field('$.browserReport.commandOutcome.reason')},'')!='CONFIRMATION_REQUIRED'
   AND NOT EXISTS(SELECT 1 FROM json_each(${alias}.snapshot_json,'$.computerReport.trace') WHERE json_extract(value,'$.reason')='CONFIRMATION_REQUIRED')),0)`;
 };
+/** A settled computer round still waiting for a command although its session expired (30 min idle), so no
+ * command can reach it any more. Without a question the owner still has to answer, it ends
+ * (TaskService.endExpiredComputerRound) instead of showing as an active task forever.
+ * Pod-jinawong, tasks 2f65b7cf, d1b6f841, 59e5ce4f, 207e15a8: "Waiting for input" long after the expiry. */
+export function expiredWaitingRound(task: Omit<TaskSnapshot,'skill'>): boolean {
+  return task.gatewayTarget?.adapter==='computer'&&task.state==='waiting_input'&&!task.activeAttemptId&&!task.pendingQuestion
+    &&task.automationSession?.status==='closed'&&task.automationSession.closedReason==='idle_timeout';
+}
 /** The task waits for the owner's next direct command (a settled or paused round). */
 export function pausedForCommand(task: TaskSnapshot): boolean {
   return task.state==='waiting_input'&&!task.activeAttemptId&&(task.executionControl?.phase==='paused'||['THINKING_WAITING_INPUT','COMMAND_WAITING_INPUT','COMPLETION_CANDIDATE','VERIFICATION_FAILED'].includes(task.computerReport?.reason??task.browserReport?.reason??''));

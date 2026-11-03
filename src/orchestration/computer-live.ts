@@ -1,5 +1,6 @@
 import type {ComputerProgress} from '../automation/computer-use';
 import type {TaskSnapshot} from './types';
+import {automationSession} from './tasks/automation-session';
 
 /** What a Computer Use run is doing, for the on-screen overlay of the device it controls (GET /v1/computer/activity).
  *  The relay passes no extra command fields to the device, so the desktop app reads this from the pod instead,
@@ -62,9 +63,11 @@ export class ComputerLiveRuns {
 }
 
 /** The run as the device sees it: the task's own state decides waiting and ended. */
-export function computerLiveView(run:ComputerLiveRun,task:Pick<TaskSnapshot,'taskId'|'state'|'pendingQuestion'|'automationController'>):ComputerLiveView{
+export function computerLiveView(run:ComputerLiveRun,task:TaskSnapshot,now=Date.now()):ComputerLiveView{
  const base={taskId:task.taskId,label:run.label,updatedAt:run.updatedAt,...(run.step?{step:run.step}:{}),...(run.total?{total:run.total}:{})};
  if(['completed','failed','cancelled'].includes(task.state))return {...base,phase:'ended'};
+ // A closed session (expired after 30 min idle, or ended) takes no command: nobody is waited for.
+ if(automationSession(task,now)?.status==='closed')return {...base,phase:'ended'};
  // A settled round of a session the user drives waits for their next command; the agent's own goal run waits for the agent.
  if(task.state==='waiting_input')return {...base,phase:task.pendingQuestion||task.automationController==='user'?'waiting_for_user':'thinking'};
  if(task.state==='needs_reconciliation')return {...base,phase:'waiting_for_user'};

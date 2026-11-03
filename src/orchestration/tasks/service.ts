@@ -1,8 +1,8 @@
 import {CURRENT_CONTROL_ROUND_SQL} from '../control-notification';
 import {preparedBrowserAnswers} from '../browser-fields';
 import {ComputerInputs} from '../../jev/computer-inputs';
-import {AUTOMATION_IDLE_TIMEOUT_MS,agentGoalRunParked,automationSession,pausedForCommand,stoppedForCommand} from './automation-session';
-import {ANSWERED_FROM_SCREEN,computerActionText,computerOutcomeText} from '../../automation/computer-outcome';
+import {AUTOMATION_IDLE_TIMEOUT_MS,agentGoalRunParked,automationSession,expiredWaitingRound,pausedForCommand,stoppedForCommand} from './automation-session';
+import {ANSWERED_FROM_SCREEN,computerActionText,computerOutcomeText,computerRoundDone} from '../../automation/computer-outcome';
 import {browserOutcomeText} from '../../automation/browser-outcome';
 import {textCommand} from '../../automation/direct-command';
 import { parentVerifiableBrowserResult, parkedVerifiableBrowserResult } from '../../jev/browser-contract';
@@ -669,6 +669,27 @@ export class TaskService {
       const task=this.store.task(taskId);
       if(!task||task.stateVersion!==expectedVersion||task.automationSession?.status==='closed'||automationSession(task)?.closedReason!=='idle_timeout')return;
       this.store.saveTask(task,task.stateVersion);
+    });
+  }
+  /** A waiting round whose session expired ends with its last outcome (expiredWaitingRound): completed when that
+   * round was done, else failed COMPUTER_SESSION_EXPIRED. Its device access is revoked separately (computerRevocation). */
+  endExpiredComputerRound(taskId:string,expectedVersion:number):void {
+    this.store.transaction(()=>{
+      const task=this.store.task(taskId);
+      if(!task||task.stateVersion!==expectedVersion||!expiredWaitingRound(task))return;
+      const report=task.computerReport,last=report?computerOutcomeText(report):task.latestProgress?.text;
+      const minutes=Math.round((task.automationSession!.idleTimeoutMs)/60000);
+      const ended=`The Computer Use session ended after ${minutes} minutes without a new command.`;
+      delete task.queuedCommands;
+      if(report&&computerRoundDone(report)){
+        task.state='completed';delete task.failure;
+        task.result={summary:`${ended} Last round: ${last}`.slice(0,4096),artifactIds:[]};
+      }else{
+        task.state='failed';
+        task.failure={code:'COMPUTER_SESSION_EXPIRED',message:`${ended} The task no longer takes commands; a new request starts a new task.${last?` Last round: ${last}`:''}`.slice(0,4096),observedAt:Date.now()};
+      }
+      task.latestProgress={source:'runtime',observedAt:Date.now(),text:[ended,last].filter(Boolean).join(' ').slice(0,4096)};
+      this.store.saveTask(task,task.stateVersion);this.notify(task);
     });
   }
   /** The controller ended an idle round's device session; recorded so it ends once. */

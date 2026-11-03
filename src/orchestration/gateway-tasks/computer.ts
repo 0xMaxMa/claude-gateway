@@ -12,6 +12,7 @@ import {ComputerConnectors,withComputerConnection} from '../../jev/computer-conn
 import type {CommandContext,TaskSnapshot,TaskAttempt,TaskRevision,WorkerOutcome,GatewayTaskTarget} from '../types';
 import {GatewayRequestNotSentError,type GatewayTaskAdapter} from './controller';
 import {OrchestrationError} from '../types';
+import {SCREEN_WITHHELD_NOTE} from '../../automation/computer-policy';
 import {agentGoalRun} from '../tasks/automation-session';
 import {ComputerLiveRuns} from '../computer-live';
 /** How long an unanswered owner approval prompt may hold the session. */
@@ -188,7 +189,9 @@ export class ComputerTaskAdapter implements GatewayTaskAdapter {
    // Step mode takes only the user's own step list: recovery notes, answers and
    // Claude-prepared field values keep the normal one-command path. A list in
    // the user's initiating message is used verbatim; the agent goal is the fallback.
-   // The agent's command for a handed-off utterance: one command, no step list, no hand-off again; a high-impact action waits for the user's confirmation.
+   // The agent's command for a handed-off utterance: one short goal (it may first open or switch to the
+   // app the user named, e.g. GetPod is in front when the user types), no step list, no hand-off again.
+   // Each action stays impact-gated (a high-impact one waits for the user's yes) and, after the first, confidence-gated.
    const agentHandoff=t.automationController==='user'&&t.executionControl?.agentHandoff===true&&t.executionControl.revision===t.revision;
    // The agent's spawn text opens a session the user drives; it is no user command.
    const sessionStart=agentGoalRun(t);
@@ -199,13 +202,13 @@ export class ComputerTaskAdapter implements GatewayTaskAdapter {
    // unless it already sent an action: then the answer was acted on and is consumed.
    let question:object=asked?{command:previousContext!.command,lastAction:previousContext!.lastAction,goalRun:previousContext!.goalRun}:{};
    // The command this round runs: a yes runs the asked command, not the reply text.
-   let command=goal,goalRun=sessionStart;
+   let command=goal,goalRun=sessionStart||agentHandoff;
    let observedRound=false,answered=false;
    // The spawning agent declared this revision needs judgment (run_as_goal): one goal on its text, no step list.
    const stepMode=!agentHandoff&&t.runAsGoal?.revision!==t.revision&&this.options.stepMode?.()===true&&!recoveryNote&&!answers?.length&&!preparedInputs?.length;
    const userText=stepMode?this.options.userSteps?.(t):undefined;
    const steps=stepMode?(userText?parseComputerSteps(userText):undefined)??parseComputerSteps(goal):undefined;
-   const input=steps?{steps,revision:t.revision,...(contextNote?{interactionContext:contextNote}:{})}:{yieldAfterAction:t.automationController==='agent',yieldAfterInteraction:t.automationController==='user',readRequest:t.automationController==='user'&&!agentHandoff,...(agentHandoff?{agentCommand:true}:{}),...(asked?{confirmation:asked,...(previousContext!.goalRun?{resumeGoal:COMPUTER_GOAL_MAX_STEPS}:{})}:{}),...(sessionStart?{sessionStart:true,runToGoal:true,maxSteps:COMPUTER_GOAL_MAX_STEPS}:{}),revision:t.revision,preparedInputs,interactionContext:contextNote,goal:goal+recoveryNote+(answers?.length?'\nKnown answers: '+JSON.stringify(answers.map(a=>a.text)):'')};
+   const input=steps?{steps,revision:t.revision,...(contextNote?{interactionContext:contextNote}:{})}:{yieldAfterAction:t.automationController==='agent',yieldAfterInteraction:t.automationController==='user',readRequest:t.automationController==='user'&&!agentHandoff,...(agentHandoff?{agentCommand:true,runToGoal:true,maxSteps:COMPUTER_GOAL_MAX_STEPS}:{}),...(asked?{confirmation:asked,...(previousContext!.goalRun?{resumeGoal:COMPUTER_GOAL_MAX_STEPS}:{})}:{}),...(sessionStart?{sessionStart:true,runToGoal:true,maxSteps:COMPUTER_GOAL_MAX_STEPS}:{}),revision:t.revision,preparedInputs,interactionContext:contextNote,goal:goal+recoveryNote+(answers?.length?'\nKnown answers: '+JSON.stringify(answers.map(a=>a.text)):'')};
    const deps:ComputerUseDependencies={authorized,interruptSignal:interrupt.signal,
     confirmed:reply=>{if(asked&&reply==='YES'){command=asked.command;goalRun=previousContext!.goalRun===true;}},
     call:async(name,args,s)=>{if(name!=='computer_release'&&!authorized())throw Error('ACCESS_DENIED');let response=await client.callTool({name,arguments:{...args,...(name==='computer_observe'?{app_query:appQuery}:{}),...b.scope}},undefined,{signal:s,timeout:20000});if(name==='computer_observe'&&response.isError){const raw=(response.content as any[])?.find(x=>x.type==='text')?.text;let oldClient=false;try{oldClient=typeof raw==='string'&&JSON.parse(raw).error==='INVALID_REQUEST';}catch{}if(oldClient){if(!authorized())throw Error('ACCESS_DENIED');response=await client.callTool({name,arguments:{...args,...b.scope}},undefined,{signal:s,timeout:20000});}}const text=(response.content as any[])?.find(x=>x.type==='text')?.text;if(typeof text!=='string'||text.length>262144)throw Error('COMPUTER_RESPONSE_INVALID');const body=JSON.parse(text);if(typeof body?.error==='string'&&DEVICE_CODE.test(body.error)){receipt.toolErrors=[...(receipt.toolErrors??[]),{tool:name,code:body.error,operationId:typeof args.operation_id==='string'?args.operation_id:undefined,...(typeof body.phase==='string'&&/^[a-z_]{1,40}$/.test(body.phase)?{nativePhase:body.phase}:{}),...(typeof body.reason==='string'&&DEVICE_CODE.test(body.reason)?{reason:body.reason}:{}),at:Date.now()}].slice(-40);this.write(t,r,receipt);}
@@ -252,8 +255,8 @@ export class ComputerTaskAdapter implements GatewayTaskAdapter {
     const resumed=reply==='YES'&&previousContext!.goalRun===true;
     const outcome=await runVisionComputerUse({goal:reply==='YES'?asked!.command:input.goal,revision:t.revision,maxSteps:'maxSteps' in input&&input.maxSteps?input.maxSteps:COMPUTER_GOAL_MAX_STEPS,...(contextNote?{interactionContext:contextNote}:{}),
      // The Accessibility semantics: the agent's own command is its authorization and control returns after each action;
-     // a goal run or a handed-off command judges each action's impact, and only a goal run keeps going.
-     impact:t.automationController!=='agent',yieldAfterAction:!(sessionStart||resumed),...(reply==='YES'&&asked!.target?{confirmedTarget:asked!.target}:{})},{
+     // a goal run or a handed-off command judges each action's impact and keeps going to its goal.
+     impact:t.automationController!=='agent',yieldAfterAction:!(sessionStart||agentHandoff||resumed),...(reply==='YES'&&asked!.target?{confirmedTarget:asked!.target}:{})},{
      mode:vision.mode,decide:vision.decide(t,authorized),authorized,interruptSignal:interrupt.signal,call:deps.call,evaluate:deps.evaluate,decisionMode:deps.decisionMode,observation:deps.observation,beforeMutation:deps.beforeMutation,progress:deps.progress,
      screenshot:async(state,s)=>{
       if(!authorized())throw Error('ACCESS_DENIED');
@@ -275,7 +278,8 @@ export class ComputerTaskAdapter implements GatewayTaskAdapter {
    // A reached goal ends the device session too: the Mac stops showing it as
    // controlled and the owner's next request asks for access again.
    const accessReleased=result.status==='succeeded'&&result.reason==='GOAL_REACHED'&&!receipt.operationId&&authorized()?await this.endRelaySession(client,b.scope):undefined;
-   const report={...(accessReleased?{accessReleased}:{}),status:result.status,reason:result.reason,steps:result.steps,evaluations:result.evaluations,phase:'terminal',trace:receipt.trace?.slice(-12),...(fieldRequest??result.fieldRequest?{fieldRequest:fieldRequest??result.fieldRequest}:{}),...(result.stepRun?{stepRun:result.stepRun}:{}),...(result.lastAction?{lastAction:result.lastAction}:{})};
+   const withheld=receipt.snapshot?.state?.frontmostProtected===true;
+   const report={...(accessReleased?{accessReleased}:{}),...(withheld?{screenWithheld:true}:{}),status:result.status,reason:result.reason,steps:result.steps,evaluations:result.evaluations,phase:'terminal',trace:receipt.trace?.slice(-12),...(fieldRequest??result.fieldRequest?{fieldRequest:fieldRequest??result.fieldRequest}:{}),...(result.stepRun?{stepRun:result.stepRun}:{}),...(result.lastAction?{lastAction:result.lastAction}:{})};
    let outcome:WorkerOutcome;
    const validation=[...(result.trace?.events??[])].reverse().find(e=>e.validationReason)?.validationReason;
    if(result.status==='succeeded'&&result.reason==='GOAL_REACHED'&&!receipt.operationId&&authorized())outcome={type:'completed',result:{summary:`Computer goal reached: ${computerOutcomeText(report)} Judged from the screen by the decision model, not independently verified. ${accessReleased?'Computer access was released.':'Computer access could not be released; the owner can stop it on the Mac.'}`,artifactIds:[]}};
@@ -287,7 +291,7 @@ export class ComputerTaskAdapter implements GatewayTaskAdapter {
    else if(result.status==='needs_input')outcome={type:'paused'};
    else if(result.status==='needs_verification'){outcome={type:'paused'};}
    else if(result.reason==='STEP_LIMIT')outcome={type:'failed',failure:{code:'COMPUTER_STEP_LIMIT',message:`Computer goal not finished: stopped after ${result.steps} desktop actions, the limit for one goal (${COMPUTER_GOAL_MAX_STEPS}). Each action completed, but the goal is not reached yet and the Mac is still under control. Check the screen and send the next command to continue. Agent: read task_status computer_evidence=recorded for the current screen, then continue with task_update or tell the user what is left.`,observedAt:Date.now()}};
-   else outcome={type:'failed',failure:{code:result.reason.startsWith('COMPUTER_')?result.reason:'COMPUTER_'+result.reason,message:`Computer work stopped: ${result.reason}.${validation?` Validation: ${validation}.`:''}${computerToolErrorNote(receipt)} ${result.steps} desktop actions; goal completion is not confirmed. ${result.reason==='NO_SUPPORTED_ACTION'?'The decision engine found no supported next action in the accessibility observation. This does not indicate an account restriction or provider rejection.':'Only the recorded reason is confirmed; do not infer a permission or account problem.'} Read task_status computer_evidence=recorded, then task_status computer_trace_offset=0 (the trace and every recorded device tool error), before diagnosing. COMPUTER_TEXT_UNGROUNDED means generated text failed validation, not an OS permission denial. Keep ownership of the task; prepare known field values and continue with task_update when authorized. Do not ask the user to perform the requested search or typing themselves. Only actual OS consent, missing personal facts, or unresolved action outcomes require owner input.`,observedAt:Date.now()}};
+   else outcome={type:'failed',failure:{code:result.reason.startsWith('COMPUTER_')?result.reason:'COMPUTER_'+result.reason,message:`Computer work stopped: ${result.reason}.${validation?` Validation: ${validation}.`:''}${computerToolErrorNote(receipt)}${withheld?' '+SCREEN_WITHHELD_NOTE:''} ${result.steps} desktop actions; goal completion is not confirmed. ${result.reason==='NO_SUPPORTED_ACTION'?'The decision engine found no supported next action in the accessibility observation. This does not indicate an account restriction or provider rejection.':'Only the recorded reason is confirmed; do not infer a permission or account problem.'} Read task_status computer_evidence=recorded, then task_status computer_trace_offset=0 (the trace and every recorded device tool error), before diagnosing. COMPUTER_TEXT_UNGROUNDED means generated text failed validation, not an OS permission denial. Keep ownership of the task; prepare known field values and continue with task_update when authorized. Do not ask the user to perform the requested search or typing themselves. Only actual OS consent, missing personal facts, or unresolved action outcomes require owner input.`,observedAt:Date.now()}};
    if(asked&&!answered&&result.reason!=='REVISION_SUPERSEDED'&&!interrupt.signal.aborted){const context=this.read(t,'interaction-context')??previousContext!;this.write(t,'interaction-context',{...context,...(observedRound?{command:command.slice(0,2000),goalRun,lastAction:undefined}:{lastAction:{...previousContext!.lastAction!,confirm:false}})});}
    if(result.lastAction){const context=this.read(t,'interaction-context');if(context)this.write(t,'interaction-context',{...context,lastAction:result.lastAction});}
    outcome.computerReport=report;receipt.ended=true;receipt.outcome=outcome;this.write(t,r,receipt);
@@ -337,7 +341,7 @@ export class ComputerTaskAdapter implements GatewayTaskAdapter {
  async computerEvidence(t:TaskSnapshot,mode:'recorded'|'fresh'|'screenshot',signal=AbortSignal.timeout(15000)){
   if(!this.permitted(t.ownerPrincipalId,t.conversationId)||t.gatewayTarget?.adapter!=='computer')throw Error('ACCESS_DENIED');
   const r=t.gatewayDispatch?.requestId,receipt=r?this.read(t,r):undefined;
-  if(mode==='recorded'||r&&this.runs.has(this.file(t,r)))return {recordedOnly:true,untrustedAppContent:true,snapshot:receipt?.snapshot?{observedAt:receipt.snapshot.observedAt,state:receipt.snapshot.state}:undefined,...(mode==='screenshot'&&receipt?.snapshot?.screenshot?{screenshot:receipt.snapshot.screenshot}:{}),instruction:'Recorded evidence only; not proof of the current screen. If a round is active, inspect its trace rather than competing for its desktop lease.'};
+  if(mode==='recorded'||r&&this.runs.has(this.file(t,r)))return {recordedOnly:true,untrustedAppContent:true,snapshot:receipt?.snapshot?{observedAt:receipt.snapshot.observedAt,state:receipt.snapshot.state}:undefined,...(receipt?.snapshot?.state?.frontmostProtected===true?{screenWithheld:SCREEN_WITHHELD_NOTE}:{}),...(mode==='screenshot'&&receipt?.snapshot?.screenshot?{screenshot:receipt.snapshot.screenshot}:{}),instruction:'Recorded evidence only; not proof of the current screen. If a round is active, inspect its trace rather than competing for its desktop lease.'};
   if(!r||receipt?.operationId&&!receipt.continuationReady)throw Error('COMPUTER_RECONCILIATION_REQUIRED');
   await this.options.connectors.discover({principalId:t.ownerPrincipalId,conversationId:t.conversationId},()=>this.permitted(t.ownerPrincipalId,t.conversationId));
   const b=this.options.connectors.get(t.gatewayTarget.sessionId,t.ownerPrincipalId,t.conversationId),connection=this.options.connectors.connection(b.connectorId);
@@ -347,9 +351,11 @@ export class ComputerTaskAdapter implements GatewayTaskAdapter {
    const acquired=(await call('computer_acquire')).value;if(typeof acquired.lease_token!=='string')throw Error('COMPUTER_RECONCILIATION_REQUIRED');
    const lease_token=acquired.lease_token;
    try{const state=(await call('computer_observe',{lease_token})).value;
-    const image=mode==='screenshot'?this.parseScreenshot((await call('computer_screenshot',{lease_token,generation:state.generation})).text,state.generation):undefined;
-    if(mode==='screenshot'&&!image)throw Error('COMPUTER_SCREENSHOT_UNAVAILABLE');
-    check();const current=this.read(t,r);if(!current||current.operationId||!current.ended||current.revision!==t.revision)throw Error('COMPUTER_EVIDENCE_CHANGED');const evidenceId=randomUUID();current.verification={id:evidenceId,at:Date.now(),revision:t.revision,connectionHash:createHash('sha256').update(JSON.stringify(connection)).digest('hex')};this.write(t,r,current);return {requestId:r,evidenceId,recordedOnly:false,untrustedAppContent:true,snapshot:{observedAt:Date.now(),state},...(image?{screenshot:image}:{})};
+    // A withheld screen (a protected app is frontmost) has no screenshot: its observation says why instead.
+    const withheld=state?.frontmostProtected===true;
+    const image=mode==='screenshot'&&!withheld?this.parseScreenshot((await call('computer_screenshot',{lease_token,generation:state.generation})).text,state.generation):undefined;
+    if(mode==='screenshot'&&!image&&!withheld)throw Error('COMPUTER_SCREENSHOT_UNAVAILABLE');
+    check();const current=this.read(t,r);if(!current||current.operationId||!current.ended||current.revision!==t.revision)throw Error('COMPUTER_EVIDENCE_CHANGED');const evidenceId=randomUUID();current.verification={id:evidenceId,at:Date.now(),revision:t.revision,connectionHash:createHash('sha256').update(JSON.stringify(connection)).digest('hex')};this.write(t,r,current);return {requestId:r,evidenceId,recordedOnly:false,untrustedAppContent:true,snapshot:{observedAt:Date.now(),state},...(withheld?{screenWithheld:SCREEN_WITHHELD_NOTE}:{}),...(image?{screenshot:image}:{})};
    }finally{try{await client.callTool({name:'computer_release',arguments:{...b.scope,lease_token}},undefined,{timeout:2000});}catch{}}
   },signal);
  }

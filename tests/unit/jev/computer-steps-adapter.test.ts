@@ -110,11 +110,14 @@ test('the user\'s next command answers the hand-off confirmation; the spawn roun
   runComputerUse.mockImplementationOnce(async(_input:any,deps:any)=>{deps.observation({generation:'g',application:'com.google.Chrome',controls:[],apps:[],truncated:false});return {status:'needs_input',reason:'COMMAND_WAITING_INPUT',steps:0,evaluations:1,lastAction:{kind:'press',label:'Quit Google Chrome',blocked:true,confirm:true}};});
   const handoff={...task,revision:2,executionControl:{revision:2,agentHandoff:true}};
   await adapter.submit(handoff,'r2','quit chrome');await settle(handoff,'r2');
-  expect(runComputerUse.mock.calls[1][0]).toMatchObject({agentCommand:true});
-  expect(runComputerUse.mock.calls[1][0].sessionStart).toBeUndefined();expect(runComputerUse.mock.calls[1][0].runToGoal).toBeUndefined();
+  // Pod-jinawong r7, task 2f65b7cf: the hand-off ran as one interaction while GetPod was in front, so it could not
+  // open Chrome first. It runs as a short goal now, impact-gated as before (agentCommand), and asks no read request.
+  expect(runComputerUse.mock.calls[1][0]).toMatchObject({agentCommand:true,runToGoal:true,maxSteps:COMPUTER_GOAL_MAX_STEPS,readRequest:false,yieldAfterInteraction:true});
+  expect(runComputerUse.mock.calls[1][0].sessionStart).toBeUndefined();
   const reply={...task,revision:3,executionControl:{revision:3}};
   await adapter.submit(reply,'r3','ใช่');await settle(reply,'r3');
-  expect(runComputerUse.mock.calls[2][0]).toMatchObject({goal:'ใช่',confirmation:{command:'quit chrome',label:'Quit Google Chrome'}});expect(runComputerUse.mock.calls[2][0].runToGoal).toBeUndefined();
+  // The yes resumes the hand-off goal with a fresh budget (computer-use.ts resumeGoal), like a spawned goal's.
+  expect(runComputerUse.mock.calls[2][0]).toMatchObject({goal:'ใช่',confirmation:{command:'quit chrome',label:'Quit Google Chrome'},resumeGoal:COMPUTER_GOAL_MAX_STEPS});expect(runComputerUse.mock.calls[2][0].runToGoal).toBeUndefined();
   // Asked once: the round after the answer carries no question.
   const next={...task,revision:4,executionControl:{revision:4}};
   await adapter.submit(next,'r4','scroll down');await settle(next,'r4');

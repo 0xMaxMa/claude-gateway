@@ -68,7 +68,23 @@ export function stepRunText(run:import('./command-steps').CommandStepRun,hintFor
 }
 /** The card line once the assistant confirmed a parked run's goal from fresh evidence (verify_computer/verify_browser). */
 export const ANSWERED_FROM_SCREEN='Done · The assistant answered from the screen.';
+/** Whether a settled round did what it was asked: its own outcome line says Done (or Ready, or a read
+ * the assistant answers), or every step of its step list ran. */
+export function computerRoundDone(report:ComputerTaskReport):boolean{
+ if(report.stepRun)return report.stepRun.stopReason==='ALL_STEPS_DONE';
+ const text=computerOutcomeText(report);
+ return ['Done','Ready:','Read request:'].some(prefix=>text.startsWith(prefix));
+}
+/** Said when a round that did not finish last saw a withheld screen (report.screenWithheld). */
+const WITHHELD_HINT='The screen was hidden because a protected app such as GetPod was in front.';
 export function computerOutcomeText(report:ComputerTaskReport,context:{handedOff?:boolean}={}):string{
+ const text=outcomeText(report,context);
+ if(!report.screenWithheld||text.startsWith('Done')||report.stepRun?.stopReason==='ALL_STEPS_DONE')return text;
+ // A step run's raw codes stay on its last "Details:" line.
+ const details=text.lastIndexOf('\nDetails:');
+ return details<0?`${text} ${WITHHELD_HINT}`:`${text.slice(0,details)} ${WITHHELD_HINT}${text.slice(details)}`;
+}
+function outcomeText(report:ComputerTaskReport,context:{handedOff?:boolean}):string{
  const run=report.stepRun;
  if(run)return stepRunText(run,detail=>HINTS[detail]?hint(detail,report):undefined,{...context,surface:'computer',...(report.lastAction?{lastAction:report.lastAction}:{})});
  const trace=report.trace??[];

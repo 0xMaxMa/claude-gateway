@@ -33,8 +33,10 @@ export function observedEffect(before: ComputerState, after: ComputerState, acti
     JSON.stringify([after.application,after.windowTitle,after.focusedControl,
     after.controls.map(c=>[c.role,c.value,c.focused]),after.text]);
 }
+/** Why a withheld observation (frontmostProtected) shows nothing, for the decision model and the agent. */
+export const SCREEN_WITHHELD_NOTE='The screen is withheld because a protected app (such as GetPod, where the user typed the command) is frontmost. This is not a missing approval or permission for the target app. Open or switch to the app or browser the command needs (from apps); its screen is observed after that.';
 export function decisionState(state:ComputerState) {
-  return {...state, controls:state.controls.filter(c=>!c.sensitive)};
+  return {...state, controls:state.controls.filter(c=>!c.sensitive), ...(state.frontmostProtected?{screenWithheld:SCREEN_WITHHELD_NOTE}:{})};
 }
 
 /**

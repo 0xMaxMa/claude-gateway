@@ -86,7 +86,9 @@ test('a yes to the goal\'s high-impact step resumes the goal, and the context ke
  }finally{await f.close();}
 });
 
-test('a yes to the agent\'s single hand-off command does not become a goal',async()=>{
+// Pod-jinawong r7, task 2f65b7cf: the hand-off command runs as a short goal (it may have to open the app first),
+// so a yes to its high-impact step resumes that goal with a fresh budget, like the agent's spawned goal.
+test('a yes to the agent\'s hand-off command resumes it as a goal',async()=>{
  const f=fixture();try{
   runComputerUse.mockImplementationOnce(async()=>({status:'needs_input',reason:'COMMAND_WAITING_INPUT',steps:0,evaluations:1}));
   await f.run(f.task,'r1','open a session');
@@ -96,8 +98,9 @@ test('a yes to the agent\'s single hand-off command does not become a goal',asyn
   runComputerUse.mockImplementationOnce(async()=>({status:'needs_input',reason:'COMMAND_WAITING_INPUT',steps:1,evaluations:2}));
   const reply={...f.task,revision:3,executionControl:{revision:3}};
   await f.run(reply,'r3','ใช่');
+  expect(runComputerUse.mock.calls[1][0]).toMatchObject({agentCommand:true,runToGoal:true,maxSteps:COMPUTER_GOAL_MAX_STEPS});
   expect(runComputerUse.mock.calls[2][0].confirmation).toEqual({command:'quit chrome',label:'Quit Google Chrome'});
-  expect(runComputerUse.mock.calls[2][0].resumeGoal).toBeUndefined();
+  expect(runComputerUse.mock.calls[2][0].resumeGoal).toBe(COMPUTER_GOAL_MAX_STEPS);
  }finally{await f.close();}
 });
 

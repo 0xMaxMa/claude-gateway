@@ -77,7 +77,7 @@ export function buildComputerCommand(state:ComputerState,command:string,targets:
   question.instructions={command,question:question.instructions as string};
  }
  const safe=decisionState(state);
- const desktop=JSON.parse(JSON.stringify({application:safe.application,windowTitle:safe.windowTitle,focusedControl:safe.focusedControl,text:safe.text,elements:safe.controls.map(c=>JSON.stringify({ref:c.ref,role:c.role,label:c.label,context:c.context,value:c.value,focused:c.focused,actions:c.actions,bounds:c.bounds})),apps:safe.apps,scrollAreas:safe.scrollAreas,supportedActions:safe.supportedActions,truncated:safe.truncated}));
+ const desktop=JSON.parse(JSON.stringify({application:safe.application,frontmostProtected:safe.frontmostProtected,screenWithheld:safe.screenWithheld,windowTitle:safe.windowTitle,focusedControl:safe.focusedControl,text:safe.text,elements:safe.controls.map(c=>JSON.stringify({ref:c.ref,role:c.role,label:c.label,context:c.context,value:c.value,focused:c.focused,actions:c.actions,bounds:c.bounds})),apps:safe.apps,scrollAreas:safe.scrollAreas,supportedActions:safe.supportedActions,truncated:safe.truncated}));
  return {request:{state:{command,desktop,...(context?{previousInteraction:context}:{})},questions},targets,literals};
 }
 export function readComputerCommand(command:ReturnType<typeof buildComputerCommand>,answers:Record<string,unknown>){
