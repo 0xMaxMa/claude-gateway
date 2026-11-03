@@ -45,6 +45,40 @@ test('the runtime answers only a member of the run\'s conversation', () => {
   expect(runtime.computerActivity('2b1c0d9e-8f7a-4b6c-9d5e-1f2a3b4c5d6e', 'member')).toBeUndefined();
 });
 
+// Pod-jinawong r8: a settled round of the agent's own goal run read "waiting for the user" while the woken
+// agent was still deciding its next command. The runtime says who the round waits for, from its own state.
+test('a settled round waits for the agent while its turn runs or is due, then for the user', () => {
+  const live = new ComputerLiveRuns(() => 7);live.start(GRANT, 'task-1', 'r1');
+  // The agent's own goal run, parked without a question (agentGoalRunParked).
+  const parked = { taskId: 'task-1', conversationId: 'conv-1', agentSessionId: 'sess-1', state: 'waiting_input', stateVersion: 4, revision: 1, automationController: 'user',
+    gatewayTarget: { adapter: 'computer', sessionId: 's', name: 'Computer Use · Mac' }, automationSession: { status: 'idle', idleTimeoutMs: 1_800_000, idleSince: Date.now() },
+    computerReport: { status: 'needs_input', reason: 'COMMAND_WAITING_INPUT', steps: 1 } };
+  let task: Record<string, unknown> = parked, notice = true, queued = false;
+  const store = { task: jest.fn(() => task), assertMember: jest.fn(),
+    get: jest.fn((sql: string, ...args: unknown[]) => sql.includes('FROM notifications') ? (notice && args[0] === 'task-1' && args[1] === 4 ? { 1: 1 } : undefined) : sql.includes('FROM conversation_inputs') ? (queued ? { 1: 1 } : undefined) : undefined) };
+  const active = new Map<string, unknown>();
+  const runtime = Object.assign(Object.create(AgentOrchestrationRuntime.prototype), { store, computerAdapter: { live }, active }) as AgentOrchestrationRuntime;
+  const view = () => runtime.computerActivity(GRANT, 'member');
+  // The wake for this round is due: the agent decides the next round.
+  expect(view()).toMatchObject({ phase: 'thinking', label: 'Deciding the next step', sessionId: 'sess-1' });
+  // Its turn runs (the notice is assigned, then handled).
+  notice = false; active.set('sess-1', {});
+  expect(view()).toMatchObject({ phase: 'thinking' });
+  // The turn ended without a next command: the user's turn.
+  active.clear();
+  expect(view()).toMatchObject({ phase: 'waiting_for_user', reason: 'next_command', label: 'Your turn: reply in GetPod' });
+  // A queued input (the user's own message, a question review) is agent work again.
+  queued = true;
+  expect(view()).toMatchObject({ phase: 'thinking' });
+  queued = false;
+  // A notice that cannot wake the agent (a round of the user's own command, revision 2) does not count.
+  task = { ...parked, revision: 2 }; notice = true;
+  expect(view()).toMatchObject({ phase: 'waiting_for_user', reason: 'next_command' });
+  // A question is a real wait even while the agent runs.
+  task = { ...parked, pendingQuestion: { questionId: 'q', text: 'Which song?', revision: 1 } }; active.set('sess-1', {});
+  expect(view()).toMatchObject({ phase: 'waiting_for_user', reason: 'question' });
+});
+
 test('the runner answers from a started orchestration only, never starting one to answer', () => {
   const runner = Object.create(AgentRunner.prototype) as any;
   runner.getOrchestration = jest.fn();

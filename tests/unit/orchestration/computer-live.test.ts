@@ -1,5 +1,5 @@
 import {mkdtempSync,rmSync} from 'fs';import {tmpdir} from 'os';import {join} from 'path';
-import {ComputerLiveRuns,computerActionLabel,computerLiveView} from '../../../src/orchestration/computer-live';
+import {ComputerLiveRuns,automationWait,computerActionLabel,computerLiveView} from '../../../src/orchestration/computer-live';
 import {ComputerTaskAdapter} from '../../../src/orchestration/gateway-tasks/computer';
 import {withComputerConnection} from '../../../src/jev/computer-connector';
 jest.mock('../../../src/jev/computer-connector',()=>({withComputerConnection:jest.fn()}));
@@ -57,10 +57,37 @@ describe('computer live runs (the device overlay label)',()=>{
   const view=(task:Record<string,unknown>)=>computerLiveView(run,{taskId:'t',state:'running',...task} as any);
   expect(view({})).toEqual({taskId:'t',phase:'acting',label:'Opening Spotify',step:2,updatedAt:9});
   for(const state of ['completed','failed','cancelled'])expect(view({state}).phase).toBe('ended');
-  expect(view({state:'waiting_input',automationController:'agent'}).phase).toBe('thinking');
-  expect(view({state:'waiting_input',automationController:'user'}).phase).toBe('waiting_for_user');
-  expect(view({state:'waiting_input',automationController:'agent',pendingQuestion:{questionId:'q',text:'Which song?',revision:1}}).phase).toBe('waiting_for_user');
-  expect(view({state:'needs_reconciliation'}).phase).toBe('waiting_for_user');
+  // Nobody is deciding about a settled round any more: it is the user's turn, whoever controls it.
+  expect(view({state:'waiting_input',automationController:'agent'})).toMatchObject({phase:'waiting_for_user',reason:'next_command',label:'Your turn: reply in GetPod'});
+  expect(view({state:'waiting_input',automationController:'user'})).toMatchObject({phase:'waiting_for_user',reason:'next_command'});
+  expect(view({state:'waiting_input',automationController:'agent',pendingQuestion:{questionId:'q',text:'Which song?',revision:1}})).toMatchObject({phase:'waiting_for_user',reason:'question',label:'Answer the question in GetPod'});
+  expect(view({state:'needs_reconciliation'})).toMatchObject({phase:'waiting_for_user',reason:'check'});
+ });
+
+ // Pod-jinawong r8: between the rounds of every agent goal run (b0ba459d, 16542265 and three more) the overlay said
+ // "Finished this round · Waiting for you" for the 6-35 s the woken agent took to send the next command.
+ test('between rounds the agent is deciding: thinking, never waiting for the user',()=>{
+  const run={taskId:'t',requestId:'r',updatedAt:9,phase:'acting' as const,label:'Finished this round',step:2};
+  const view=(task:Record<string,unknown>,deciding:boolean)=>computerLiveView(run,{taskId:'t',agentSessionId:'s1',state:'waiting_input',automationController:'user',...task} as any,Date.now(),deciding);
+  expect(view({},true)).toEqual({taskId:'t',sessionId:'s1',phase:'thinking',label:'Deciding the next step',step:2,updatedAt:9});
+  expect(view({state:'needs_reconciliation'},true)).toMatchObject({phase:'thinking'});
+  // A step list keeps the user's own step while the agent decides.
+  expect(computerLiveView({...run,label:'open Spotify in Chrome',total:3},{taskId:'t',state:'waiting_input',automationController:'user'} as any,Date.now(),true)).toMatchObject({phase:'thinking',label:'open Spotify in Chrome',step:2,total:3});
+  // The agent ended its turn without a next command: now it is the user's turn.
+  expect(view({},false)).toMatchObject({phase:'waiting_for_user',reason:'next_command',sessionId:'s1'});
+  // A real wait stays one while the agent is busy (for example asking the question in chat).
+  expect(view({pendingQuestion:{questionId:'q',text:'Which song?',revision:1}},true)).toMatchObject({phase:'waiting_for_user',reason:'question'});
+  expect(view({computerReport:{status:'needs_input',reason:'FIELD_TEXT_REQUIRED',steps:0,fieldRequest:{label:'Search',reason:'missing'}}},true)).toMatchObject({phase:'waiting_for_user',reason:'question'});
+  expect(view({computerReport:{status:'needs_input',reason:'COMMAND_WAITING_INPUT',steps:1,lastAction:{kind:'press',label:'Delete',confirm:true}}},true)).toMatchObject({phase:'waiting_for_user',reason:'confirmation',label:'Confirm the next step in GetPod'});
+  expect(view({executionControl:{phase:'paused'}},true)).toMatchObject({phase:'waiting_for_user',reason:'paused'});
+  // The access prompt while the round runs.
+  expect(computerLiveView({...run,phase:'waiting_for_user',label:'Approve access in the GetPod app'},{taskId:'t',state:'running'} as any)).toMatchObject({phase:'waiting_for_user',reason:'access'});
+ });
+
+ test('automationWait: nothing for a running or finished task',()=>{
+  for(const state of ['running','queued','completed','failed','cancelled'])expect(automationWait({state} as any,false)).toBeUndefined();
+  expect(automationWait({state:'waiting_input'} as any,true)).toEqual({for:'agent'});
+  expect(automationWait({state:'waiting_input'} as any,false)).toEqual({for:'user',reason:'next_command'});
  });
 
  // Pod-jinawong, task 2f65b7cf: the session expired at 30 min but the task stayed waiting_input, so the overlay waited for the user forever.

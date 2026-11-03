@@ -7,7 +7,7 @@ import {agentHandoffRequested,directCommandSpeech,handoffNotDone,readRequested} 
 import {computerOutcomeText} from '../automation/computer-outcome';
 import {browserOutcomeText} from '../automation/browser-outcome';
 import {ComputerTaskAdapter,COMPUTER_GOAL_MAX_STEPS} from './gateway-tasks/computer';
-import {computerLiveView} from './computer-live';
+import {automationWait,computerLiveView} from './computer-live';
 import {ComputerConnectors} from '../jev/computer-connector';
 import { AutomaticBrowserBindings } from '../jev/automatic-browser-bindings';
 import { BrowserConnectorRegistry, resolveBrowserConnection } from '../jev/browser-connector';
@@ -94,7 +94,7 @@ import { WorkerDriver, WorkerScheduler } from './tasks/scheduler';
 import { OrchestrationHistoryWriter } from './history';
 import { ProcessTurn, startProcessTurn } from './process-turn';
 import { OrchestrationError, ExecutionCapabilities, ConversationScope, TERMINAL_TASK_STATES, type TaskSnapshot, type WorkerOutcome } from './types';
-import { acceptsDirectCommand, agentGoalRunParkedSql, parkedGoalRunNote, computerAccess, computerDevice } from './tasks/automation-session';
+import { acceptsDirectCommand, agentGoalRun, agentGoalRunParked, agentGoalRunParkedSql, parkedGoalRunNote, computerAccess, computerDevice } from './tasks/automation-session';
 import { recoverOrchestration } from './recovery';
 import { INTERRUPTED_WORK_REPORT_RULE } from './restart-resume';
 import { workPending } from './report-promise';
@@ -468,7 +468,16 @@ export class AgentOrchestrationRuntime {
     const task = run && this.store.task(run.taskId);
     if (!run || !task) return undefined;
     try { this.store.assertMember(task.conversationId, principalId); } catch { return undefined; }
-    return computerLiveView(run, task);
+    return computerLiveView(run, task, Date.now(), ['waiting_input','needs_reconciliation'].includes(task.state) && this.agentDeciding(task));
+  }
+  /** Whether the agent is deciding about this settled automation round: its chat has an agent turn running
+   *  or queued, or a notice of this round is due to wake it (its own parked goal run, a run it controls, an
+   *  unknown outcome of its goal run). Once that turn ends without a next command, the round waits for the user. */
+  private agentDeciding(task: Omit<TaskSnapshot,'skill'>): boolean {
+    if (this.isBusy(task.agentSessionId)) return true;
+    if (this.store.get("SELECT 1 FROM conversation_inputs WHERE conversation_id=? AND status IN ('accepted','assigned') LIMIT 1", task.conversationId)) return true;
+    const wakes = task.automationController !== 'user' || agentGoalRunParked(task) || (task.state === 'needs_reconciliation' && agentGoalRun(task));
+    return wakes && Boolean(this.store.get("SELECT 1 FROM notifications WHERE task_id=? AND task_state_version=? AND status IN ('pending','assigned') LIMIT 1", task.taskId, task.stateVersion));
   }
   activity(sessionId: string, principalId: string, after = 0) {
     const conversation = this.store.get('SELECT * FROM conversations WHERE agent_session_id=?', sessionId);
@@ -477,7 +486,9 @@ export class AgentOrchestrationRuntime {
     const id = String(conversation.id);
     if (!Number.isSafeInteger(after) || after < 0 || after > Number(conversation.last_event_seq)) throw new OrchestrationError('INVALID_CURSOR');
     const tasks = this.tasks.status(id, principalId).map(t => {
-      return { computerConnection:t.computerConnection, computerAccess:computerAccess(t), computerDevice:computerDevice(t), automationController:t.automationController??"agent", automationSession:t.automationSession, revision:t.revision, adapter:t.gatewayTarget?.adapter, computerRecovery:t.gatewayTarget?.adapter==='computer'&&t.state==='needs_reconciliation'?{phase:'checking',message:'Checking the last action and reading the current screen automatically. The previous action will not be repeated.'}:undefined, executionControl:t.executionControl, taskId: t.taskId, title: t.title, state: t.state, stateVersion: t.stateVersion, providerWaiting: t.providerWaiting, progress: t.latestProgress, execution: t.execution, result: t.result?.summary, updatedAt: Math.max(t.updatedAt, t.execution?.lastActivityAt ?? 0) };
+      // A settled browser or computer round: is the agent still deciding (between rounds) or is it the user's turn?
+      const wait = ['browser','computer'].includes(t.gatewayTarget?.adapter ?? '') ? automationWait(t, this.agentDeciding(t)) : undefined;
+      return { ...(wait ? { waitingFor: wait.for, ...(wait.for === 'user' ? { waitReason: wait.reason } : {}) } : {}), computerConnection:t.computerConnection, computerAccess:computerAccess(t), computerDevice:computerDevice(t), automationController:t.automationController??"agent", automationSession:t.automationSession, revision:t.revision, adapter:t.gatewayTarget?.adapter, computerRecovery:t.gatewayTarget?.adapter==='computer'&&t.state==='needs_reconciliation'?{phase:'checking',message:'Checking the last action and reading the current screen automatically. The previous action will not be repeated.'}:undefined, executionControl:t.executionControl, taskId: t.taskId, title: t.title, state: t.state, stateVersion: t.stateVersion, providerWaiting: t.providerWaiting, progress: t.latestProgress, execution: t.execution, result: t.result?.summary, updatedAt: Math.max(t.updatedAt, t.execution?.lastActivityAt ?? 0) };
     });
     const responses = this.store.all('SELECT id,request_id,state,generated_text,COALESCE(completed_at,created_at) AS message_at FROM assistant_responses WHERE conversation_id=? ORDER BY message_at DESC,rowid DESC LIMIT 100', id).reverse().map(r => ({
       id: r.id, requestId: r.request_id, state: r.state, text: r.generated_text, createdAt: r.message_at,

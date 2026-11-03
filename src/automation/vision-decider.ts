@@ -281,7 +281,13 @@ const VisionInput = z.object({ goal: z.string().min(1).max(16000), revision: z.n
   /** As runComputerUse's yieldAfterAction: one completed action, then control returns to the agent. */
   yieldAfterAction: z.boolean().default(false),
   /** The target the user said yes to: the resumed run's first action may be only that one. */
-  confirmedTarget: z.string().regex(/^[0-9a-f]{32}$/).optional() });
+  confirmedTarget: z.string().regex(/^[0-9a-f]{32}$/).optional(),
+  /** Typed text must appear verbatim in `goal` (the instruction and the user's answers), never come from the screen:
+   *  the Accessibility rule (goalTextCandidates) for a round that continues here from Accessibility. */
+  literalText: z.boolean().default(false),
+  /** Raw input only into the window it observed of an approved, unprotected application: an action on a withheld
+   *  screen or an unapproved front application is refused before dispatch (APPLICATION_NOT_APPROVED). */
+  approvedOnly: z.boolean().default(false) });
 const Receipt = z.object({ state: z.enum(['completed', 'not_executed', 'unknown']), error: z.string().optional() });
 /** The Accessibility control under a screenshot point (the smallest box wins), in the window-relative normalized bounds. */
 export function controlAt(state: ComputerState, shot: VisionScreenshot, x: number, y: number) {
@@ -440,7 +446,10 @@ export async function runVisionComputerUse(raw: unknown, deps: VisionDependencie
       } else if (use.toolset_name === undefined) {
         answer(use, 'ACTION_NOT_SUPPORTED', true);
       } else {
-        const mapped = mapComputerCall(use.name, use.input, caps!, seen.shot, seen.state.apps);
+        const decoded = mapComputerCall(use.name, use.input, caps!, seen.shot, seen.state.apps);
+        const unapproved = input.approvedOnly && 'action' in decoded && decoded.action.kind !== 'open' && (seen.state.frontmostProtected === true || seen.state.application === 'unapproved');
+        const mapped: MappedCall = unapproved ? { error: 'APPLICATION_NOT_APPROVED' }
+          : input.literalText && 'action' in decoded && decoded.action.kind === 'type_focused' && !input.goal.includes(decoded.action.text) ? { error: 'TEXT_NOT_IN_GOAL' } : decoded;
         if ('screenshot' in mapped) {
           const failed = await fresh(use, 'Current window.', false);
           if (failed) return result('blocked', failed);

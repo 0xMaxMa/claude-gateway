@@ -154,11 +154,11 @@ describe('config', () => {
 });
 
 /** A fake Mac: each observe returns a new generation; actions return queued receipts. */
-function device(options: { caps?: unknown; receipts?: Array<Record<string, unknown> | Error>; shotError?: string; controls?: unknown[]; text?: string[]; impact?: (command: string) => 'ROUTINE' | 'HIGH_IMPACT'; status?: (args: any) => unknown } = {}) {
+function device(options: { caps?: unknown; receipts?: Array<Record<string, unknown> | Error>; shotError?: string; controls?: unknown[]; text?: string[]; impact?: (command: string) => 'ROUTINE' | 'HIGH_IMPACT'; status?: (args: any) => unknown; at?: (generation: number) => Record<string, unknown> } = {}) {
   let generation = 0;
   const calls: Array<{ name: string; args: any }> = [], receipts = [...(options.receipts ?? [])], judged: any[] = [];
   const state = (g: number) => ({ generation: 'g' + g, application: 'com.google.Chrome', windowTitle: 'YouTube', controls: options.controls ?? [{ ref: 'r1', role: 'AXTextField', label: 'Search', bounds: { x: 0.25, y: 0.1, width: 0.5, height: 0.05 }, actions: ['type'] }], apps: [], truncated: false, screenshotAvailable: true,
-    ...(options.text ? { text: options.text } : {}), ...(options.caps === null ? {} : { capabilities: options.caps ?? CAPS_RAW }) });
+    ...(options.text ? { text: options.text } : {}), ...(options.caps === null ? {} : { capabilities: options.caps ?? CAPS_RAW }), ...(options.at?.(g) ?? {}) });
   // The impact judge (Jev or the model backend): routine unless the test says otherwise.
   const evaluate: VisionDependencies['evaluate'] = async request => {
     judged.push(request);
@@ -449,5 +449,38 @@ describe('raw input refused before dispatch', () => {
     expect(first.actions()).toHaveLength(1);
     const later = device({ receipts: [{ state: 'completed' }, Error('RAW_INPUT_DISABLED')], status: () => ({ state: 'not_found' }) });
     expect(await runVisionComputerUse({ goal: 'x' }, later.deps(model([1, 2].map(() => ({ name: 'left_click', input: { coordinate: [1, 1] } }))).decide), signal())).toMatchObject({ status: 'blocked', reason: 'RAW_INPUT_DISABLED', steps: 1 });
+  });
+});
+
+// The Accessibility fallback (gateway-tasks/computer.ts): a goal round that found no control continues here, and
+// still types only text its instruction holds, never text the screen shows (goalTextCandidates' rule).
+describe('literal text for an Accessibility fallback', () => {
+  test('screen-sourced text is refused, the instruction text is typed', async () => {
+    const d = device({ text: ['Recent searches: Paradise'] }), m = model([
+      { name: 'left_click', input: { coordinate: [640, 40] } }, { name: 'type', input: { text: 'Paradise' } }, { name: 'type', input: { text: 'bodyslam' } },
+      { name: 'key', input: { text: 'Return' } }, finish('done'),
+    ]);
+    const result = await runVisionComputerUse({ goal: 'play bodyslam on Spotify', maxSteps: 7, literalText: true }, d.deps(m.decide), signal()) as any;
+    expect(result).toMatchObject({ status: 'succeeded', reason: 'GOAL_REACHED', steps: 3 });
+    expect(d.actions().map(({ operation_id, lease_token, generation, ...a }) => a)).toEqual([
+      { kind: 'pointer', op: 'click', x: 640, y: 40 }, { kind: 'type_focused', text: 'bodyslam' }, { kind: 'key_chord', keys: ['enter'] },
+    ]);
+    expect(lastUser(m.seen[2]).content[0]).toMatchObject({ is_error: true, content: expect.stringContaining('TEXT_NOT_IN_GOAL') });
+  });
+  // A click that brought a protected app to the front (the helper withholds it: application "unapproved").
+  test('approvedOnly: no raw input into a withheld or unapproved front window', async () => {
+    for (const front of [{ application: 'unapproved' }, { application: 'ai.getpod.app', frontmostProtected: true }]) {
+      const d = device({ at: g => (g >= 2 ? front : {}) }), m = model([
+        { name: 'left_click', input: { coordinate: [640, 40] } }, { name: 'type', input: { text: 'bodyslam' } }, { name: 'type', input: { text: 'bodyslam' } }, { name: 'type', input: { text: 'bodyslam' } },
+      ]);
+      const result = await runVisionComputerUse({ goal: 'play bodyslam on Spotify', literalText: true, approvedOnly: true }, d.deps(m.decide), signal()) as any;
+      expect(d.actions()).toHaveLength(1);
+      expect(result).toMatchObject({ status: 'blocked', reason: 'VISION_APPLICATION_NOT_APPROVED', steps: 1 });
+    }
+  });
+  test('without literalText a primary vision run keeps its behavior', async () => {
+    const d = device(), m = model([{ name: 'type', input: { text: 'Paradise' } }, finish('done')]);
+    await runVisionComputerUse({ goal: 'play something on Spotify' }, d.deps(m.decide), signal());
+    expect(d.actions().map(a => a.text)).toEqual(['Paradise']);
   });
 });

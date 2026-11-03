@@ -22,6 +22,9 @@ const HINTS:Record<string,string>={
  CONFIRMATION_DECLINED:'the user said no, so it was not pressed.',
  COMPLETION_NOT_ESTABLISHED:'the result could not be confirmed from the screen.',
  SEQUENCE_TARGET_MISSING:'the next button was not found exactly once on the screen.',
+ RAW_INPUT_REQUIRED:'this app shows no controls Computer Use can read, so it has to work from the screen with the mouse and keyboard. Turn on "Allow mouse and keyboard control" in GetPod\'s Computer Use settings, then send the command again.',
+ RAW_INPUT_UNAVAILABLE:'this app shows no controls Computer Use can read, and mouse and keyboard control is not available on this computer yet.',
+ SCREEN_CAPTURE_REQUIRED:'this app shows no controls Computer Use can read, and its window could not be captured to work from the screen. Check the Screen Recording permission for GetPod, then send the command again.',
 };
 /** A round whose last dispatched action has no receipt; it may have run. */
 export const UNKNOWN_PREFIX='Unknown:';
@@ -103,7 +106,11 @@ function outcomeText(report:ComputerTaskReport,context:{handedOff?:boolean}):str
  if(waiting==='STEP_LIMIT'&&report.steps>0)return `Not finished: stopped after ${actions}, the limit for one goal. Check the screen and send the next command.`;
  if(waiting==='COMPLETION_UNCERTAIN'&&report.steps>0)return `Not confirmed: ${actions} done, and the goal may already be complete, but the screen was not clear enough to say. Check the screen, then send the next command.`;
  if(waiting==='LOW_CONFIDENCE'&&report.steps>0)return `Not finished: ${actions} done, then the next step was unclear from the screen. Say what to do next.`;
- if(report.steps>1&&waiting&&HINTS[waiting])return `Not finished: ${actions} done, then ${hint(waiting,report)}`;
+ // One action, then a stop after it, is not done either. Pod-jinawong r8, task b0ba459d: a goal run
+ // opened Spotify, found no control for the search, and the card said "Done: opened com.spotify.client".
+ const acted=trace.map(e=>e.phase).lastIndexOf('acted');
+ const stoppedAfterAction=acted>=0&&trace.slice(acted+1).some(e=>e.phase==='waiting'&&e.reason===waiting);
+ if((report.steps>1||stoppedAfterAction)&&waiting&&HINTS[waiting])return `Not finished: ${actions} done, then ${hint(waiting,report)}`;
  if(report.lastAction&&!report.lastAction.blocked&&report.steps>0)return `Done: ${computerActionText(report.lastAction)}. Send the next command.`;
  if(report.steps>0)return 'Done: the action was sent. Send the next command.';
  if(waiting&&HINTS[waiting])return `Not done: ${hint(waiting,report)}`;

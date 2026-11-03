@@ -65,7 +65,7 @@ export function buildComputerCommand(state:ComputerState,command:string,targets:
  // The agent's command for a handed-off utterance: Jev judges, by meaning in
  // any language, whether doing it is high-impact, so the user confirms first.
  if(impact)questions.impact={type:'choice',instructions:IMPACT_QUESTION,criteria:IMPACT_CRITERIA};
- const literals=commandTextCandidates(command,Boolean(focusedTextField(state)));
+ const literals=(goal?goalTextCandidates:commandTextCandidates)(command,Boolean(focusedTextField(state)));
  if(kinds.type){
   if(literals.length)questions.text={type:'choice',instructions:'Which candidate is the exact text or URL to enter for `command`? Select only its payload, excluding instructions or explanations. NONE means no supplied candidate fits.',criteria:Object.fromEntries([['NONE','No candidate is the required payload'],...literals.map((text,i)=>['TEXT:'+i,JSON.stringify({text})])])};
 
@@ -113,6 +113,28 @@ export function commandTextCandidates(command:string,whole=false):string[] {
 // silently discard their ending. This path only offers short direct commands.
  if(starts.length<2||starts.length>8||command.length>500)return [...new Set([...(payload?[payload]:[]),...own])];
  return [...new Set([...(payload?[payload]:[]),...own,...starts.slice(1).map(start=>command.slice(start).trimEnd())])];
+}
+/** A goal run's text is the agent's own sentence: its payload may sit mid-sentence, unquoted, and a
+ * quoted span may name the field rather than the text ("type bodyslam in the "Search" field").
+ * Besides the direct-command candidates it offers every run of up to GOAL_SPAN_WORDS words outside
+ * quoted and code spans, verbatim and by position alone (no word lists); the text head picks one or NONE.
+ * Pod-jinawong r8, task 16542265: "play bodyslam on Spotify in Chrome" reached the focused search field
+ * with no "bodyslam" candidate (BLOCKED), and the hand-off quoting the field label asked the user for it. */
+const GOAL_SPAN_WORDS=6,GOAL_WORDS_MAX=16;
+export function goalTextCandidates(command:string,whole=false):string[] {
+ const values=commandTextCandidates(command,whole);
+ const segments=command.split(/```[\s\S]*?```|`[^`\n]+`|"[^"\n]+"|“[^”\n]+”/g);
+ const words=segments.map(segment=>[...segment.matchAll(/\S+/gu)]);
+ // A long text needs the agent to quote its payload: never a quadratic prompt or a cut-off ending.
+ if(words.flat().length>GOAL_WORDS_MAX||command.length>1000)return values;
+ segments.forEach((segment,s)=>{
+  const tokens=words[s];
+  for(let i=0;i<tokens.length;i++)for(let j=i;j<Math.min(tokens.length,i+GOAL_SPAN_WORDS);j++){
+   const span=segment.slice(tokens[i].index!,tokens[j].index!+tokens[j][0].length);
+   if(!values.includes(span))values.push(span);
+  }
+ });
+ return values;
 }
 
 // Explicit standard-command vocabulary, not substring intent guessing. Compound,

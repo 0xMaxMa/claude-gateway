@@ -1,5 +1,5 @@
 import {computerContinuationContext} from './computer-context';
-import {computerOutcomeText} from '../../automation/computer-outcome';
+import {computerActionText,computerOutcomeText} from '../../automation/computer-outcome';
 import {thinkingProvider,thinkingFailure} from '../../jev/thinking-provider';
 import {thinkComputerField} from '../../../lib/automation/computer-thinking.cjs';
 import {createHash,randomUUID} from 'crypto';
@@ -7,7 +7,7 @@ import {mkdirSync,readFileSync,openSync,writeFileSync,fsyncSync,closeSync,rename
 import {join} from 'path';
 import type {ComputerProgress,ComputerUseDependencies,ComputerUseResult} from '../../automation/computer-use';
 import {parseComputerSteps,runComputerSteps} from '../../automation/computer-steps';
-import {runVisionComputerUse,COMPUTER_VISION_RUN_TIMEOUT_MS,type VisionDecide} from '../../automation/vision-decider';
+import {runVisionComputerUse,COMPUTER_VISION_RUN_TIMEOUT_MS,RAW_UNAVAILABLE,type VisionDecide} from '../../automation/vision-decider';
 import {ComputerConnectors,withComputerConnection} from '../../jev/computer-connector';
 import type {CommandContext,TaskSnapshot,TaskAttempt,TaskRevision,WorkerOutcome,GatewayTaskTarget} from '../types';
 import {GatewayRequestNotSentError,type GatewayTaskAdapter} from './controller';
@@ -25,6 +25,10 @@ interface Receipt {command?:string;revision:number;taskId:string;requestId:strin
  goalRun?:boolean}
 /** Device error codes in tool replies and stop reasons; digits allowed, nothing else. */
 const DEVICE_CODE=/^[A-Z][A-Z0-9_]{0,79}$/;
+/** A vision fallback that could not start for lack of raw input: the app's switch is off, an older helper, or no advertised capabilities. */
+const VISION_RAW_UNAVAILABLE=new Set([...RAW_UNAVAILABLE,'RAW_CAPABILITIES_MISSING']);
+/** The reason the round's last wait gave (the decision model's BLOCKED is NO_SUPPORTED_ACTION). */
+const lastWait=(result:ComputerUseResult)=>[...(result.trace?.events??[])].reverse().find(e=>e.phase==='waiting')?.reason;
 /** The device's own error codes behind a stop (an unknown code is thrown as
  * COMPUTER_TOOL_FAILED), so the agent can name the real cause instead of guessing.
  * Only errors still standing: one a later call of the same tool got past was retried
@@ -69,7 +73,7 @@ export class ComputerTaskAdapter implements GatewayTaskAdapter {
  readonly live=new ComputerLiveRuns();
  constructor(private options:{agentId:string;root:string;connectors:ComputerConnectors;allowed:()=>boolean;stepMode?:()=>boolean;settled?:()=>void;userSteps?:(task:TaskSnapshot)=>string|undefined;accessWaitMs?:number;thinking?:()=>import('../../jev/browser-contract').BrowserTextHelperConfig|{resolve:()=>Promise<import('../../../lib/automation/thinking.cjs').ThinkingConfig>}|undefined;timezone?:()=>string;member:(principal:string,conversation:string)=>boolean;active:(task:TaskSnapshot)=>boolean;evaluate:(task:TaskSnapshot,request:Parameters<ComputerUseDependencies['evaluate']>[0],signal:AbortSignal)=>ReturnType<ComputerUseDependencies['evaluate']>;needsInput:(task:TaskSnapshot,question:string)=>boolean;progress?:(task:TaskSnapshot,report:import('../types').ComputerTaskReport)=>void;decisionMode?:()=>'jev'|'model';
   /** gateway.computerUse.mode vision|hybrid with a toolset-capable model: agent goals decided from the screenshot. */
-  vision?:()=>{mode:'vision'|'hybrid';decide:(task:TaskSnapshot,authorized:()=>boolean)=>VisionDecide}|undefined}){}
+  vision?:(use?:'primary'|'fallback')=>{mode:'vision'|'hybrid';decide:(task:TaskSnapshot,authorized:()=>boolean)=>VisionDecide}|undefined}){}
  private permitted(p:string,c:string){return this.options.allowed()&&this.options.member(p,c);}
  async discover(query='',offset=0,context?:CommandContext){
   if(!context||!this.permitted(context.principalId,context.conversationId))throw Error('COMPUTER_NOT_ALLOWED');
@@ -202,13 +206,17 @@ export class ComputerTaskAdapter implements GatewayTaskAdapter {
    // unless it already sent an action: then the answer was acted on and is consumed.
    let question:object=asked?{command:previousContext!.command,lastAction:previousContext!.lastAction,goalRun:previousContext!.goalRun}:{};
    // The command this round runs: a yes runs the asked command, not the reply text.
-   let command=goal,goalRun=sessionStart||agentHandoff;
+   // The user's answer to a goal run's field question (FIELD_TEXT_REQUIRED) resumes that goal, so its
+   // remaining steps still run. Pod-jinawong r8, task 16542265: the answer "bodyslam" ran as a one-shot
+   // command, typed it, and never pressed the Enter the goal asked for.
+   const answeredGoal=t.automationController==='user'&&!agentHandoff&&!asked&&previousContext?.goalRun===true&&previousContext.revision<t.revision&&!!answers?.some(a=>a.computerFieldLabel);
+   let command=goal,goalRun=sessionStart||agentHandoff||answeredGoal;
    let observedRound=false,answered=false;
    // The spawning agent declared this revision needs judgment (run_as_goal): one goal on its text, no step list.
    const stepMode=!agentHandoff&&t.runAsGoal?.revision!==t.revision&&this.options.stepMode?.()===true&&!recoveryNote&&!answers?.length&&!preparedInputs?.length;
    const userText=stepMode?this.options.userSteps?.(t):undefined;
    const steps=stepMode?(userText?parseComputerSteps(userText):undefined)??parseComputerSteps(goal):undefined;
-   const input=steps?{steps,revision:t.revision,...(contextNote?{interactionContext:contextNote}:{})}:{yieldAfterAction:t.automationController==='agent',yieldAfterInteraction:t.automationController==='user',readRequest:t.automationController==='user'&&!agentHandoff,...(agentHandoff?{agentCommand:true,runToGoal:true,maxSteps:COMPUTER_GOAL_MAX_STEPS}:{}),...(asked?{confirmation:asked,...(previousContext!.goalRun?{resumeGoal:COMPUTER_GOAL_MAX_STEPS}:{})}:{}),...(sessionStart?{sessionStart:true,runToGoal:true,maxSteps:COMPUTER_GOAL_MAX_STEPS}:{}),revision:t.revision,preparedInputs,interactionContext:contextNote,goal:goal+recoveryNote+(answers?.length?'\nKnown answers: '+JSON.stringify(answers.map(a=>a.text)):'')};
+   const input=steps?{steps,revision:t.revision,...(contextNote?{interactionContext:contextNote}:{})}:{yieldAfterAction:t.automationController==='agent',yieldAfterInteraction:t.automationController==='user',readRequest:t.automationController==='user'&&!agentHandoff&&!answeredGoal,...(agentHandoff?{agentCommand:true,runToGoal:true,maxSteps:COMPUTER_GOAL_MAX_STEPS}:{}),...(answeredGoal?{runToGoal:true,maxSteps:COMPUTER_GOAL_MAX_STEPS}:{}),...(asked?{confirmation:asked,...(previousContext!.goalRun?{resumeGoal:COMPUTER_GOAL_MAX_STEPS}:{})}:{}),...(sessionStart?{sessionStart:true,runToGoal:true,maxSteps:COMPUTER_GOAL_MAX_STEPS}:{}),revision:t.revision,preparedInputs,interactionContext:contextNote,goal:goal+recoveryNote+(answers?.length?'\nKnown answers: '+JSON.stringify(answers.map(a=>a.text)):'')};
    const deps:ComputerUseDependencies={authorized,interruptSignal:interrupt.signal,
     confirmed:reply=>{if(asked&&reply==='YES'){command=asked.command;goalRun=previousContext!.goalRun===true;}},
     call:async(name,args,s)=>{if(name!=='computer_release'&&!authorized())throw Error('ACCESS_DENIED');let response=await client.callTool({name,arguments:{...args,...(name==='computer_observe'?{app_query:appQuery}:{}),...b.scope}},undefined,{signal:s,timeout:20000});if(name==='computer_observe'&&response.isError){const raw=(response.content as any[])?.find(x=>x.type==='text')?.text;let oldClient=false;try{oldClient=typeof raw==='string'&&JSON.parse(raw).error==='INVALID_REQUEST';}catch{}if(oldClient){if(!authorized())throw Error('ACCESS_DENIED');response=await client.callTool({name,arguments:{...args,...b.scope}},undefined,{signal:s,timeout:20000});}}const text=(response.content as any[])?.find(x=>x.type==='text')?.text;if(typeof text!=='string'||text.length>262144)throw Error('COMPUTER_RESPONSE_INVALID');const body=JSON.parse(text);if(typeof body?.error==='string'&&DEVICE_CODE.test(body.error)){receipt.toolErrors=[...(receipt.toolErrors??[]),{tool:name,code:body.error,operationId:typeof args.operation_id==='string'?args.operation_id:undefined,...(typeof body.phase==='string'&&/^[a-z_]{1,40}$/.test(body.phase)?{nativePhase:body.phase}:{}),...(typeof body.reason==='string'&&DEVICE_CODE.test(body.reason)?{reason:body.reason}:{}),at:Date.now()}].slice(-40);this.write(t,r,receipt);}
@@ -251,14 +259,10 @@ export class ComputerTaskAdapter implements GatewayTaskAdapter {
    let result:ComputerUseResult|undefined,axInput:object=input;
    const reply=vision&&visionAsked?await confirmationReply(asked.label,goal,deps,AbortSignal.any([signal,AbortSignal.timeout(125000)])):undefined;
    if(reply){deps.confirmed!(reply);if(reply==='OTHER'){const {confirmation:_c,resumeGoal:_r,...rest}=input as Record<string,unknown>;axInput=rest;}else axInput={...input,confirmation:{...asked!,reply}};}
-   if(vision&&'goal' in input&&(!reply||reply==='YES')){
-    const resumed=reply==='YES'&&previousContext!.goalRun===true;
-    const outcome=await runVisionComputerUse({goal:reply==='YES'?asked!.command:input.goal,revision:t.revision,maxSteps:'maxSteps' in input&&input.maxSteps?input.maxSteps:COMPUTER_GOAL_MAX_STEPS,...(contextNote?{interactionContext:contextNote}:{}),
-     // The Accessibility semantics: the agent's own command is its authorization and control returns after each action;
-     // a goal run or a handed-off command judges each action's impact and keeps going to its goal.
-     impact:t.automationController!=='agent',yieldAfterAction:!(sessionStart||agentHandoff||resumed),...(reply==='YES'&&asked!.target?{confirmedTarget:asked!.target}:{})},{
-     mode:vision.mode,decide:vision.decide(t,authorized),authorized,interruptSignal:interrupt.signal,call:deps.call,evaluate:deps.evaluate,decisionMode:deps.decisionMode,observation:deps.observation,beforeMutation:deps.beforeMutation,progress:deps.progress,
-     screenshot:async(state,s)=>{
+   // One vision run on this round's device session: the screenshot of the observed window only, raw input, its own budget.
+   const visionRun=(config:NonNullable<typeof vision>,visionInput:Record<string,unknown>)=>runVisionComputerUse(visionInput,{
+    mode:config.mode,decide:config.decide(t,authorized),authorized,interruptSignal:interrupt.signal,call:deps.call,evaluate:deps.evaluate,decisionMode:deps.decisionMode,observation:deps.observation,beforeMutation:deps.beforeMutation,progress:deps.progress,
+    screenshot:async(state,s)=>{
       if(!authorized())throw Error('ACCESS_DENIED');
       let text:unknown,image:ReturnType<ComputerTaskAdapter['parseScreenshot']>;
       try{const response=await client.callTool({name:'computer_screenshot',arguments:{...b.scope,lease_token:leaseToken,generation:state.generation}},undefined,{signal:s,timeout:20000});text=(response.content as any[])?.find(x=>x.type==='text')?.text;image=response.isError?undefined:this.parseScreenshot(text,state.generation);}
@@ -270,11 +274,40 @@ export class ComputerTaskAdapter implements GatewayTaskAdapter {
       if(image)this.write(t,'last-screenshot',{...receipt,requestId:'last-screenshot'});
       return image&&size?{generation:image.generation,data:image.data,...size}:{error:error??'SCREENSHOT_SIZE_MISSING'};
      },
-    },AbortSignal.any([signal,AbortSignal.timeout(COMPUTER_VISION_RUN_TIMEOUT_MS+5000)]));
+   },AbortSignal.any([signal,AbortSignal.timeout(COMPUTER_VISION_RUN_TIMEOUT_MS+5000)]));
+   if(vision&&'goal' in input&&(!reply||reply==='YES')){
+    const resumed=reply==='YES'&&previousContext!.goalRun===true;
+    const outcome=await visionRun(vision,{goal:reply==='YES'?asked!.command:input.goal,revision:t.revision,maxSteps:'maxSteps' in input&&input.maxSteps?input.maxSteps:COMPUTER_GOAL_MAX_STEPS,...(contextNote?{interactionContext:contextNote}:{}),
+     // The Accessibility semantics: the agent's own command is its authorization and control returns after each action;
+     // a goal run or a handed-off command judges each action's impact and keeps going to its goal.
+     impact:t.automationController!=='agent',yieldAfterAction:!(sessionStart||agentHandoff||answeredGoal||resumed),...(reply==='YES'&&asked!.target?{confirmedTarget:asked!.target}:{})});
     // No raw input on this Mac (helper or app switch): the same goal runs on Accessibility, nothing has run yet.
     if(!('fallback' in outcome))result=outcome;
    }
    result??=await (steps?runComputerSteps:runComputerUse)(axInput,deps,AbortSignal.any([signal,AbortSignal.timeout(125000)]));
+   // A goal round Accessibility found no control to act on (the model chose BLOCKED; Spotify's own window shows only window
+   // buttons and menus) continues from the screenshot with raw input when visionFallback is on: the rest of the same goal,
+   // within its step budget, impact-gated, typing only text the instruction holds. Nothing that ran is replayed; the vision
+   // run is told what this round already did. Without raw input (or a capture) the round stops as before, saying why.
+   // Pod-jinawong r8, task b0ba459d: "play bodyslam on Spotify" opened Spotify and stopped at NO_SUPPORTED_ACTION.
+   const budget=('maxSteps' in input&&input.maxSteps?input.maxSteps:COMPUTER_GOAL_MAX_STEPS)-result.steps;
+   // Only in an approved window it could read: never on a withheld screen or an unapproved front application, whose
+   // BLOCKED is not a missing control; consent, a refusal and the impact gate end the round on their own reasons.
+   const observed=receipt.snapshot?.state;
+   const approvedWindow=!!observed&&observed.frontmostProtected!==true&&observed.application!=='unapproved';
+   const fallback=!vision&&goalRun&&!steps&&budget>0&&approvedWindow&&result.status==='needs_input'&&!receipt.operationId&&lastWait(result)==='NO_SUPPORTED_ACTION'?this.options.vision?.('fallback'):undefined;
+   if(fallback&&'goal' in input){
+    const done=result.lastAction&&!result.lastAction.blocked?` Its last: ${computerActionText(result.lastAction)}.`:'';
+    const note=`Accessibility already took ${result.steps} action${result.steps===1?'':'s'} toward this goal in this round and then found no control it could use.${done} Continue from the current screen; do not repeat what is done.`;
+    const outcome=await visionRun(fallback,{goal:input.goal,revision:t.revision,maxSteps:budget,interactionContext:[contextNote,note].filter(Boolean).join('\n\n').slice(-8000),
+     impact:t.automationController!=='agent',yieldAfterAction:false,literalText:true,approvedOnly:true});
+    if('fallback' in outcome){
+     // The Windows helper has no raw input yet: nothing for the user to turn on there.
+     const reason=!VISION_RAW_UNAVAILABLE.has(outcome.fallback)?'SCREEN_CAPTURE_REQUIRED':observed?.platform?.os==='windows'?'RAW_INPUT_UNAVAILABLE':'RAW_INPUT_REQUIRED';
+     const event={phase:'waiting' as const,reason,sequence:(result.trace?.events.at(-1)?.sequence??0)+1,round:result.trace?.events.at(-1)?.round??1,at:Date.now(),revision:t.revision,steps:result.steps,evaluations:result.evaluations};
+     deps.progress?.(event);result={...result,trace:{events:[...(result.trace?.events??[]),event],truncated:result.trace?.truncated??false}};
+    }else result={...outcome,steps:result.steps+outcome.steps,evaluations:result.evaluations+outcome.evaluations,trace:{events:[...(result.trace?.events??[]),...outcome.trace.events],truncated:!!(result.trace?.truncated||outcome.trace.truncated)},...(outcome.lastAction??result.lastAction?{lastAction:outcome.lastAction??result.lastAction}:{})};
+   }
    // A reached goal ends the device session too: the Mac stops showing it as
    // controlled and the owner's next request asks for access again.
    const accessReleased=result.status==='succeeded'&&result.reason==='GOAL_REACHED'&&!receipt.operationId&&authorized()?await this.endRelaySession(client,b.scope):undefined;
