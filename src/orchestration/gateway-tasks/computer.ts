@@ -197,7 +197,8 @@ export class ComputerTaskAdapter implements GatewayTaskAdapter {
    // The command this round runs: a yes runs the asked command, not the reply text.
    let command=goal,goalRun=sessionStart;
    let observedRound=false,answered=false;
-   const stepMode=!agentHandoff&&this.options.stepMode?.()===true&&!recoveryNote&&!answers?.length&&!preparedInputs?.length;
+   // The spawning agent declared this revision needs judgment (run_as_goal): one goal on its text, no step list.
+   const stepMode=!agentHandoff&&t.runAsGoal?.revision!==t.revision&&this.options.stepMode?.()===true&&!recoveryNote&&!answers?.length&&!preparedInputs?.length;
    const userText=stepMode?this.options.userSteps?.(t):undefined;
    const steps=stepMode?(userText?parseComputerSteps(userText):undefined)??parseComputerSteps(goal):undefined;
    const input=steps?{steps,revision:t.revision,...(contextNote?{interactionContext:contextNote}:{})}:{yieldAfterAction:t.automationController==='agent',yieldAfterInteraction:t.automationController==='user',readRequest:t.automationController==='user'&&!agentHandoff,...(agentHandoff?{agentCommand:true}:{}),...(asked?{confirmation:asked,...(previousContext!.goalRun?{resumeGoal:COMPUTER_GOAL_MAX_STEPS}:{})}:{}),...(sessionStart?{sessionStart:true,runToGoal:true,maxSteps:COMPUTER_GOAL_MAX_STEPS}:{}),revision:t.revision,preparedInputs,interactionContext:contextNote,goal:goal+recoveryNote+(answers?.length?'\nKnown answers: '+JSON.stringify(answers.map(a=>a.text)):'')};

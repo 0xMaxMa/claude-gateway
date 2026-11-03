@@ -79,6 +79,9 @@ export interface TaskSnapshot {
   computerRevocation?: { requestId: string; requestedAt: number };
   /** The idle settled round whose device session the gateway ended; the task stays open (GatewayTaskController). */
   computerAccessReleased?: { requestId: string; releasedAt: number };
+  /** The spawning agent declared (task_spawn run_as_goal) that this revision needs judgment, such as
+   * a choice or answer from the screen: it runs as one goal on the agent's text, never as user steps. */
+  runAsGoal?: { revision: number };
 
   continueTaskId?: string;
   continuationPolicy?: 'after_success' | 'after_terminal';

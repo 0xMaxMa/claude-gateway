@@ -38,17 +38,39 @@ export function computerActionText(action:NonNullable<ComputerTaskReport['lastAc
   default:return 'completed the action';
  }
 }
-/** Shared step-run summary; the surface supplies its own hint for a stop detail. */
-export function stepRunText(run:import('./command-steps').CommandStepRun,hintFor:(detail:string)=>string|undefined):string{
+/** How a stopped step run is followed up: whether the run was handed to the assistant
+ * (agentGoalRunParked: it wakes and checks the screen), the surface's own name, and the last action. */
+export interface StepRunTextContext {
+ handedOff?:boolean;
+ surface?:'computer'|'browser';
+ lastAction?:{kind:string;appId?:string};
+}
+/** Shared step-run summary; the surface supplies its own hint for a stop detail.
+ * The first lines are for the owner; raw stop codes go on the last "Details:" line.
+ * A stopped step that may have run is never listed as not run: only later steps are. */
+export function stepRunText(run:import('./command-steps').CommandStepRun,hintFor:(detail:string)=>string|undefined,context:StepRunTextContext={}):string{
  const head=`${run.completed}/${run.total} steps done.${run.notes?.length?' '+run.notes.join(' '):''}`;
  if(run.stopReason==='ALL_STEPS_DONE')return head+(run.unverifiedSteps?.length?` No visible change after step ${run.unverifiedSteps.join(', ')}.`:'');
  const detailHint=run.detail?hintFor(run.detail):undefined;
- const reason=detailHint?`${run.stopReason} (${run.detail}): ${detailHint}`:`${run.stopReason}${run.detail?` (${run.detail})`:''}`;
- return `${head} Stopped at step ${run.stoppedAt} ${JSON.stringify(run.stoppedStep??'')}: ${reason}${run.doneParts?.length?` Already done in that step: ${run.doneParts.map(s=>JSON.stringify(s)).join(', ')}.`:''}${run.remaining.length?` Not run: ${run.remaining.map(s=>JSON.stringify(s)).join(', ')}.`:''}`.slice(0,1500);
+ const step=run.stoppedAt??run.completed+1;
+ const done=run.doneParts?.length?` Already done in step ${step}: ${run.doneParts.map(s=>JSON.stringify(s)).join(', ')}.`:'';
+ const later=run.remaining.slice(1);
+ const notStarted=later.length?` Not started: ${later.map(s=>JSON.stringify(s)).join(', ')}.`:'';
+ const details=`\nDetails: ${run.stopReason}${run.detail?` · ${run.detail}`:''}`;
+ let line:string;
+ if(run.stopReason==='OUTCOME_UNKNOWN'){
+  const last=context.lastAction,device=context.surface==='browser'?'the browser':'this computer';
+  const effect=last?.kind==='open'&&last.appId?`${last.appId.slice(0,80)} may have opened`:'its last action may have run';
+  line=`Step ${step} couldn't be confirmed: ${effect}, but ${device} didn't confirm it. ${context.handedOff?'The assistant is checking the screen.':'Check the screen before sending it again.'}`;
+ }else if(context.handedOff)line=`Step ${step} needs a decision — handing it to the assistant…`;
+ else line=`Stopped at step ${step} ${JSON.stringify(run.stoppedStep??'')}: ${detailHint??'it could not be completed.'}`;
+ return `${head} ${line}${done}${notStarted}`.slice(0,1400)+details.slice(0,100);
 }
-export function computerOutcomeText(report:ComputerTaskReport):string{
+/** The card line once the assistant confirmed a parked run's goal from fresh evidence (verify_computer/verify_browser). */
+export const ANSWERED_FROM_SCREEN='Done · The assistant answered from the screen.';
+export function computerOutcomeText(report:ComputerTaskReport,context:{handedOff?:boolean}={}):string{
  const run=report.stepRun;
- if(run)return stepRunText(run,detail=>HINTS[detail]?hint(detail,report):undefined);
+ if(run)return stepRunText(run,detail=>HINTS[detail]?hint(detail,report):undefined,{...context,surface:'computer',...(report.lastAction?{lastAction:report.lastAction}:{})});
  const trace=report.trace??[];
  // A goal run's own end (reached, out of steps) is the report's reason; other stops are waits.
  const waiting=['GOAL_REACHED','STEP_LIMIT'].includes(report.reason)?report.reason:[...trace].reverse().find(e=>e.phase==='waiting'&&e.reason!=='POST_ACTION_EVIDENCE_STALE')?.reason;

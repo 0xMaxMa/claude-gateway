@@ -2,10 +2,10 @@ import {CURRENT_CONTROL_ROUND_SQL} from '../control-notification';
 import {preparedBrowserAnswers} from '../browser-fields';
 import {ComputerInputs} from '../../jev/computer-inputs';
 import {AUTOMATION_IDLE_TIMEOUT_MS,agentGoalRunParked,automationSession,pausedForCommand,stoppedForCommand} from './automation-session';
-import {computerActionText,computerOutcomeText} from '../../automation/computer-outcome';
+import {ANSWERED_FROM_SCREEN,computerActionText,computerOutcomeText} from '../../automation/computer-outcome';
 import {browserOutcomeText} from '../../automation/browser-outcome';
 import {textCommand} from '../../automation/direct-command';
-import { parentVerifiableBrowserResult } from '../../jev/browser-contract';
+import { parentVerifiableBrowserResult, parkedVerifiableBrowserResult } from '../../jev/browser-contract';
 import { isAbsolute } from 'path';
 import { parseWorkflow, advanceWorkflow } from '../workflow';
 import { advanceTiming } from './timing';
@@ -46,7 +46,7 @@ export function mergeContextRefs(supplied: unknown, inputRefs: string[]): unknow
   return [...new Set([...assertAgentContextRefs(supplied), ...inputRefs])];
 }
 
-export interface SpawnTask { browserFields?:unknown; computerInputs?:TaskRevision["computerInputs"]; gatewayTarget?: import("../types").GatewayTaskTarget; workingDirectory?: string; title: string; instructions: string; targetProfile: string; skill?: import('../skills').TaskSkill; contextRefs?: string[]; continueTaskId?: string; continuationPolicy?: 'after_success' | 'after_terminal';
+export interface SpawnTask { browserFields?:unknown; runAsGoal?:boolean; computerInputs?:TaskRevision["computerInputs"]; gatewayTarget?: import("../types").GatewayTaskTarget; workingDirectory?: string; title: string; instructions: string; targetProfile: string; skill?: import('../skills').TaskSkill; contextRefs?: string[]; continueTaskId?: string; continuationPolicy?: 'after_success' | 'after_terminal';
   /** Model id already resolved against the registry by the caller; `requestedModel` is what was asked for. */
   model?: string; requestedModel?: string; effort?: import('../../agent/model-registry').Effort; }
 
@@ -293,6 +293,7 @@ export class TaskService {
     if (command.continuationPolicy !== undefined && (!command.continueTaskId || !['after_success', 'after_terminal'].includes(command.continuationPolicy))) throw new OrchestrationError('INVALID_INPUT');
     const prepared=preparedBrowserAnswers(command.browserFields,context.inputId);
     if(command.browserFields!==undefined&&command.gatewayTarget?.adapter!=='browser')throw new OrchestrationError('INVALID_BROWSER_FIELDS');
+    if(command.runAsGoal!==undefined&&(typeof command.runAsGoal!=='boolean'||!['browser','computer'].includes(command.gatewayTarget?.adapter??'')))throw new OrchestrationError('INVALID_INPUT','run_as_goal is a boolean for browser or computer gateway-managed tasks only.');
     boundedText(command.title, 512); boundedText(command.instructions); boundedText(command.targetProfile, 128);
     if ((command.contextRefs?.length ?? 0) > MAX_CONTEXT_REFS) throw new OrchestrationError('INVALID_INPUT', `context_refs has ${command.contextRefs!.length} entries (agent refs plus pending input IDs added by the gateway); the limit is ${MAX_CONTEXT_REFS}. Reference fewer materials.`);
     if (command.contextRefs?.some(ref => typeof ref !== 'string' || ref.length > 1024)) throw new OrchestrationError('INVALID_INPUT', 'Each context_refs entry must be a string of at most 1024 characters.');
@@ -359,6 +360,7 @@ export class TaskService {
       if (effort) task.effort = effort;
       const projectRoot = command.workingDirectory || (this.config.tasks.workspaceMode === 'host' && prior?.resourceProfile?.mode === 'host' ? prior.resourceProfile.projectRoot : undefined) || this.config.tasks.projectRoot || this.defaultProjectRoot;
       if (projectRoot && !command.gatewayTarget) task.resourceProfile = { projectRoot, mode: this.config.tasks.workspaceMode };
+      if (command.runAsGoal) task.runAsGoal = { revision: 1 };
       this.store.run('INSERT INTO tasks VALUES(?,?,?,?,?,?,?,?,?)', task.taskId, task.conversationId, task.state, 1, 1, null, JSON.stringify(task), now, now);
       const revision: TaskRevision = { requestBrowserConsent:command.gatewayTarget?.adapter==='browser', taskId: task.taskId, revision: 1, instructions: command.instructions, computerInputs:command.computerInputs,
         answers:prepared, contextRefs: command.contextRefs ?? [], mode: 'when_ready', originatingInputId: context.inputId };
@@ -1122,7 +1124,7 @@ export class TaskService {
         } else if (task.state === 'waiting_input' && task.pendingQuestion) { /* retain question; execution slot now free */ }
         else if(task.executionControl?.phase==='pending'&&task.executionControl.action==='pause'){task.state='waiting_input';task.executionControl.phase='paused';delete task.failure;}
         else if (task.state === 'interrupting' || task.revision > attempt.revision) task.state = 'queued';
-        else if(waitingForCommand){task.state='waiting_input';task.latestProgress={source:'runtime',observedAt:Date.now(),text:task.gatewayTarget?.adapter==='computer'&&outcome.computerReport?computerOutcomeText(outcome.computerReport):task.gatewayTarget?.adapter==='browser'&&outcome.browserReport?browserOutcomeText(outcome.browserReport):'Waiting for your next command.'};}
+        else if(waitingForCommand){task.state='waiting_input';const handedOff=agentGoalRunParked(task);task.latestProgress={source:'runtime',observedAt:Date.now(),text:task.gatewayTarget?.adapter==='computer'&&outcome.computerReport?computerOutcomeText(outcome.computerReport,{handedOff}):task.gatewayTarget?.adapter==='browser'&&outcome.browserReport?browserOutcomeText(outcome.browserReport,{handedOff}):'Waiting for your next command.'};}
         else if (restartInterrupted) this.resumeAfterRestart(task, attempt);
         else task.state = outcome.type === 'completed' ? 'completed' : 'failed';
         if (task.state === 'completed' && outcome.type === 'completed') task.result = outcome.result;
@@ -1281,13 +1283,33 @@ export class TaskService {
       return { task_id: task.taskId, state: task.state };
     }));
   }
+  /** The notification of this parked goal run assigned to this agent turn. Connection and idle-release
+   * saves advance state_version after the round settles; the notice still describes this round. */
+  private parkedRoundNotice(context:CommandContext,task:TaskSnapshot):boolean {
+    return Boolean(this.store.get(`SELECT n.id FROM notifications n WHERE n.task_id=? AND n.decision_id=? AND n.status='assigned'
+      AND EXISTS (SELECT 1 FROM conversation_events e WHERE e.conversation_id=n.conversation_id AND e.type='task.state_changed'
+        AND json_extract(e.payload_json,'$.payload.taskId')=n.task_id AND json_extract(e.payload_json,'$.payload.stateVersion')=n.task_state_version
+        AND json_extract(e.payload_json,'$.payload.state')='waiting_input' AND json_extract(e.payload_json,'$.payload.revision')=?
+        AND COALESCE(json_extract(e.payload_json,'$.payload.gatewayDispatch.requestId'),'')=?) LIMIT 1`,
+      task.taskId,context.decisionId,task.revision,task.gatewayDispatch?.requestId??''));
+  }
+  /** A verified parked goal run is done: its automation session closes, and a computer session's
+   * device access is revoked now rather than after the idle release (the controller ends it). */
+  private closeVerifiedGoalRun(task:TaskSnapshot):void {
+    const session=automationSession(task);
+    if(session&&session.status!=='closed')task.automationSession={...session,status:'closed',closedAt:Date.now(),closedReason:'agent'};
+    if(task.gatewayTarget?.adapter==='computer'&&task.gatewayDispatch)task.computerRevocation={requestId:task.gatewayDispatch.requestId,requestedAt:Date.now()};
+    task.latestProgress={source:'runtime',observedAt:Date.now(),text:ANSWERED_FROM_SCREEN};
+  }
   /** Parent independently checks a fresh, scoped browser observation. Never clears an uncertain mutation. */
   verifyBrowser(context:CommandContext,taskId:string,revision:number,requestId:string,evidenceId:string,evidence:string,check:()=>void):TaskSnapshot {
     boundedText(evidence,4096);boundedText(requestId,256);boundedText(evidenceId,128);
     return this.command(context,'verify_browser',{taskId,revision,requestId,evidenceId,evidence},context.execute,()=>{
-      const task=this.owned(taskId,context.conversationId);
-      if(task.ownerPrincipalId!==context.principalId || task.gatewayTarget?.adapter!=='browser' || !['needs_reconciliation','failed'].includes(task.state) || task.revision!==revision || task.gatewayDispatch?.requestId!==requestId || !task.browserReport || !parentVerifiableBrowserResult(task.browserReport))throw new OrchestrationError('BROWSER_VERIFICATION_UNAVAILABLE');
-      if(!task.capabilities.execute || (!context.execute && !this.store.get("SELECT id FROM notifications WHERE task_id=? AND decision_id=? AND status='assigned' AND task_state_version=?",taskId,context.decisionId,task.stateVersion)))throw new OrchestrationError('EXECUTION_DENIED');
+      const task=this.owned(taskId,context.conversationId),parked=agentGoalRunParked(task);
+      // The agent's own goal run that parked (agentGoalRunParked) is closed the same way once fresh evidence shows its goal met.
+      if(task.ownerPrincipalId!==context.principalId || task.gatewayTarget?.adapter!=='browser' || task.revision!==revision || task.gatewayDispatch?.requestId!==requestId || !task.browserReport
+        || !(parked ? parkedVerifiableBrowserResult(task.browserReport) : ['needs_reconciliation','failed'].includes(task.state) && parentVerifiableBrowserResult(task.browserReport)))throw new OrchestrationError('BROWSER_VERIFICATION_UNAVAILABLE');
+      if(!task.capabilities.execute || (!context.execute && !(parked ? this.parkedRoundNotice(context,task) : this.store.get("SELECT id FROM notifications WHERE task_id=? AND decision_id=? AND status='assigned' AND task_state_version=?",taskId,context.decisionId,task.stateVersion))))throw new OrchestrationError('EXECUTION_DENIED');
       check();
       const attemptId=task.activeAttemptId ?? this.store.get("SELECT id FROM task_attempts WHERE task_id=? AND revision=? AND state='ended' ORDER BY generation DESC LIMIT 1",taskId,revision)?.id;
       const attempt=attemptId ? this.store.attempt(String(attemptId)) : undefined;
@@ -1296,6 +1318,7 @@ export class TaskService {
       task.browserReport.status='succeeded';task.browserReport.reason='PARENT_VERIFIED';
       task.browserReport.verification={source:'parent',evidence,at:Date.now()};
       task.result={summary:'Parent verified browser result: '+evidence,artifactIds:[]};attempt.result=task.result;
+      if(parked)this.closeVerifiedGoalRun(task);
       this.pool.release(task.taskId,true);
       this.store.saveAttempt(attempt);this.store.saveTask(task,task.stateVersion);
       this.store.appendEvent(task.conversationId,'browser.parent_verified',{requestId,evidenceId,evidence},taskId);
@@ -1306,9 +1329,12 @@ export class TaskService {
   verifyComputer(context:CommandContext,taskId:string,revision:number,requestId:string,evidenceId:string,evidence:string,check:()=>void):TaskSnapshot {
     boundedText(evidence,4096);boundedText(requestId,256);boundedText(evidenceId,128);
     return this.command(context,'verify_computer',{taskId,revision,requestId,evidenceId,evidence},context.execute,()=>{
-      const task=this.owned(taskId,context.conversationId);
-      if(task.ownerPrincipalId!==context.principalId || task.gatewayTarget?.adapter!=='computer' || !['failed','waiting_input'].includes(task.state) || task.revision!==revision || task.gatewayDispatch?.requestId!==requestId || !task.computerReport || task.computerReport.status!=='needs_verification')throw new OrchestrationError('COMPUTER_VERIFICATION_UNAVAILABLE');
-      if(!task.capabilities.execute || (!context.execute && !this.store.get("SELECT id FROM notifications WHERE task_id=? AND decision_id=? AND status='assigned' AND task_state_version=?",taskId,context.decisionId,task.stateVersion)))throw new OrchestrationError('EXECUTION_DENIED');
+      const task=this.owned(taskId,context.conversationId),parked=agentGoalRunParked(task);
+      // Also the agent's own goal run that parked (agentGoalRunParked), whatever its last outcome: the
+      // agent woken for it answers from fresh evidence and closes it here (pod-jinawong, task 59e5ce4f).
+      // The adapter's check still demands fresh evidence of this settled round, with no operation in flight.
+      if(task.ownerPrincipalId!==context.principalId || task.gatewayTarget?.adapter!=='computer' || !['failed','waiting_input'].includes(task.state) || task.revision!==revision || task.gatewayDispatch?.requestId!==requestId || !task.computerReport || (task.computerReport.status!=='needs_verification'&&!parked))throw new OrchestrationError('COMPUTER_VERIFICATION_UNAVAILABLE');
+      if(!task.capabilities.execute || (!context.execute && !(parked ? this.parkedRoundNotice(context,task) : this.store.get("SELECT id FROM notifications WHERE task_id=? AND decision_id=? AND status='assigned' AND task_state_version=?",taskId,context.decisionId,task.stateVersion))))throw new OrchestrationError('EXECUTION_DENIED');
       check();
       const attemptId=task.activeAttemptId ?? this.store.get("SELECT id FROM task_attempts WHERE task_id=? AND revision=? AND state='ended' ORDER BY generation DESC LIMIT 1",taskId,revision)?.id;
       const attempt=attemptId ? this.store.attempt(String(attemptId)) : undefined;
@@ -1316,6 +1342,7 @@ export class TaskService {
       attempt.state='ended';task.activeAttemptId=undefined;task.state=task.revision>attempt.revision?'queued':'completed';delete task.failure;delete attempt.failure;
       task.computerReport.status='succeeded';task.computerReport.reason='PARENT_VERIFIED';
       task.result={summary:'Parent verified computer result: '+evidence,artifactIds:[]};attempt.result=task.result;
+      if(parked)this.closeVerifiedGoalRun(task);
       this.pool.release(task.taskId,true);
       this.store.saveAttempt(attempt);this.store.saveTask(task,task.stateVersion);
       this.store.appendEvent(task.conversationId,'computer.parent_verified',{requestId,evidenceId,evidence},taskId);

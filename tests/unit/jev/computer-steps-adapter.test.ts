@@ -10,14 +10,14 @@ jest.mock('../../../src/automation/computer-steps',()=>({
 const {runComputerUse}=require('../../../src/automation/computer-use');
 const {runComputerSteps}=require('../../../src/automation/computer-steps');
 
-async function submit(goal:string,stepMode:boolean|undefined,preparedInputs:any[]=[],userText?:string){
+async function submit(goal:string,stepMode:boolean|undefined,preparedInputs:any[]=[],userText?:string,taskFields:Record<string,unknown>={}){
  const root=mkdtempSync(join(tmpdir(),'computer-steps-'));
  runComputerUse.mockClear();runComputerSteps.mockClear();
  const callTool=jest.fn(async()=>({content:[{type:'text',text:'{"state":"approved"}'}]}));
  jest.mocked(withComputerConnection).mockImplementation(async(_c,fn)=>fn({callTool} as any));
  const connectors={get:()=>({connectorId:'c',scope:{}}),connection:()=>({endpoint:'https://computer.example/mcp',headers:{}})};
  const adapter=new ComputerTaskAdapter({agentId:'a',root,connectors:connectors as any,allowed:()=>true,member:()=>true,active:()=>true,evaluate:jest.fn(),needsInput:()=>true,...(stepMode===undefined?{}:{stepMode:()=>stepMode}),...(userText===undefined?{}:{userSteps:()=>userText})});
- const task={agentId:'a',taskId:'t',ownerPrincipalId:'p',conversationId:'c',revision:1,automationController:'agent',gatewayTarget:{adapter:'computer',sessionId:'target'}} as any;
+ const task={agentId:'a',taskId:'t',ownerPrincipalId:'p',conversationId:'c',revision:1,automationController:'agent',gatewayTarget:{adapter:'computer',sessionId:'target'},...taskFields} as any;
  try{
   await adapter.submit(task,'request',goal,[],false,preparedInputs);
   let outcome:any;for(let i=0;i<50;i++){outcome=await adapter.inspect(task,'request');if(typeof outcome==='object')break;await new Promise(r=>setImmediate(r));}
@@ -178,4 +178,26 @@ test.each([
   await adapter.submit(resumed,'r4','yes');await settle(resumed,'r4');
   expect(runComputerUse.mock.calls[2][0].confirmation).toBeUndefined();
  }finally{await adapter.close();rmSync(root,{recursive:true,force:true});}
+});
+
+// Pod-jinawong, task 59e5ce4f: the agent understood "เลือกมาซักเกมให้ผม" as a judgment it gives
+// itself, but the user's words were split into steps and the model "picked" by opening steam.exe.
+// The agent now declares that with task_spawn run_as_goal (a model-declared field, not a word list).
+describe('run_as_goal: the spawning agent declared the request needs its judgment',()=>{
+ const user='เปิด Chrome เปิด Steam แล้วเลือกมาซักเกมให้ผม';
+ test('the user\'s words are not split into steps; the agent\'s goal runs as one goal',async()=>{
+  await submit('open Chrome and Steam',true,[],user,{runAsGoal:{revision:1}});
+  expect(runComputerSteps).not.toHaveBeenCalled();expect(runComputerUse).toHaveBeenCalledTimes(1);
+  expect(runComputerUse.mock.calls[0][0].goal).toBe('open Chrome and Steam');
+ });
+ test('English, too: "open Chrome, open Steam, then pick a game for me"',async()=>{
+  await submit('open Chrome and Steam',true,[],'open Chrome, open Steam, then pick a game for me',{runAsGoal:{revision:1}});
+  expect(runComputerSteps).not.toHaveBeenCalled();expect(runComputerUse).toHaveBeenCalledTimes(1);
+ });
+ test('only for the revision it was declared on; without it the user\'s steps still run',async()=>{
+  await submit('open Chrome and Steam',true,[],user,{revision:2,runAsGoal:{revision:1}});
+  expect(runComputerSteps).toHaveBeenCalledTimes(1);
+  await submit('open Chrome and Steam',true,[],user);
+  expect(runComputerSteps.mock.calls[0][0].steps).toEqual(['เปิด Chrome เปิด Steam','เลือกมาซักเกมให้ผม']);
+ });
 });

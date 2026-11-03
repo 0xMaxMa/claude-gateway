@@ -48,9 +48,25 @@ const CONTEXT = /^(?:you\s+are\b|you're\b|คุณ(?:กำลัง|คือ|
 const HEADER = /[:：]\s*$/u;
 const BULLET = /^\s*[-*•]\s+/u;
 const cleanStep = (text:string) => text.trim().replace(/^(?:และ|and)\s+/iu, '').replace(/[.。]+$/u, '').trim();
+/**
+ * A step whose own first token comes back later starts a new command there: "เปิด Chrome เปิด Steam",
+ * "open Chrome open Steam". This is repetition within the user's text, not a word list, so it holds in
+ * any language that separates words with spaces. Each part keeps at least two tokens and quoted text
+ * is never split. Pod-jinawong, task 59e5ce4f: the step was marked done after Chrome alone.
+ */
+function repeatedLeadParts(step:string) {
+  const tokens = [...maskQuotes(step).matchAll(/\S+/gu)];
+  const lead = tokens[0]?.[0].toLocaleLowerCase();
+  if (!lead || lead.includes('\u0000') || tokens.length < 4) return [step];
+  const starts = [0];
+  for (let i = 2; i <= tokens.length - 2; i++) {
+    if (tokens[i][0].toLocaleLowerCase() === lead && i - starts.at(-1)! >= 2) starts.push(i);
+  }
+  return starts.map((start, n) => step.slice(tokens[start].index, n + 1 < starts.length ? tokens[starts[n + 1]].index : step.length).trim());
+}
 /** Commands joined inside one listed step, run in order as that step. */
 export function stepParts(step:string) {
-  const parts = splitAt(step, maskQuotes(step), CONNECTOR).map(cleanStep).filter(Boolean);
+  const parts = splitAt(step, maskQuotes(step), CONNECTOR).map(cleanStep).filter(Boolean).flatMap(repeatedLeadParts);
   return parts.length ? parts : [step];
 }
 

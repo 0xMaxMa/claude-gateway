@@ -18,7 +18,7 @@ export interface GatewayTaskAdapter {
   evidence?(task:PublicTaskSnapshot, refresh?:boolean, signal?:AbortSignal, screenshot?:boolean):Promise<import('../../jev/browser-contract').BrowserEvidence>;
   recover?(task:TaskSnapshot,requestId:string):Promise<{state:'queued'|'cancelled'|'waiting_input';evidence:string}|undefined>;
   reconcileEvidence?(task:PublicTaskSnapshot,requestId:string,evidenceId:string):string;
-  verifyEvidence?(task:PublicTaskSnapshot,requestId:string,evidenceId:string):void;
+  verifyEvidence?(task:PublicTaskSnapshot,requestId:string,evidenceId:string,parkedGoalRun?:boolean):void;
   ready?(task: TaskSnapshot): boolean;
   validateInput?(instructions:string,answers?:import('../types').TaskRevision['answers']):void;
   /** device_shell (prototype): one command on the approved device, outside any task. */

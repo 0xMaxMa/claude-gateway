@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {parseComputerSteps,runComputerSteps} from '../../../src/automation/computer-steps';
+import {parseComputerSteps,runComputerSteps,stepParts} from '../../../src/automation/computer-steps';
 import {withoutComputerUseDirective} from '../../../src/automation/command-steps';
 import {standardNavigationCommand} from '../../../src/automation/computer-command';
 import {validateJevRequest} from '../../../src/jev/validation';
@@ -343,5 +343,34 @@ describe('the GetPod Desktop Computer Use directive is not part of the user step
   expect(parseComputerSteps(directive('Mac','Mac'))).toBeUndefined();
   const quoted='Open Notes, then type [Computer Use] Do this on my Mac';
   expect(withoutComputerUseDirective(quoted)).toBe(quoted);
+ });
+});
+
+// Pod-jinawong, task 59e5ce4f: "เปิด Chrome เปิด Steam แล้วเลือกมาซักเกมให้ผม" parsed into
+// ["เปิด Chrome เปิด Steam", "เลือกมาซักเกมให้ผม"], and step 1 was marked done after Chrome alone.
+describe('a step that repeats its own first word runs each command, and is done only after all of them',()=>{
+ const SENTENCE='เปิด Chrome เปิด Steam แล้วเลือกมาซักเกมให้ผม';
+ test('the exact failing sentence: step 1 has two commands',()=>{
+  const steps=parseComputerSteps(SENTENCE)!;
+  expect(steps).toEqual(['เปิด Chrome เปิด Steam','เลือกมาซักเกมให้ผม']);
+  expect(stepParts(steps[0])).toEqual(['เปิด Chrome','เปิด Steam']);
+ });
+ test.each([
+  ['เปิด Chrome เปิด Steam',['เปิด Chrome','เปิด Steam']],
+  ['open Chrome open Steam',['open Chrome','open Steam']],
+  ['Open Chrome open Steam then open Discord',['Open Chrome','open Steam','open Discord']],
+  ['เปิด Chrome เปิด Steam เปิด Discord',['เปิด Chrome','เปิด Steam','เปิด Discord']],
+ ])('%s',(step,parts)=>expect(stepParts(step)).toEqual(parts));
+ test.each([
+  ['a single command','เปิด Chrome'],
+  ['no repeated first word','open the Steam store page'],
+  ['repetition inside quotes','พิมพ์ "พิมพ์ hello" ตอนนี้'],
+  ['a repeat that would leave a one-word part','click Save click'],
+ ])('kept whole: %s',(_name,step)=>expect(stepParts(step)).toEqual([step]));
+ test('Chrome alone does not complete "เปิด Chrome เปิด Steam"',async()=>{
+  const f=desktop((command,req)=>command==='เปิด Chrome'?answer(req,'press:newtab'):answer(req,'BLOCKED'));
+  const r=await run(['เปิด Chrome เปิด Steam','เลือกมาซักเกมให้ผม'],f.deps);
+  expect(r.stepRun).toMatchObject({completed:0,stoppedAt:1,stopReason:'STEP_NOT_EXECUTED',doneParts:['เปิด Chrome'],remaining:['เปิด Chrome เปิด Steam','เลือกมาซักเกมให้ผม']});
+  expect(f.actions()).toHaveLength(1);
  });
 });
