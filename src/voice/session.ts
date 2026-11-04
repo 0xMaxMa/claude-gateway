@@ -406,7 +406,7 @@ export class VoiceSession {
         trace.emit('audio_sent_complete');
         this.completedPlaybackEpoch = epoch;
         this.recordPlayback('streamed'); this.client.control({ type: 'playback.end', response_id: responseId, epoch, generated_samples: this.playback.snapshot().generatedSamples }); }
-    } catch (error) { if (!this.closed && epoch === this.playback.epoch) { trace.emit('failed', { code: error instanceof VoiceError ? error.code : 'TTS_UNAVAILABLE' }); this.recordPlayback('failed'); this.error(error instanceof VoiceError ? error.code : 'TTS_UNAVAILABLE'); } }
+    } catch (error) { if (!this.closed && epoch === this.playback.epoch) { const code = error instanceof VoiceError ? error.code : 'TTS_UNAVAILABLE'; trace.emit('failed', { code }); this.recordPlayback('failed'); this.client.control({ type: 'voice.error', operation: 'tts', response_id: responseId, generated_samples: this.playback.snapshot().generatedSamples, code }); } }
   }
   /** Each piece of spoken text is synthesized on its own provider stream, which ends as soon as the
    * piece is sent. A streaming TTS socket otherwise holds short text (ElevenLabs dialogue: under ~40

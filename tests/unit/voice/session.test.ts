@@ -1,6 +1,6 @@
 import { VoiceSession } from '../../../src/voice/session';
 import { FakeSttProvider } from '../../../src/voice/providers/fake';
-import { PCM16, TtsProvider } from '../../../src/voice/types';
+import { PCM16, TtsProvider, VoiceError } from '../../../src/voice/types';
 import { decodeVoiceFrame } from '../../../src/voice/protocol';
 import { BoundedQueue } from '../../../src/orchestration/bounded-queue';
 import { ORCHESTRATION_DEFAULTS } from '../../../src/orchestration/config';
@@ -465,6 +465,49 @@ test('STT candidate pause preserves backpressured audio past the normal client t
     expect(audio).toHaveLength(2);
     expect(controls.some(c=>c.type==='playback.end')).toBe(true);
   }finally{await session.close();jest.useRealTimers();}
+});
+
+test('a reply with zero TTS audio reports failure and the next reply still plays', async () => {
+  const controls: Record<string, any>[] = [], audio: Buffer[] = [], receipts: Array<{ state: string; generatedSamples: number; playedSamples: number }> = [];
+  let attempts = 0;
+  const tts: TtsProvider = { id: 'fixture', capabilities: { textStreaming: true, wordAlignment: false, outputFormats: [PCM16] },
+    synthesize: async function* () {
+      if (++attempts === 1) throw new VoiceError('PROVIDER_HANDSHAKE_TIMEOUT');
+      yield { bytes: Buffer.alloc(320), format: PCM16, chunkSeq: 0 };
+    } };
+  const session = new VoiceSession(new FakeSttProvider(), tts, 'voice',
+    { control: c => controls.push(c), audio: c => audio.push(c), bufferedBytes: () => 0 },
+    async () => ({ inputId: 'input', response: Promise.resolve('') }), jest.fn(),
+    { silenceCommitMs: 650, finalizationTimeoutMs: 5000, maxUtteranceMs: 60000, maxBufferedAudioMs: 1500 },
+    (_id, progress, state) => receipts.push({ state, generatedSamples: progress.generatedSamples, playedSamples: progress.playedSamples }));
+  const until = async (predicate: () => boolean) => { for (let i = 0; i < 100 && !predicate(); i++) await new Promise(resolve => setTimeout(resolve, 5)); expect(predicate()).toBe(true); };
+  try {
+    session.notifyResult({ responseId: 'failed', text: 'First answer', spoken: 'First answer' });
+    await until(() => controls.some(c => c.type === 'voice.error'));
+    expect(controls).toContainEqual(expect.objectContaining({ type: 'voice.error', operation: 'tts', response_id: 'failed', generated_samples: 0, code: 'PROVIDER_HANDSHAKE_TIMEOUT' }));
+    expect(receipts).toContainEqual({ state: 'failed', generatedSamples: 0, playedSamples: 0 });
+    session.notifyResult({ responseId: 'recovered', text: 'Second answer', spoken: 'Second answer' });
+    await until(() => audio.length === 1);
+    const epoch = decodeVoiceFrame(audio[0]).epoch;
+    session.progress(epoch, 160);
+    await until(() => controls.some(c => c.type === 'playback.end' && c.response_id === 'recovered'));
+    expect(receipts).toContainEqual({ state: 'played', generatedSamples: 160, playedSamples: 160 });
+  } finally { await session.close(); }
+});
+
+test('a TTS error after audio has started reports the partial sample count', async () => {
+  const controls: Record<string, any>[] = [], audio: Buffer[] = [];
+  const tts: TtsProvider = { id: 'fixture', capabilities: { textStreaming: true, wordAlignment: false, outputFormats: [PCM16] },
+    synthesize: async function* () { yield { bytes: Buffer.alloc(320), format: PCM16, chunkSeq: 0 }; throw new VoiceError('PROVIDER_CONNECTION_FAILED'); } };
+  const session = new VoiceSession(new FakeSttProvider(), tts, 'voice',
+    { control: c => controls.push(c), audio: c => audio.push(c), bufferedBytes: () => 0 },
+    async () => ({ inputId: 'input', response: Promise.resolve('') }), jest.fn());
+  try {
+    session.notifyResult({ responseId: 'partial', text: 'Answer', spoken: 'Answer' });
+    for (let i = 0; i < 100 && !controls.some(c => c.type === 'voice.error'); i++) await new Promise(resolve => setTimeout(resolve, 5));
+    expect(audio).toHaveLength(1);
+    expect(controls).toContainEqual(expect.objectContaining({ type: 'voice.error', operation: 'tts', response_id: 'partial', generated_samples: 160, code: 'PROVIDER_CONNECTION_FAILED' }));
+  } finally { await session.close(); }
 });
 
 test('turn timing correlates utterance, input and response ids from the end of speech to the first heard audio', async () => {

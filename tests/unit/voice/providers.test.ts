@@ -1,5 +1,5 @@
 import { BoundedQueue } from '../../../src/voice/queue';
-import { PCM16 } from '../../../src/voice/types';
+import { PCM16, VoiceError } from '../../../src/voice/types';
 import { ElevenLabsStt } from '../../../src/voice/providers/elevenlabs-stt';
 import { DeepgramStt } from '../../../src/voice/providers/deepgram-stt';
 import { ElevenLabsTts } from '../../../src/voice/providers/elevenlabs-tts';
@@ -73,6 +73,40 @@ test('provider closing without a terminal event is not a successful synthesis', 
   const iterator = new ElevenLabsTts('fixture', undefined, fixture.connect).synthesize({ text: text(), voiceId: 'voice', outputFormat: PCM16, signal: new AbortController().signal })[Symbol.asyncIterator]();
   const result = iterator.next(); fixture.messages.close();
   await expect(result).rejects.toMatchObject({ code: 'TTS_INCOMPLETE' });
+});
+
+test('ElevenLabs retries one failed handshake before consuming text, then completes', async () => {
+  const fixture = socketFixture();
+  const connect = jest.fn<ReturnType<SocketFactory>, Parameters<SocketFactory>>()
+    .mockRejectedValueOnce(new VoiceError('PROVIDER_HANDSHAKE_TIMEOUT'))
+    .mockImplementation(fixture.connect);
+  let read = 0;
+  async function* text() { read++; yield 'hello'; }
+  const result = new ElevenLabsTts('fixture', undefined, connect).synthesize({ text: text(), voiceId: 'voice', outputFormat: PCM16, signal: new AbortController().signal })[Symbol.asyncIterator]();
+  const next = result.next();
+  await new Promise(resolve => setTimeout(resolve, 300));
+  fixture.messages.push({ audio: Buffer.alloc(320).toString('base64') });
+  fixture.messages.push({ is_final: true });
+  expect((await next).value?.bytes).toHaveLength(320);
+  expect(connect).toHaveBeenCalledTimes(2);
+  expect(read).toBe(1);
+  await result.next();
+});
+
+test('ElevenLabs aborts during handshake backoff and does not retry a billing rejection', async () => {
+  const controller = new AbortController();
+  const connect = jest.fn<ReturnType<SocketFactory>, Parameters<SocketFactory>>()
+    .mockRejectedValueOnce(new VoiceError('PROVIDER_HANDSHAKE_TIMEOUT'));
+  async function* text() { yield 'hello'; }
+  const aborted = new ElevenLabsTts('fixture', undefined, connect).synthesize({ text: text(), voiceId: 'voice', outputFormat: PCM16, signal: controller.signal })[Symbol.asyncIterator]().next();
+  setTimeout(() => controller.abort(), 10);
+  await expect(aborted).rejects.toMatchObject({ code: 'PROVIDER_ABORTED' });
+  expect(connect).toHaveBeenCalledTimes(1);
+
+  connect.mockReset().mockRejectedValueOnce(new VoiceError('VOICE_PROVIDER_ERROR_HTTP_402'));
+  await expect(new ElevenLabsTts('fixture', undefined, connect).synthesize({ text: text(), voiceId: 'voice', outputFormat: PCM16, signal: new AbortController().signal })[Symbol.asyncIterator]().next())
+    .rejects.toMatchObject({ code: 'VOICE_PROVIDER_ERROR_HTTP_402' });
+  expect(connect).toHaveBeenCalledTimes(1);
 });
 
 test('ElevenLabs reports the cause of a send rejected just after the provider closed', async () => {

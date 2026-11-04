@@ -255,10 +255,19 @@ export function formatCallDuration(ms: number): string {
  * sound but no words (a cough, the room, the microphone opening); the call is
  * still listening, so it is not an error to the caller. The server log keeps it.
  */
-export function voiceCallErrorView(error: { code?: unknown; category?: unknown; message?: unknown }): { kind: 'listening' } | { kind: 'ended' | 'error'; message: string } {
+export function voiceCallErrorView(error: { code?: unknown; category?: unknown; message?: unknown; operation?: unknown; response_id?: unknown; generated_samples?: unknown }): { kind: 'listening' } | { kind: 'ended' | 'error'; message: string } {
   if (error.category === 'no_speech') return { kind: 'listening' };
   if (error.code === 'VOICE_SESSION_CHANGED') return { kind: 'ended', message: 'This chat switched sessions. Send /call to talk in the new one.' };
-  return { kind: 'error', message: typeof error.message === 'string' && error.message ? error.message : 'Voice error' };
+  const message = typeof error.message === 'string' && error.message ? error.message : 'Voice error';
+  if (error.operation === 'tts') {
+    const partial = typeof error.generated_samples === 'number' && error.generated_samples > 0;
+    const reply = typeof error.response_id === 'string' && error.response_id;
+    const context = partial
+      ? reply ? 'The reply audio stopped before it finished. Read the reply text when available.' : 'Voice audio stopped before it finished.'
+      : reply ? 'The reply audio could not be played. Read the reply text when available.' : 'Voice audio could not be played.';
+    return { kind: 'error', message: `${context} ${message}` };
+  }
+  return { kind: 'error', message };
 }
 
 /**
