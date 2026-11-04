@@ -91,6 +91,9 @@ describe('GET /api/v1/files', () => {
       filesystem: { total: expect.any(Number), free: expect.any(Number), available: expect.any(Number) },
       entries: [{ name: 'app', path: 'app', abs: path.join(root, 'app'), type: 'dir', modified_at: expect.any(String), is_git: false, size: expect.any(Number) }],
     });
+    expect(top.body.filesystem.total).toBeGreaterThan(0);
+    expect(top.body.filesystem.free).toBeGreaterThanOrEqual(top.body.filesystem.available);
+    expect(top.body.filesystem.total).toBeGreaterThanOrEqual(top.body.filesystem.free);
     const nested = await list('app');
     expect(nested.body).toMatchObject({ path: 'app', abs: path.join(root, 'app'), entries: [{ name: 'src', path: 'app/src', abs: path.join(root, 'app', 'src') }] });
   });

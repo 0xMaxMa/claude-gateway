@@ -15,14 +15,13 @@ on:
       - 'src/agent/runner.ts'
       - 'src/processes/**'
       - 'src/cli/redact.ts'
-      - 'scripts/contracts-fixtures.ts'
-      - 'contracts/files-git/**'
       - 'tests/unit/files-*.test.ts'
       - 'tests/unit/cli-redact.test.ts'
       - 'tests/unit/processes-router.test.ts'
       - 'tests/unit/api-capabilities.test.ts'
       - 'tests/unit/api-router*.test.ts'
       - 'tests/unit/git-*.test.ts'
+      - 'tests/integration/session-cwd.test.ts'
       - '.github/workflows/files-processes.yml'
       - 'package.json'
       - 'package-lock.json'
@@ -41,14 +40,13 @@ on:
       - 'src/agent/runner.ts'
       - 'src/processes/**'
       - 'src/cli/redact.ts'
-      - 'scripts/contracts-fixtures.ts'
-      - 'contracts/files-git/**'
       - 'tests/unit/files-*.test.ts'
       - 'tests/unit/cli-redact.test.ts'
       - 'tests/unit/processes-router.test.ts'
       - 'tests/unit/api-capabilities.test.ts'
       - 'tests/unit/api-router*.test.ts'
       - 'tests/unit/git-*.test.ts'
+      - 'tests/integration/session-cwd.test.ts'
       - '.github/workflows/files-processes.yml'
       - 'package.json'
       - 'package-lock.json'
@@ -76,4 +74,4 @@ jobs:
       - run: bun install --cwd mcp --frozen-lockfile --ignore-scripts
       - run: npm run build
       - run: npm run typecheck:tests
-      - run: NODE_OPTIONS=--max-old-space-size=1536 npx jest --ci --runInBand tests/unit/files-contracts.test.ts tests/unit/processes-router.test.ts tests/unit/files-fs.test.ts tests/unit/files-permissions.test.ts tests/unit/cli-redact.test.ts
+      - run: NODE_OPTIONS=--max-old-space-size=1536 npx jest --ci --runInBand tests/unit/files-router.test.ts tests/unit/files-list-extras.test.ts tests/unit/files-delete.test.ts tests/unit/files-fs.test.ts tests/unit/files-permissions.test.ts tests/unit/git-router.test.ts tests/unit/api-capabilities.test.ts tests/unit/api-sessions-create.test.ts tests/unit/processes-router.test.ts tests/unit/cli-redact.test.ts tests/integration/session-cwd.test.ts

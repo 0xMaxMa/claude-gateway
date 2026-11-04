@@ -181,9 +181,9 @@ describe('GET /v1/processes', () => {
     const result = await get(undefined);
     expect(result.status).toBe(200);
     expect(result.body.processes).toEqual([
-      expect.objectContaining({ path: '.hidden', listeners: [expect.objectContaining({ port: c.port })] }),
-      expect.objectContaining({ path: 'first', listeners: [expect.objectContaining({ port: a.port })] }),
-      expect.objectContaining({ path: 'second', listeners: [expect.objectContaining({ port: b.port })] }),
+      { path: '.hidden', running: true, listeners: [{ port: c.port, pids: [c.pid], command: expect.any(String), address: '127.0.0.1' }] },
+      { path: 'first', running: true, listeners: [{ port: a.port, pids: [a.pid], command: expect.any(String), address: '127.0.0.1' }] },
+      { path: 'second', running: true, listeners: [{ port: b.port, pids: [b.pid], command: expect.any(String), address: '127.0.0.1' }] },
     ]);
     expect((await get(undefined, 'k-read')).status).toBe(403);
   });

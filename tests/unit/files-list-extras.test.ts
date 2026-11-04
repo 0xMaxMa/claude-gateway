@@ -41,6 +41,10 @@ describe('GET /api/v1/files skipped', () => {
     const hidden = await request(app).get('/api/v1/files').query({ path: 'good', include_hidden: 'true' }).set(H);
     expect(hidden.status).toBe(200);
     expect(hidden.body.entries.map((entry: { name: string }) => entry.name)).toEqual(['.venv']);
+    expect(hidden.body.entries[0]).toEqual({
+      name: '.venv', path: 'good/.venv', abs: path.join(root, 'good', '.venv'),
+      type: 'dir', modified_at: expect.any(String), is_git: false, size: expect.any(Number),
+    });
     expect(hidden.body.leftovers).toEqual(['.deleting-old']);
     expect((await request(app).get('/api/v1/files').query({ path: 'good/.venv', include_hidden: 'true' }).set(H)).status).toBe(200);
     expect((await request(app).get('/api/v1/files').query({ path: 'good/.venv' }).set(H)).body.code).toBe('invalid_name');
