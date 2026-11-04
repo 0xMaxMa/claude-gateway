@@ -37,13 +37,15 @@ const validate = (name: string, value: unknown): string[] => {
 
 const fixtures = committedFixtures();
 
-/** `du` depends on the host filesystem and Git version; keep other fields exact. */
-function withoutHostSizes(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(withoutHostSizes);
+/** `du` and Git's UTC spelling depend on the host; keep other fields exact. */
+function normalizeHostVariations(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(normalizeHostVariations);
   if (!value || typeof value !== 'object') return value;
   const fields = value as Record<string, unknown>;
   return Object.fromEntries(Object.entries(fields).map(([key, item]) => [key,
-    key === 'size' && fields.type === 'dir' && typeof item === 'number' ? '<host size>' : withoutHostSizes(item)]));
+    key === 'size' && fields.type === 'dir' && typeof item === 'number' ? '<host size>' :
+    key === 'committed_at' && typeof item === 'string' && !Number.isNaN(Date.parse(item)) ? new Date(item).toISOString() :
+    normalizeHostVariations(item)]));
 }
 
 describe('files and git contracts', () => {
@@ -54,7 +56,7 @@ describe('files and git contracts', () => {
   });
 
   it('records the committed fixtures from the routers as they are now (rerun npm run contracts:fixtures on a change)', async () => {
-    expect(withoutHostSizes(await recordFixtures())).toEqual(withoutHostSizes(fixtures));
+    expect(normalizeHostVariations(await recordFixtures())).toEqual(normalizeHostVariations(fixtures));
     const rootEntries = (fixtures['files-list/root.json']!.body as { entries: Array<{ name: string; size: number }> }).entries;
     expect(rootEntries.find((entry) => entry.name === 'app')!.size).toBeGreaterThan(4096);
   }, 60_000);
