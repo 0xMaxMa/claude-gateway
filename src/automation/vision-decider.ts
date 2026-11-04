@@ -26,6 +26,12 @@ const POST_ACTION_OBSERVE_ATTEMPTS = 3;
 /** Screenshots kept in one request: older ones are replaced by a placeholder, so a run's request size stays flat. */
 export const VISION_MAX_IMAGES = 3;
 const MAX_HINTS = 60;
+/** A model turn takes at least this long: a run with no action limit gets its turn guard from its time budget. */
+const MIN_TURN_MS = 1000;
+/** Decisions in a row whose actions left the window unchanged (the screenshot byte-identical and the observation the
+ * same), or clicked, typed or opened the same target the same way, before the run pauses for the user (NO_PROGRESS)
+ * instead of spending its whole round time. Scrolling and keys may repeat: that is how a list or a field is walked. */
+const NO_PROGRESS_ACTIONS = 3;
 const PRE_DISPATCH_REJECTIONS = new Set(['DEVICE_OFFLINE', 'CONSENT_REQUIRED', 'OBSERVATION_DENIED', 'CONTROL_DENIED', 'APPLICATION_NOT_ALLOWED', 'COMPUTER_BUSY']);
 /** Helper refusals that leave the desktop unchanged: look again and let the model decide on the new screenshot. */
 const REOBSERVE_REFUSALS = new Set(['STALE_OBSERVATION', 'TARGET_OCCLUDED', 'SCREENSHOT_REQUIRED', 'POINT_OUTSIDE_WINDOW', 'FOCUS_CHANGED', 'FOCUS_REQUIRED', 'CHORD_NOT_ALLOWED', 'INVALID_CHORD', 'SECURE_FIELD', 'INVALID_REQUEST']);
@@ -301,7 +307,9 @@ export interface VisionDependencies extends Pick<ComputerUseDependencies, 'inter
 }
 /** The run stayed on (or returned to) Accessibility before any action: the caller runs runComputerUse instead. */
 export interface VisionFallback { fallback: string; trace: ComputerProgress[] }
-const VisionInput = z.object({ goal: z.string().min(1).max(16000), revision: z.number().int().positive().default(1), maxSteps: z.number().int().min(1).max(100).default(30), timeoutMs: z.number().int().min(1).max(600000).default(COMPUTER_VISION_RUN_TIMEOUT_MS), interactionContext: z.string().max(8000).optional(),
+const VisionInput = z.object({ goal: z.string().min(1).max(16000), revision: z.number().int().positive().default(1),
+  /** An action limit; without one the run ends on its time budget, a finish, or NO_PROGRESS. */
+  maxSteps: z.number().int().min(1).max(100).optional(), timeoutMs: z.number().int().min(1).max(600000).default(COMPUTER_VISION_RUN_TIMEOUT_MS), interactionContext: z.string().max(8000).optional(),
   /** As runComputerUse's agentCommand/goal run: every action's impact is judged first, and a high-impact one waits for the user. */
   impact: z.boolean().default(true),
   /** As runComputerUse's yieldAfterAction: one completed action, then control returns to the agent. */
@@ -374,11 +382,17 @@ type ToolUse = { type: 'tool_use'; id: string; name: string; input?: unknown; to
  * capabilities, or when the helper turns raw input away before anything ran, the run falls back to Accessibility. */
 export async function runVisionComputerUse(raw: unknown, deps: VisionDependencies, signal: AbortSignal): Promise<ComputerUseResult | VisionFallback> {
   const input = VisionInput.parse(raw);
-  // Every model turn counts, actions or not (screenshot, wait, refusals): the Accessibility loop's cycle budget.
-  const maxTurns = input.maxSteps * 3 + 5;
+  // Every model turn counts, actions or not (screenshot, wait, refusals): the Accessibility loop's cycle budget, or
+  // without an action limit one turn per MIN_TURN_MS of the run's time, which then always ends it first.
+  const maxTurns = input.maxSteps ? input.maxSteps * 3 + 5 : Math.ceil(input.timeoutMs / MIN_TURN_MS) + 5;
   let confirmedTarget = input.confirmedTarget;
   const runSignal = AbortSignal.any([signal, AbortSignal.timeout(input.timeoutMs)]);
   let steps = 0, evaluations = 0, sequence = 0, round = 0, refusals = 0;
+  // No progress, per decision (a Jev decision may run several actions): decisions in a row after which the window did
+  // not change, and in a row on one target. `turnStart`: the window before the current decision's first action.
+  let unchanged = 0, repeated = 0, lastTarget: string | undefined, turnStart: string | undefined;
+  const digest = (state: ComputerState, shot: VisionScreenshot) => createHash('sha256').update(JSON.stringify([shot.data, state.application, state.windowTitle, state.text,
+    state.controls.map(c => [c.role, c.sensitive ? '' : c.label, c.sensitive ? '' : c.value, c.bounds])])).digest('hex');
   let lease: string | undefined, pending: string | undefined, last: ComputerState | undefined, lastAction: ComputerLastAction | undefined, caps: RawCapabilities | undefined;
   const trace: ComputerProgress[] = [];
   const emit = (phase: ComputerProgress['phase'], extra: Partial<ComputerProgress> = {}) => {
@@ -553,17 +567,30 @@ export async function runVisionComputerUse(raw: unknown, deps: VisionDependencie
             if (failed) return result('blocked', failed);
           } else {
             steps++; refusals = 0; previous = 'completed';
-            lastAction = { kind: action.kind, ...(action.kind === 'key_chord' ? { key: action.keys.join('+') } : {}), ...(action.kind === 'scroll' ? { direction: action.dy ? (action.dy > 0 ? 'down' : 'up') : (action.dx! > 0 ? 'right' : 'left') } : {}) };
+            // The owner's line names what was done: the clicked control's label (never a sensitive one) or the opened app.
+            const clicked = action.kind === 'pointer' ? controlAt(seen.state, seen.shot, action.x, action.y) : undefined;
+            const opened = action.kind === 'open' ? seen.state.apps.find(app => app.id === action.appId) : undefined;
+            lastAction = { kind: action.kind, ...(clicked && !clicked.sensitive && clicked.label ? { label: clicked.label.slice(0, 200), role: clicked.role } : {}), ...(action.kind === 'open' ? { appId: action.appId, ...(opened ? { appName: opened.name.slice(0, 200) } : {}) } : {}),
+              ...(action.kind === 'key_chord' ? { key: action.keys.join('+') } : {}), ...(action.kind === 'scroll' ? { direction: action.dy ? (action.dy > 0 ? 'down' : 'up') : (action.dx! > 0 ? 'right' : 'left') } : {}) };
+            turnStart ??= digest(seen.state, seen.shot);
+            const target = action.kind === 'scroll' || action.kind === 'key_chord' ? undefined : describeVisionAction(action, seen.state, seen.shot).target;
             emit('acted', { ...summary, operationId, outcome: 'completed', elapsedMs: Date.now() - started });
             // A decision under way (select-all done, typing next) is finished first: stopping between its actions
             // could leave a field's text selected for whatever comes next. Its actions are bounded and each is judged.
-            if (!turn.continues && (steps >= input.maxSteps || input.yieldAfterAction)) {
+            if (!turn.continues && ((input.maxSteps !== undefined && steps >= input.maxSteps) || input.yieldAfterAction)) {
               try { await observe(); await deps.screenshot(last!, runSignal); } catch { check(); checkInterruption(deps.interruptSignal); emit('waiting', { reason: 'GOAL_EVIDENCE_UNAVAILABLE' }); }
               // The agent decides the next step on the new screen, as after an Accessibility action.
               return input.yieldAfterAction ? result('needs_input', 'COMMAND_WAITING_INPUT') : result('blocked', 'STEP_LIMIT');
             }
             const failed = await fresh(use, 'Done. This is the window after the action.', false);
             if (failed) return result('blocked', failed);
+            // Pod-jinawong r10, task 457a4930: vision typed BOMEUSDT into the same field again. With no action limit, a
+            // run that stopped moving pauses for the user instead of running out its round time.
+            if (!turn.continues) {
+              unchanged = digest(seen.state, seen.shot) === turnStart ? unchanged + 1 : 0; turnStart = undefined;
+              repeated = target !== undefined && target === lastTarget ? repeated + 1 : 1; lastTarget = target;
+              if (unchanged >= NO_PROGRESS_ACTIONS || repeated >= NO_PROGRESS_ACTIONS) { emit('waiting', { reason: 'NO_PROGRESS' }); return result('needs_input', 'NO_PROGRESS'); }
+            }
           }
         }
       }

@@ -42,7 +42,11 @@ export interface ComputerTaskReport {status:string;reason:string;steps:number;ev
  /** The relay confirmed the device session ended with this round (a reached goal). */
  accessReleased?:boolean;
  /** The round's last observation was withheld: a protected app (such as GetPod) was frontmost. */
- screenWithheld?:boolean}
+ screenWithheld?:boolean;
+ /** The last approved application the task worked in: the next round opens it again if a protected app is in front. */
+ targetApp?:{id:string;name:string};
+ /** How long the round ran, for "Paused after N minutes of work". */
+ durationMs?:number}
 export type WorkerOutcome = ({type: 'completed'; result: TaskResult} | {type: 'paused' | 'stopped' | 'failed' | 'unknown'; failure?: TaskFailure; providerRefusals?: import('../session/provider-refusal').ProviderRefusal[]}) & {computerReport?:ComputerTaskReport;browserReport?: import('../jev/browser-contract').BrowserTaskReport};
 export interface TaskResult {
   summary: string;

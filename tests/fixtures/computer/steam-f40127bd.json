@@ -1,0 +1,343 @@
+{
+ "source": "pod-jinawong task f40127bd (2026-11-04 02:36Z, gateway r10 b38237c0): the recorded round receipt; screenshot, operation ids and timestamps removed, the app catalogue trimmed, download names and the profile name replaced.",
+ "command": "open store.steampowered.com in Chrome",
+ "trace": [
+  {
+   "phase": "observing",
+   "sequence": 1,
+   "round": 1,
+   "revision": 1,
+   "steps": 0,
+   "evaluations": 0
+  },
+  {
+   "elapsedMs": 611,
+   "phase": "observed",
+   "sequence": 2,
+   "round": 1,
+   "revision": 1,
+   "steps": 0,
+   "evaluations": 0
+  },
+  {
+   "application": "unapproved",
+   "appId": "com.google.Chrome",
+   "action": "open",
+   "phase": "decided",
+   "sequence": 3,
+   "round": 1,
+   "revision": 1,
+   "steps": 0,
+   "evaluations": 0
+  },
+  {
+   "application": "unapproved",
+   "appId": "com.google.Chrome",
+   "action": "open",
+   "phase": "acting",
+   "sequence": 4,
+   "round": 1,
+   "revision": 1,
+   "steps": 0,
+   "evaluations": 0
+  },
+  {
+   "application": "unapproved",
+   "appId": "com.google.Chrome",
+   "action": "open",
+   "outcome": "completed",
+   "elapsedMs": 555,
+   "phase": "acted",
+   "sequence": 5,
+   "round": 1,
+   "revision": 1,
+   "steps": 1,
+   "evaluations": 0
+  },
+  {
+   "phase": "observing",
+   "sequence": 6,
+   "round": 2,
+   "revision": 1,
+   "steps": 1,
+   "evaluations": 0
+  },
+  {
+   "application": "unapproved",
+   "appId": "com.google.Chrome",
+   "action": "open",
+   "changed": true,
+   "elapsedMs": 704,
+   "phase": "observed",
+   "sequence": 7,
+   "round": 2,
+   "revision": 1,
+   "steps": 1,
+   "evaluations": 0
+  },
+  {
+   "phase": "observing",
+   "sequence": 8,
+   "round": 3,
+   "revision": 1,
+   "steps": 1,
+   "evaluations": 0
+  },
+  {
+   "elapsedMs": 255,
+   "phase": "observed",
+   "sequence": 9,
+   "round": 3,
+   "revision": 1,
+   "steps": 1,
+   "evaluations": 0
+  },
+  {
+   "application": "com.google.Chrome",
+   "action": "press",
+   "ref": "standard-address-focus",
+   "role": "keyboardShortcut",
+   "phase": "decided",
+   "sequence": 10,
+   "round": 3,
+   "revision": 1,
+   "steps": 1,
+   "evaluations": 0
+  },
+  {
+   "application": "com.google.Chrome",
+   "action": "press",
+   "ref": "standard-address-focus",
+   "role": "keyboardShortcut",
+   "phase": "acting",
+   "sequence": 11,
+   "round": 3,
+   "revision": 1,
+   "steps": 1,
+   "evaluations": 0
+  },
+  {
+   "application": "com.google.Chrome",
+   "action": "press",
+   "ref": "standard-address-focus",
+   "role": "keyboardShortcut",
+   "outcome": "completed",
+   "elapsedMs": 410,
+   "phase": "acted",
+   "sequence": 12,
+   "round": 3,
+   "revision": 1,
+   "steps": 2,
+   "evaluations": 0
+  },
+  {
+   "phase": "observing",
+   "sequence": 13,
+   "round": 4,
+   "revision": 1,
+   "steps": 2,
+   "evaluations": 0
+  },
+  {
+   "application": "com.google.Chrome",
+   "action": "press",
+   "ref": "standard-address-focus",
+   "role": "keyboardShortcut",
+   "changed": true,
+   "elapsedMs": 709,
+   "phase": "observed",
+   "sequence": 14,
+   "round": 4,
+   "revision": 1,
+   "steps": 2,
+   "evaluations": 0
+  },
+  {
+   "application": "com.google.Chrome",
+   "action": "type",
+   "ref": "c0",
+   "role": "AXTextField",
+   "focused": true,
+   "phase": "decided",
+   "sequence": 15,
+   "round": 4,
+   "revision": 1,
+   "steps": 2,
+   "evaluations": 0
+  },
+  {
+   "application": "com.google.Chrome",
+   "action": "type",
+   "ref": "c0",
+   "role": "AXTextField",
+   "focused": true,
+   "phase": "acting",
+   "sequence": 16,
+   "round": 4,
+   "revision": 1,
+   "steps": 2,
+   "evaluations": 0
+  },
+  {
+   "application": "com.google.Chrome",
+   "action": "type",
+   "ref": "c0",
+   "role": "AXTextField",
+   "focused": true,
+   "outcome": "completed",
+   "elapsedMs": 564,
+   "phase": "acted",
+   "sequence": 17,
+   "round": 4,
+   "revision": 1,
+   "steps": 3,
+   "evaluations": 0
+  },
+  {
+   "phase": "observing",
+   "sequence": 18,
+   "round": 5,
+   "revision": 1,
+   "steps": 3,
+   "evaluations": 0
+  },
+  {
+   "application": "com.google.Chrome",
+   "action": "type",
+   "ref": "c0",
+   "role": "AXTextField",
+   "focused": true,
+   "changed": true,
+   "elapsedMs": 690,
+   "phase": "observed",
+   "sequence": 19,
+   "round": 5,
+   "revision": 1,
+   "steps": 3,
+   "evaluations": 0
+  },
+  {
+   "application": "com.google.Chrome",
+   "action": "key",
+   "key": "enter",
+   "role": "AXTextField",
+   "focused": true,
+   "phase": "acting",
+   "sequence": 20,
+   "round": 5,
+   "revision": 1,
+   "steps": 3,
+   "evaluations": 0
+  },
+  {
+   "application": "com.google.Chrome",
+   "action": "key",
+   "key": "enter",
+   "role": "AXTextField",
+   "focused": true,
+   "outcome": "completed",
+   "elapsedMs": 324,
+   "phase": "acted",
+   "sequence": 21,
+   "round": 5,
+   "revision": 1,
+   "steps": 4,
+   "evaluations": 0
+  },
+  {
+   "status": "succeeded",
+   "reason": "GOAL_REACHED",
+   "phase": "terminal",
+   "sequence": 22,
+   "round": 5,
+   "revision": 1,
+   "steps": 4,
+   "evaluations": 0
+  }
+ ],
+ "outcome": "GOAL_REACHED",
+ "preSubmitState": {
+  "contractVersion": 1,
+  "capabilities": {
+   "standardCommands": [
+    "scroll:up",
+    "scroll:down",
+    "close:window",
+    "address:focus",
+    "app:quit",
+    "tab:close",
+    "tab:new"
+   ],
+   "keys": [
+    "backspace",
+    "down",
+    "enter",
+    "escape",
+    "left",
+    "right",
+    "tab",
+    "up"
+   ]
+  },
+  "supportedActions": [
+   "scroll:up",
+   "scroll:down"
+  ],
+  "application": "com.google.Chrome",
+  "windowTitle": "Download History - Google Chrome - Profile",
+  "focusedControl": {
+   "ref": "c0",
+   "role": "AXLink",
+   "label": "installers-macos-arm64 (6).zip"
+  },
+  "truncated": true,
+  "controls": [
+   {
+    "bounds": {
+     "x": 0.3375,
+     "y": 0.141091658084449,
+     "width": 0.33958333333333335,
+     "height": 0.02368692070030896
+    },
+    "ref": "c1",
+    "label": "Search download history",
+    "role": "AXTextField",
+    "value": "",
+    "focused": false,
+    "actions": [
+     "press",
+     "type"
+    ]
+   },
+   {
+    "bounds": {
+     "x": 0.95,
+     "y": 0.1349124613800206,
+     "width": 0.04375,
+     "height": 0.037075180226570546
+    },
+    "ref": "c3",
+    "label": "Clear all",
+    "role": "AXButton",
+    "focused": false,
+    "actions": [
+     "press"
+    ]
+   }
+  ],
+  "apps": [
+   {
+    "id": "com.apple.finder",
+    "name": "Finder"
+   },
+   {
+    "id": "ai.getpod.app",
+    "name": "GetPod"
+   },
+   {
+    "id": "com.google.Chrome",
+    "name": "Google Chrome"
+   }
+  ]
+ }
+}

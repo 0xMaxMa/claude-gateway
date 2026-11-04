@@ -49,6 +49,10 @@ export function agentGoalRun(task: Omit<TaskSnapshot,'skill'>): boolean {
 /** agentGoalRun as a trusted SQL fragment over a tasks row alias; a parity test keeps them equal. */
 export const agentGoalRunSql=(alias:string)=>`(json_extract(${alias}.snapshot_json,'$.automationController')='user' AND json_extract(${alias}.snapshot_json,'$.revision')=1
   AND COALESCE(json_extract(${alias}.snapshot_json,'$.executionControl.revision'),0)!=1)`;
+/** A goal round that paused on its own and waits for the user's reply, which resumes its goal: its actions stopped
+ * changing the screen (NO_PROGRESS) or its round time ran out (ROUND_TIME_LIMIT). Not a parked run the agent is woken for:
+ * the user decides whether it goes on (there is no action limit). */
+export const ROUND_PAUSES=['NO_PROGRESS','ROUND_TIME_LIMIT'];
 /** Reasons a settled round waits for the owner's next direct command (pausedForCommand). */
 const WAITING_FOR_COMMAND=['THINKING_WAITING_INPUT','COMMAND_WAITING_INPUT','COMPLETION_CANDIDATE','VERIFICATION_FAILED'];
 /** The agent's goal run parked in waiting_input with no question pending for the
@@ -120,7 +124,7 @@ export function expiredWaitingRound(task: Omit<TaskSnapshot,'skill'>): boolean {
 }
 /** The task waits for the owner's next direct command (a settled or paused round). */
 export function pausedForCommand(task: TaskSnapshot): boolean {
-  return task.state==='waiting_input'&&!task.activeAttemptId&&(task.executionControl?.phase==='paused'||['THINKING_WAITING_INPUT','COMMAND_WAITING_INPUT','COMPLETION_CANDIDATE','VERIFICATION_FAILED'].includes(task.computerReport?.reason??task.browserReport?.reason??''));
+  return task.state==='waiting_input'&&!task.activeAttemptId&&(task.executionControl?.phase==='paused'||[...WAITING_FOR_COMMAND,...ROUND_PAUSES].includes(task.computerReport?.reason??task.browserReport?.reason??''));
 }
 /**
  * A settled round the owner's next command replaces: finished, failed or

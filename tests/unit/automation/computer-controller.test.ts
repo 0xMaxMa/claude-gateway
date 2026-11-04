@@ -232,7 +232,9 @@ test('alternating navigation and clicks are detected despite volatile page text'
  f.deps.evaluate=async req=>({answers:{action:choiceFor(req.questions.action.criteria,n++%2===0?'press:c1':'navigate:back')}});
  (f.deps as any).decideAction=async()=>{thinking++;return {action:null,text:null};};
  const r=await runComputerUse({goal:'Find the requested result'},f.deps,new AbortController().signal);
- assert.equal(r.steps,4);assert.equal(thinking,0);assert.equal(r.reason,'COMMAND_WAITING_INPUT');
+ assert.equal(r.steps,4);assert.equal(thinking,0);
+ // The loop is a stop for no progress (r11): the round pauses for the user under its own reason.
+ assert.equal(r.status,'needs_input');assert.equal(r.reason,'NO_PROGRESS');assert.ok(r.trace.events.some(e=>e.phase==='waiting'&&e.reason==='NO_PROGRESS'));
 });
 test('follow-up Enter uses one key action and shares continuation semantics with both questions',async()=>{
  const f=fixture(['key:enter','DONE']);const evaluate=f.deps.evaluate;

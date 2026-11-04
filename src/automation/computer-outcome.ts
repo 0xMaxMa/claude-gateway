@@ -25,6 +25,8 @@ const HINTS:Record<string,string>={
  RAW_INPUT_REQUIRED:'this app shows no controls Computer Use can read, so it has to work from the screen with the mouse and keyboard. Turn on "Allow mouse and keyboard control" in GetPod\'s Computer Use settings, then send the command again.',
  RAW_INPUT_UNAVAILABLE:'this app shows no controls Computer Use can read, and mouse and keyboard control is not available on this computer yet.',
  SCREEN_CAPTURE_REQUIRED:'this app shows no controls Computer Use can read, and its window could not be captured to work from the screen. Check the Screen Recording permission for GetPod, then send the command again.',
+ APPLICATION_LAUNCH_UNCONFIRMED:'the computer did not confirm that the app opened. Check that it is in front, then send the command again.',
+ ADDRESS_NOT_SHOWN:'the page in front does not show the web address yet. Check the browser, then send the command again.',
 };
 /** Stop codes as one plain sentence for the owner (the card) and for the agent to pass on. A code not listed here is
  * still never shown raw: the owner reads a generic line, and the agent's message keeps the code for diagnosis. */
@@ -36,7 +38,17 @@ const REASONS:Record<string,string>={
  APPLICATION_NOT_APPROVED:'The app in front is not approved for Computer Use.',
  APPLICATION_PROTECTED:'The screen was hidden because a protected app such as GetPod was in front.',
  NO_SUPPORTED_ACTION:'No control on the screen matched the request.',
- STEP_LIMIT:'It reached the action limit for one task.',
+ STEP_LIMIT:'It reached the action limit it was given.',
+ NO_PROGRESS:'Its last actions did not change the screen.',
+ ROUND_TIME_LIMIT:'It used up its time for one round.',
+ COMMAND_WAITING_INPUT:'It stopped before finishing.',
+ THINKING_WAITING_INPUT:'It stopped before finishing.',
+ LOW_CONFIDENCE:'The next step was unclear from the screen.',
+ COMPLETION_UNCERTAIN:'The goal may already be done, but the screen was not clear enough to say.',
+ COMPLETION_CANDIDATE:'The goal may be done, but it was not confirmed.',
+ VERIFICATION_FAILED:'The result could not be confirmed on the screen.',
+ APPLICATION_LAUNCH_UNCONFIRMED:'The computer did not confirm that the app opened.',
+ ADDRESS_NOT_SHOWN:'The page in front does not show the web address yet.',
  LOOP_CYCLE_BUDGET:'It took too many turns without finishing.',
  TIMEOUT:'It ran out of time.',
  CANCELLED:'It was stopped.',
@@ -92,11 +104,17 @@ export function computerProgressText(report:ComputerTaskReport):string{
  const actions=plural(report.steps,'action');
  if(report.phase!=='terminal')return `Computer Use · ${PHASE_LABELS[report.phase??'']??'Working'} · ${actions} so far`;
  if(report.status==='succeeded')return `Done after ${actions}.`;
+ const paused=pausedText(report);if(paused)return paused;
  const stop=computerReasonText(report.reason)!;
  // The last action the computer refused names the cause when the stop itself is generic (the model gave up after it).
  const refused=[...(report.trace??[])].reverse().find(e=>e.phase==='acted'&&e.outcome==='not_executed'&&e.reason)?.reason;
  const before=refused&&REASONS[refused]&&REASONS[refused]!==stop?` Before that, ${REASONS[refused][0].toLowerCase()}${REASONS[refused].slice(1)}`:'';
  return `Stopped after ${actions}. ${stop}${before}`;
+}
+/** A goal round that paused on its own (ROUND_PAUSES): the user's reply resumes it. */
+function pausedText(report:ComputerTaskReport):string|undefined{
+ if(report.reason==='NO_PROGRESS')return 'Paused: the last 3 actions didn\'t change the screen. Reply to continue.';
+ if(report.reason==='ROUND_TIME_LIMIT')return `Paused after ${plural(Math.max(1,Math.round((report.durationMs??0)/60000)),'minute')} of work. Reply to continue.`;
 }
 /** A round whose last dispatched action has no receipt; it may have run. */
 export const UNKNOWN_PREFIX='Unknown:';
@@ -109,7 +127,11 @@ export function computerActionText(action:NonNullable<ComputerTaskReport['lastAc
   case 'key':return `pressed the ${action.key??''} key`.replace('  ',' ');
   case 'scroll':return `scrolled ${action.direction??''}`.trim();
   case 'navigate':return `went ${action.direction??'back'}`;
-  case 'open':return `opened ${action.appId??'the application'}`;
+  case 'open':return `opened ${action.appName??action.appId??'the application'}`;
+  // Vision actions: a click on what was there, a key chord, typed text.
+  case 'pointer':return action.label?`clicked ${quoted(action.label)}`:'clicked on the screen';
+  case 'key_chord':return `pressed ${action.key??'a key'}`;
+  case 'type_focused':return 'typed text';
   default:return 'completed the action';
  }
 }
@@ -152,12 +174,13 @@ export function computerRoundDone(report:ComputerTaskReport):boolean{
 }
 /** Said when a round that did not finish last saw a withheld screen (report.screenWithheld). */
 const WITHHELD_HINT='The screen was hidden because a protected app such as GetPod was in front.';
+const withheldHint=(report:ComputerTaskReport)=>report.targetApp?`${WITHHELD_HINT} The next command switches back to ${report.targetApp.name.slice(0,80)} first.`:WITHHELD_HINT;
 export function computerOutcomeText(report:ComputerTaskReport,context:{handedOff?:boolean}={}):string{
  const text=outcomeText(report,context);
  if(!report.screenWithheld||text.startsWith('Done')||report.stepRun?.stopReason==='ALL_STEPS_DONE')return text;
  // A step run's raw codes stay on its last "Details:" line.
  const details=text.lastIndexOf('\nDetails:');
- return details<0?`${text} ${WITHHELD_HINT}`:`${text.slice(0,details)} ${WITHHELD_HINT}${text.slice(details)}`;
+ return details<0?`${text} ${withheldHint(report)}`:`${text.slice(0,details)} ${withheldHint(report)}${text.slice(details)}`;
 }
 function outcomeText(report:ComputerTaskReport,context:{handedOff?:boolean}):string{
  const run=report.stepRun;
@@ -167,6 +190,7 @@ function outcomeText(report:ComputerTaskReport,context:{handedOff?:boolean}):str
  const waiting=['GOAL_REACHED','STEP_LIMIT'].includes(report.reason)?report.reason:[...trace].reverse().find(e=>e.phase==='waiting'&&e.reason!=='POST_ACTION_EVIDENCE_STALE')?.reason;
  // The device may have acted: never tell the owner it was not done.
  if(report.reason==='OUTCOME_UNKNOWN')return `${UNKNOWN_PREFIX} the last action may have run. Check the screen before sending the command again.`;
+ const paused=pausedText(report);if(paused)return paused;
  if(waiting==='SESSION_READY'&&!report.steps)return 'Ready: the session is open and waits for the next command.';
  if(waiting==='READ_REQUEST'&&!report.steps)return 'Read request: nothing was pressed; the assistant answers from the current screen.';
  // A spoken number stopped part-way: say how far it got, never "Done".
@@ -174,8 +198,8 @@ function outcomeText(report:ComputerTaskReport,context:{handedOff?:boolean}):str
  if(sequence&&planned&&sequence.length<planned)return `Not done: pressed ${sequence.length} of ${planned} (${sequence.map(label=>quoted(label)).join(', ')}), then stopped${waiting&&HINTS[waiting]?`: ${hint(waiting,report)}`:'.'}`;
  // A goal run took several actions: say how it ended, never "Done" for a stop.
  const actions=`${report.steps} action${report.steps===1?'':'s'}`;
- if(waiting==='GOAL_REACHED'&&report.steps>0)return `Done: ${actions}, last ${report.lastAction&&!report.lastAction.blocked?computerActionText(report.lastAction):'the action was sent'}.${report.accessReleased?' Computer access was released.':' Send the next command.'}`;
- if(waiting==='STEP_LIMIT'&&report.steps>0)return `Not finished: stopped after ${actions}, the limit for one goal. Check the screen and send the next command.`;
+ if(waiting==='GOAL_REACHED'&&report.steps>0)return `Done after ${actions}. Last: ${report.lastAction&&!report.lastAction.blocked?computerActionText(report.lastAction):'the action was sent'}.${report.accessReleased?' Computer access was released.':' Send the next command.'}`;
+ if(waiting==='STEP_LIMIT'&&report.steps>0)return `Not finished: stopped after ${actions}, the action limit it was given. Check the screen and send the next command.`;
  if(waiting==='COMPLETION_UNCERTAIN'&&report.steps>0)return `Not confirmed: ${actions} done, and the goal may already be complete, but the screen was not clear enough to say. Check the screen, then send the next command.`;
  if(waiting==='LOW_CONFIDENCE'&&report.steps>0)return `Not finished: ${actions} done, then the next step was unclear from the screen. Say what to do next.`;
  // One action, then a stop after it, is not done either. Pod-jinawong r8, task b0ba459d: a goal run
@@ -187,8 +211,15 @@ function outcomeText(report:ComputerTaskReport,context:{handedOff?:boolean}):str
  if(['blocked','failed','cancelled'].includes(report.status)&&report.steps>0)return `Not finished: ${actions} done, then it stopped. ${computerReasonText(report.reason)}`;
  if(report.lastAction&&!report.lastAction.blocked&&report.steps>0)return `Done: ${computerActionText(report.lastAction)}. Send the next command.`;
  if(report.steps>0)return 'Done: the action was sent. Send the next command.';
+ // An open the computer never confirmed names the app (pod-jinawong r10, task 457a4930 rev3: TradingView's open).
+ if(waiting==='APPLICATION_LAUNCH_UNCONFIRMED'){
+  const id=[...trace].reverse().find(e=>e.action==='open'&&e.appId)?.appId,name=id&&report.targetApp?.id===id?report.targetApp.name:id;
+  if(name)return `Not done: opening ${name.slice(0,80)} was not confirmed by the computer.`;
+ }
  if(waiting&&HINTS[waiting])return `Not done: ${hint(waiting,report)}`;
- return `Not done: ${waiting??report.reason}. Send the next command.`;
+ // Never a raw code on the card: the reason's own sentence (pod-jinawong r10, task 457a4930: "Not done: COMMAND_WAITING_INPUT").
+ const reason=computerReasonText(waiting&&waiting!=='COMMAND_WAITING_INPUT'?waiting:report.reason)!;
+ return `Not done: ${reason[0].toLowerCase()}${reason.slice(1)} Send the next command.`;
 }
 function hint(reason:string,report:ComputerTaskReport){
  return HINTS[reason].replace('{target}',quoted(report.lastAction?.label));

@@ -1,5 +1,5 @@
 import {mkdtempSync,rmSync} from 'fs';import {tmpdir} from 'os';import {join} from 'path';
-import {ComputerTaskAdapter,COMPUTER_GOAL_MAX_STEPS} from '../../../src/orchestration/gateway-tasks/computer';
+import {ComputerTaskAdapter} from '../../../src/orchestration/gateway-tasks/computer';
 import {withComputerConnection} from '../../../src/jev/computer-connector';
 import {computerOutcomeText,computerProgressText} from '../../../src/automation/computer-outcome';
 import {visionRequestProblems} from '../../helpers/vision-request-shape';
@@ -37,7 +37,7 @@ test('no control over Accessibility: the rest of the goal runs from the screensh
  const f=fixture(fallbackOnly);try{
   runComputerUse.mockImplementationOnce(stuck);
   runVisionComputerUse.mockImplementationOnce(async(input:any)=>{
-   expect(input).toMatchObject({goal:'play bodyslam on Spotify',maxSteps:COMPUTER_GOAL_MAX_STEPS-1,impact:true,yieldAfterAction:false,literalText:true,approvedOnly:true});
+   expect(input).toMatchObject({goal:'play bodyslam on Spotify',impact:true,yieldAfterAction:false,literalText:true,approvedOnly:true});expect(input.maxSteps).toBeUndefined();
    expect(input.interactionContext).toContain('Accessibility already took 1 action');
    expect(input.interactionContext).toContain('opened com.spotify.client');
    return REACHED;
@@ -194,5 +194,68 @@ test('6cdca7c6 replay: the refusal is answered in a valid request, counts contin
   expect(computerOutcomeText(outcome.computerReport)).not.toMatch(/^Done/);
   expect(computerProgressText(outcome.computerReport)).toBe("Stopped after 3 actions. The model found no way to finish on the screen. Before that, the app didn't accept typing: no text field had keyboard focus.");
   expect(outcome.failure.message).toMatch(/^Computer work stopped after 3 desktop actions: The model found no way to finish on the screen\. Tell the user this sentence, not the code\. Code for diagnosis: VISION_OTHER\./);
+ }finally{await adapter.close();rmSync(root,{recursive:true,force:true});runComputerUse.mockReset();runVisionComputerUse.mockReset();}
+});
+
+// Pod-jinawong r10, task 457a4930 rev1 (tests/fixtures/computer/tradingview-457a4930.json): Accessibility opened TradingView,
+// pressed the symbol button and typed BOMEUSDT, then found no control (BLOCKED); vision pressed four times and typed again,
+// and the round hit the 8-action cap one click short of the chart: "Failed". With no action limit (r11) the same round
+// clicks the first result and reaches the goal at 9 actions. Both real loops run against a scripted Mac and models.
+test('457a4930 replay: no action cap, the round reaches the chart at 9 actions',async()=>{
+ const recorded=require('../../fixtures/computer/tradingview-457a4930.json');
+ expect(recorded.rev1.outcome).toBe('STEP_LIMIT');
+ expect(recorded.rev1.trace.filter((e:any)=>e.phase==='acted').length).toBe(8);
+ const root=mkdtempSync(join(tmpdir(),'computer-tradingview-replay-'));
+ const actual=jest.requireActual('../../../src/automation/computer-use'),actualVision=jest.requireActual('../../../src/automation/vision-decider');
+ runComputerUse.mockReset();runVisionComputerUse.mockReset();
+ runComputerUse.mockImplementation(actual.runComputerUse);runVisionComputerUse.mockImplementation(actualVision.runVisionComputerUse);
+ const window=recorded.rev1.finalState,TV='com.tradingview.tradingviewapp.desktop';
+ let front='unapproved',generation=0,acted=0;
+ const observe=()=>front==='unapproved'?{...recorded.rev3.state,generation:'g'+(++generation)}
+  :{...window,generation:'g'+(++generation),screenshotAvailable:true,capabilities:{...window.capabilities,...RAW_CAPS},windowTitle:acted>=9?'BOMEUSDT / Unnamed':window.windowTitle,
+   controls:[...window.controls,{ref:'c56',role:'AXButton',label:'Symbol search',actions:['press']}]};
+ const actions:any[]=[];
+ const reply=(body:unknown)=>({content:[{type:'text',text:JSON.stringify(body)}]});
+ const callTool=jest.fn(async({name,arguments:args}:{name:string;arguments:any})=>{
+  if(name==='computer_acquire')return reply({lease_token:'lease'});
+  if(name==='computer_observe')return reply(observe());
+  // Every action changes the window: a different capture each time (no stall).
+  if(name==='computer_screenshot')return reply({generation:args.generation,mimeType:'image/jpeg',data:'/9j/'+args.generation,capturedAt:1,width:1280,height:800});
+  if(name==='computer_action'){actions.push(args);acted++;if(args.kind==='open')front=args.app_id;return reply({state:'completed',operation_id:args.operation_id});}
+  return reply(name==='computer_end_session'?{state:'stopped'}:{state:'approved'});
+ });
+ jest.mocked(withComputerConnection).mockImplementation(async(_c,fn)=>fn({callTool} as any));
+ const connectors={get:()=>({connectorId:'c',scope:{device_id:'d',grant_id:'g'}}),connection:()=>({endpoint:'https://computer.example/mcp',headers:{}})};
+ // Accessibility as recorded: open TradingView 0.95, press the symbol button 0.85, type into the symbol field 0.95, BLOCKED 0.95.
+ const ax=[{action:'open',target:'open:'+TV},{action:'press',target:'press:c56'},{action:'type',target:'type:c0',text:'BOMEUSDT'},{action:'BLOCKED'}];
+ let axAsked=0;
+ const evaluate=jest.fn(async(_t:any,request:any)=>{
+  const answers:Record<string,unknown>={};const step=request.questions.action?ax[axAsked++]:undefined;
+  for(const [id,q] of Object.entries<any>(request.questions)){
+   const keys=Object.keys(q.criteria);
+   if(id==='action')answers[id]=choose(q.criteria,step!.action,0.95);
+   else if(id==='impact')answers[id]=choose(q.criteria,'ROUTINE',0.9);
+   else if(id.startsWith('target_'))answers[id]=choose(q.criteria,step?.target&&keys.includes(step.target)?step.target:'BLOCKED',0.95);
+   else if(id.startsWith('text'))answers[id]=choose(q.criteria,keys.find(k=>q.criteria[k].includes('BOMEUSDT'))??keys[0],0.95);
+   else answers[id]=choose(q.criteria,keys[0],0.9);
+  }
+  return {answers};
+ });
+ // Vision as recorded (four presses, BOMEUSDT typed again), then the first result clicked and the chart judged done.
+ const script=[...[0,1,2,3].map(i=>({name:'left_click',input:{coordinate:[200+i*40,120]}})),{name:'type',input:{text:'BOMEUSDT'}},{name:'left_click',input:{coordinate:[420,240]}},{name:'finish',input:{outcome:'done'}}];
+ let turns=0;
+ const decide=jest.fn(async()=>{const step=script[turns++];return {content:[{type:'tool_use',id:'v'+turns,name:step.name,input:step.input,...(step.name==='finish'?{}:{toolset_name:'computer'})}],stopReason:'tool_use'};});
+ const adapter=new ComputerTaskAdapter({agentId:'a',root,connectors:connectors as any,allowed:()=>true,member:()=>true,active:()=>true,evaluate,needsInput:()=>true,
+  vision:(use?:string)=>use==='fallback'?{mode:'vision',decide:()=>decide}:undefined} as any);
+ const task={agentId:'a',taskId:'t',ownerPrincipalId:'p',conversationId:'c',revision:1,automationController:'user',gatewayTarget:{adapter:'computer',sessionId:'target'}} as any;
+ try{
+  await adapter.submit(task,'r1',recorded.rev1.command);
+  let outcome:any;
+  for(let i=0;i<500&&typeof outcome!=='object';i++){outcome=await adapter.inspect(task,'r1');if(typeof outcome!=='object')await new Promise(r=>setTimeout(r,2));}
+  expect(typeof outcome).toBe('object');
+  expect(actions.map(a=>a.kind==='open'?'open':a.kind)).toEqual(['open','press','type','pointer','pointer','pointer','pointer','type_focused','pointer']);
+  expect(outcome.type).toBe('completed');
+  expect(outcome.computerReport).toMatchObject({status:'succeeded',reason:'GOAL_REACHED',steps:9});
+  expect(computerOutcomeText(outcome.computerReport)).toMatch(/^Done after 9 actions\. Last: clicked/);
  }finally{await adapter.close();rmSync(root,{recursive:true,force:true});runComputerUse.mockReset();runVisionComputerUse.mockReset();}
 });

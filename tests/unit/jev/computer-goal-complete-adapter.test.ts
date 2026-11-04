@@ -1,5 +1,5 @@
 import {mkdtempSync,rmSync} from 'fs';import {tmpdir} from 'os';import {join} from 'path';
-import {ComputerTaskAdapter,COMPUTER_GOAL_MAX_STEPS} from '../../../src/orchestration/gateway-tasks/computer';
+import {ComputerTaskAdapter} from '../../../src/orchestration/gateway-tasks/computer';
 import {withComputerConnection} from '../../../src/jev/computer-connector';
 jest.mock('../../../src/jev/computer-connector',()=>({withComputerConnection:jest.fn()}));
 jest.mock('../../../src/automation/computer-use',()=>({runComputerUse:jest.fn()}));
@@ -25,10 +25,11 @@ test('a reached goal completes and ends the device session',async()=>{
  const f=fixture();try{
   runComputerUse.mockImplementationOnce(async()=>({status:'succeeded',reason:'GOAL_REACHED',steps:3,evaluations:0,lastAction:{kind:'key',key:'enter'}}));
   const outcome=await f.run(f.task,'r1','open YouTube in Chrome');
-  expect(runComputerUse.mock.calls[0][0]).toMatchObject({sessionStart:true,runToGoal:true,maxSteps:COMPUTER_GOAL_MAX_STEPS});
+  // No action limit (r11): the round's time and the no-progress check end a goal run.
+  expect(runComputerUse.mock.calls[0][0]).toMatchObject({sessionStart:true,runToGoal:true});expect(runComputerUse.mock.calls[0][0].maxSteps).toBeUndefined();
   expect(outcome.type).toBe('completed');
   expect(outcome.computerReport).toMatchObject({status:'succeeded',reason:'GOAL_REACHED',accessReleased:true});
-  expect(outcome.result.summary).toContain('Done: 3 actions, last pressed the enter key.');
+  expect(outcome.result.summary).toContain('Done after 3 actions. Last: pressed the enter key.');
   expect(outcome.result.summary).toContain('not independently verified');
   expect(outcome.result.summary).toContain('Computer access was released.');
   expect(f.ended()).toEqual([[{name:'computer_end_session',arguments:{device_id:'d',grant_id:'g'}},undefined,expect.anything()]]);
@@ -44,12 +45,12 @@ test('a reached goal still completes when the relay does not confirm the end of 
  }finally{await f.close();}
 });
 
-test('a goal out of steps fails with a clear code and keeps the session',async()=>{
+test('a run given an action limit still fails at it with a clear code and keeps the session',async()=>{
  const f=fixture();try{
   runComputerUse.mockImplementationOnce(async()=>({status:'blocked',reason:'STEP_LIMIT',steps:8,evaluations:8}));
   const outcome=await f.run(f.task,'r1','make notes');
   expect(outcome.type).toBe('failed');expect(outcome.failure.code).toBe('COMPUTER_STEP_LIMIT');
-  expect(outcome.failure.message).toContain(`stopped after 8 desktop actions, the limit for one goal (${COMPUTER_GOAL_MAX_STEPS})`);
+  expect(outcome.failure.message).toContain('stopped after 8 desktop actions, the action limit this run was given');
   // Owner-facing sentences first, then a separate agent-only instruction.
   const [owner,agent]=outcome.failure.message.split(' Agent: ');
   expect(owner).toMatch(/^Computer goal not finished: stopped after 8 desktop actions/);
@@ -77,12 +78,12 @@ test('a yes to the goal\'s high-impact step resumes the goal, and the context ke
   runComputerUse.mockImplementationOnce(async(_input:any,deps:any)=>{deps.confirmed('YES');observe(deps);await deps.beforeMutation('op-1',{});return {status:'needs_input',reason:'COMMAND_WAITING_INPUT',steps:1,evaluations:2,lastAction:{kind:'press',label:'Share',blocked:true,confirm:true}};});
   const reply={...f.task,revision:2,executionControl:{revision:2}};
   await f.run(reply,'r2','ใช่');
-  expect(runComputerUse.mock.calls[1][0]).toMatchObject({goal:'ใช่',confirmation:{command:'clean up my notes',label:'Delete',target:'a'.repeat(32)},resumeGoal:COMPUTER_GOAL_MAX_STEPS});
+  expect(runComputerUse.mock.calls[1][0]).toMatchObject({goal:'ใช่',confirmation:{command:'clean up my notes',label:'Delete',target:'a'.repeat(32)},resumeGoal:true});
   // A second question in the resumed goal is about the goal, not about the reply "ใช่".
   runComputerUse.mockImplementationOnce(async()=>({status:'needs_input',reason:'COMMAND_WAITING_INPUT',steps:0,evaluations:1}));
   const again={...f.task,revision:3,executionControl:{revision:3}};
   await f.run(again,'r3','yes');
-  expect(runComputerUse.mock.calls[2][0]).toMatchObject({confirmation:{command:'clean up my notes',label:'Share'},resumeGoal:COMPUTER_GOAL_MAX_STEPS});
+  expect(runComputerUse.mock.calls[2][0]).toMatchObject({confirmation:{command:'clean up my notes',label:'Share'},resumeGoal:true});
  }finally{await f.close();}
 });
 
@@ -98,9 +99,9 @@ test('a yes to the agent\'s hand-off command resumes it as a goal',async()=>{
   runComputerUse.mockImplementationOnce(async()=>({status:'needs_input',reason:'COMMAND_WAITING_INPUT',steps:1,evaluations:2}));
   const reply={...f.task,revision:3,executionControl:{revision:3}};
   await f.run(reply,'r3','ใช่');
-  expect(runComputerUse.mock.calls[1][0]).toMatchObject({agentCommand:true,runToGoal:true,maxSteps:COMPUTER_GOAL_MAX_STEPS});
+  expect(runComputerUse.mock.calls[1][0]).toMatchObject({agentCommand:true,runToGoal:true});expect(runComputerUse.mock.calls[1][0].maxSteps).toBeUndefined();
   expect(runComputerUse.mock.calls[2][0].confirmation).toEqual({command:'quit chrome',label:'Quit Google Chrome'});
-  expect(runComputerUse.mock.calls[2][0].resumeGoal).toBe(COMPUTER_GOAL_MAX_STEPS);
+  expect(runComputerUse.mock.calls[2][0].resumeGoal).toBe(true);
  }finally{await f.close();}
 });
 
@@ -185,4 +186,52 @@ describe('endSession for an idle settled round',()=>{
    expect(await f.adapter.endSession(dispatched(f.task,'r2'),'r1')).toBeUndefined();expect(f.ended()).toHaveLength(0);
   }finally{await f.close();}
  });
+});
+
+// r11 G3/G4: with no action limit, a goal round ends on its own clock or when it stops moving. Neither is a failure:
+// the round pauses, the card says why in plain words, and the user's reply resumes the same goal.
+describe('a goal round that pauses on its own',()=>{
+ test('a round out of time pauses (ROUND_TIME_LIMIT), not failed, and keeps the session',async()=>{
+  const f=fixture();try{
+   runComputerUse.mockImplementationOnce(async(_input:any,deps:any)=>{observe(deps);return {status:'blocked',reason:'TIMEOUT',steps:6,evaluations:9};});
+   const outcome=await f.run(f.task,'r1','open the BOME chart');
+   expect(outcome.type).toBe('paused');expect(outcome.failure).toBeUndefined();
+   expect(outcome.computerReport).toMatchObject({status:'needs_input',reason:'ROUND_TIME_LIMIT',steps:6});
+   expect(f.ended()).toHaveLength(0);
+  }finally{await f.close();}
+ });
+ test('a round that stopped moving pauses (NO_PROGRESS)',async()=>{
+  const f=fixture();try{
+   runComputerUse.mockImplementationOnce(async(_input:any,deps:any)=>{observe(deps);return {status:'needs_input',reason:'NO_PROGRESS',steps:5,evaluations:7,trace:{events:[{phase:'waiting',reason:'NO_PROGRESS'}],truncated:false}};});
+   const outcome=await f.run(f.task,'r1','open the BOME chart');
+   expect(outcome.type).toBe('paused');expect(outcome.computerReport.reason).toBe('NO_PROGRESS');
+  }finally{await f.close();}
+ });
+ test('the user\'s reply resumes the paused goal as a goal, with the reply as its latest word',async()=>{
+  const f=fixture();try{
+   runComputerUse.mockImplementationOnce(async(_input:any,deps:any)=>{observe(deps);return {status:'needs_input',reason:'NO_PROGRESS',steps:5,evaluations:7};});
+   await f.run(f.task,'r1','open the BOME chart on TradingView');
+   runComputerUse.mockImplementationOnce(async()=>({status:'succeeded',reason:'GOAL_REACHED',steps:1,evaluations:2}));
+   await f.run({...f.task,revision:2,executionControl:{revision:2}},'r2','ทำต่อ');
+   const input=runComputerUse.mock.calls[1][0];
+   expect(input).toMatchObject({runToGoal:true,readRequest:false});expect(input.maxSteps).toBeUndefined();
+   expect(input.goal).toContain('open the BOME chart on TradingView');expect(input.goal).toContain('ทำต่อ');
+   // Resumed once: a further command after a round that did not pause is the user's own command again.
+   runComputerUse.mockImplementationOnce(async()=>({status:'needs_input',reason:'COMMAND_WAITING_INPUT',steps:0,evaluations:1}));
+   await f.run({...f.task,revision:3,executionControl:{revision:3}},'r3','scroll down');
+   expect(runComputerUse.mock.calls[2][0]).toMatchObject({goal:'scroll down',readRequest:true});
+  }finally{await f.close();}
+ });
+});
+
+// r11 F3: a goal its fast path reached was never judged by a model; G5: one log line per round.
+test('a goal reached with no model call does not claim a model judged it, and the round logs its cost',async()=>{
+ const f=fixture();const info=jest.spyOn(console,'info').mockImplementation(()=>{});try{
+  runComputerUse.mockImplementationOnce(async()=>({status:'succeeded',reason:'GOAL_REACHED',steps:4,evaluations:0,lastAction:{kind:'key',key:'enter'}}));
+  const outcome=await f.run(f.task,'r1','open store.steampowered.com in Chrome');
+  expect(outcome.result.summary).not.toContain('decision model');expect(outcome.result.summary).toContain('not independently verified');
+  const line=info.mock.calls.map(([text])=>JSON.parse(String(text))).find(entry=>entry.event==='computer_round');
+  expect(line).toMatchObject({taskId:'t',actions:4,modelCalls:0,visionRequests:0,visionRequestBytes:0,endReason:'GOAL_REACHED',outcome:'completed'});
+  expect(typeof line.durationMs).toBe('number');
+ }finally{info.mockRestore();await f.close();}
 });

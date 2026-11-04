@@ -90,7 +90,27 @@ describe('computer live runs (the device overlay label)',()=>{
   expect(automationWait({state:'waiting_input'} as any,false)).toEqual({for:'user',reason:'next_command'});
  });
 
- // Pod-jinawong, task 2f65b7cf: the session expired at 30 min but the task stayed waiting_input, so the overlay waited for the user forever.
+ // r11: who the round waits for, so the app pops its chat only on a real wait (wincu.8 pops for question, confirmation, continue).
+ test('a self-paused goal round waits for the user to continue; the agent asking the user is a question',()=>{
+  const run={taskId:'t',requestId:'r',updatedAt:9,phase:'acting' as const,label:'Finished this round',step:2};
+  const view=(task:Record<string,unknown>,deciding=false,asked=false)=>computerLiveView(run,{taskId:'t',agentSessionId:'s1',state:'waiting_input',automationController:'user',...task} as any,Date.now(),deciding,asked);
+  for(const reason of ['NO_PROGRESS','ROUND_TIME_LIMIT'])
+   expect(view({computerReport:{status:'needs_input',reason,steps:6}},true)).toMatchObject({phase:'waiting_for_user',reason:'continue',label:'Paused: reply in GetPod to continue',sessionId:'s1'});
+  // Pod-jinawong r10, tasks f40127bd and 457a4930: the agent asked "shall I go on?" (follow_up asks_user) and nothing popped.
+  expect(view({},false,true)).toMatchObject({phase:'waiting_for_user',reason:'question',label:'Answer the question in GetPod'});
+  expect(view({},true,true)).toMatchObject({phase:'thinking'});
+  expect(view({},false,false)).toMatchObject({phase:'waiting_for_user',reason:'next_command'});
+  expect(automationWait({state:'waiting_input'} as any,false,true)).toEqual({for:'user',reason:'question'});
+ });
+ // Pod-jinawong r10, task 457a4930: right after a round that ended on a withheld screen the app popped GetPod (protected)
+ // in front of TradingView. Without a session id no app opens the chat; the overlay still says the user is waited for.
+ test('after a round that ended on a withheld screen, the view names no chat to pop',()=>{
+  const run={taskId:'t',requestId:'r',updatedAt:9,phase:'acting' as const,label:'Finished this round'};
+  const view=computerLiveView(run,{taskId:'t',agentSessionId:'s1',state:'waiting_input',automationController:'user',computerReport:{status:'needs_input',reason:'COMMAND_WAITING_INPUT',steps:0,screenWithheld:true}} as any,Date.now(),false,true);
+  expect(view).toMatchObject({phase:'waiting_for_user',reason:'question'});expect(view.sessionId).toBeUndefined();
+ });
+
+// Pod-jinawong, task 2f65b7cf: the session expired at 30 min but the task stayed waiting_input, so the overlay waited for the user forever.
  test('a closed or expired automation session is ended, not waiting for the user',()=>{
   const run={taskId:'t',requestId:'r',updatedAt:9,phase:'acting' as const,label:'Opening Spotify'};
   const now=10_000_000,idle={taskId:'t',state:'waiting_input',automationController:'user',gatewayTarget:{adapter:'computer',sessionId:'s',name:'Computer Use · Mac'},updatedAt:now-1000};

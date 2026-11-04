@@ -524,3 +524,32 @@ describe('literal text for an Accessibility fallback', () => {
     expect(d.actions().map(a => a.text)).toEqual(['Paradise']);
   });
 });
+
+// r11: no action limit for a goal; a run that stops moving pauses for the user (NO_PROGRESS) instead of spending its round.
+describe('vision no-progress (no action limit)', () => {
+  const click = (x: number) => ({ name: 'left_click', input: { coordinate: [x, 300] } });
+  test('without maxSteps a run keeps going past 8 actions to its finish', async () => {
+    const m = model([...Array.from({ length: 12 }, (_, i) => click(100 + i * 50)), finish('done')]);
+    expect(await runVisionComputerUse({ goal: 'x' }, device().deps(m.decide), signal())).toMatchObject({ status: 'succeeded', reason: 'GOAL_REACHED', steps: 12 });
+  });
+  test('three actions in a row that leave the window unchanged pause the run', async () => {
+    const d = device(), deps = d.deps(model([click(100), click(300), click(500), click(700)]).decide);
+    deps.screenshot = async s => ({ generation: s.generation, data: '/9j/SAME', width: 1280, height: 800 });
+    const result = await runVisionComputerUse({ goal: 'x' }, deps, signal());
+    expect(result).toMatchObject({ status: 'needs_input', reason: 'NO_PROGRESS', steps: 3 });
+    expect(result.trace.events.some(e => e.phase === 'waiting' && e.reason === 'NO_PROGRESS')).toBe(true);
+    expect(d.actions()).toHaveLength(3);
+  });
+  test('the same click on the same spot three times pauses even while the screen changes', async () => {
+    const result = await runVisionComputerUse({ goal: 'x' }, device().deps(model([click(400), click(401), click(402), click(700)]).decide), signal());
+    expect(result).toMatchObject({ status: 'needs_input', reason: 'NO_PROGRESS', steps: 3 });
+  });
+  test('scrolling the same way repeatedly is walking a list, not a loop', async () => {
+    const scroll = { name: 'scroll', input: { coordinate: [640, 400], scroll_direction: 'down', scroll_amount: 5 } };
+    expect(await runVisionComputerUse({ goal: 'x' }, device().deps(model([scroll, scroll, scroll, scroll, finish('done')]).decide), signal())).toMatchObject({ status: 'succeeded', steps: 4 });
+  });
+  test('the turn guard comes from the run time when there is no action limit', async () => {
+    const m = model(Array.from({ length: 50 }, () => ({ name: 'screenshot' })));
+    expect(await runVisionComputerUse({ goal: 'x', timeoutMs: 3000 }, device().deps(m.decide), signal())).toMatchObject({ status: 'blocked', reason: 'LOOP_CYCLE_BUDGET', evaluations: 3 + 5 });
+  });
+});

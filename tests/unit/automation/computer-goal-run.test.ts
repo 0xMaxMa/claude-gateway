@@ -12,6 +12,8 @@ const finder=()=>({application:'com.apple.finder',windowTitle:'Recents',truncate
 const chrome=(value='')=>({application:'com.google.Chrome',windowTitle:'New Tab - Google Chrome',truncated:false,apps:APPS,
  focusedControl:{ref:'c0',role:'AXTextField',label:'Address and search bar'},
  controls:[{ref:'c0',identity:'11111111-1111-4111-8111-111111111111',role:'AXTextField',label:'Address and search bar',value,focused:true,actions:['press','type']},...menu(['File → New Tab'])]});
+// The page Enter opened: its title changed (computer-use.ts waits for that before GOAL_REACHED).
+const youtube=()=>({...chrome('youtube.com'),windowTitle:'YouTube - Google Chrome'});
 const notes=(count:number)=>({application:'com.apple.Notes',windowTitle:`Notes (${count})`,truncated:false,apps:APPS,text:[`${count} notes`],
  controls:[{ref:'c8',role:'AXButton',label:'New Note',actions:['press']},{ref:'c9',role:'AXButton',label:'Delete',actions:['press']},{ref:'c10',role:'AXButton',label:'Share',actions:['press']}]});
 
@@ -49,8 +51,8 @@ describe('agent-spawned goal runs to the goal',()=>{
   // Pod 2.0.16: the goal ended here as needs_input/COMMAND_WAITING_INPUT and the task hung in waiting_input.
   expect(r).toMatchObject({status:'succeeded',reason:'GOAL_REACHED',steps:2});
   expect(waited(r)).toBeUndefined();
-  expect(computerOutcomeText({...r,phase:'terminal',trace:r.trace.events} as any)).toBe('Done: 2 actions, last pressed "New Note". Send the next command.');
-  expect(computerOutcomeText({...r,phase:'terminal',trace:r.trace.events,accessReleased:true} as any)).toBe('Done: 2 actions, last pressed "New Note". Computer access was released.');
+  expect(computerOutcomeText({...r,phase:'terminal',trace:r.trace.events} as any)).toBe('Done after 2 actions. Last: pressed "New Note". Send the next command.');
+  expect(computerOutcomeText({...r,phase:'terminal',trace:r.trace.events,accessReleased:true} as any)).toBe('Done after 2 actions. Last: pressed "New Note". Computer access was released.');
  });
  test('later decisions see what this run already did and are asked for the next step toward the goal',async()=>{
   const f=fixture([finder,()=>notes(0),()=>notes(1)],[{pick:'open:com.apple.Notes'},{pick:'press:c8'},{pick:'DONE'}]);
@@ -290,7 +292,7 @@ describe('goal evidence is best-effort',()=>{
  const failingObserve=(f:ReturnType<typeof fixture>,from:number,code:string)=>{const call=f.deps.call;let actions=0;
   f.deps.call=async(...a)=>{if(a[0]==='computer_action')actions++;if(a[0]==='computer_observe'&&actions>=from)throw Error(code);return call(...a);};};
  test.each(['DEVICE_OFFLINE','ACCESS_DENIED','STALE_OBSERVATION'])('a fast path goal still reaches GOAL_REACHED when the closing read fails with %s',async code=>{
-  const f=fixture([finder,()=>chrome(),()=>chrome('youtube.com'),()=>chrome('youtube.com')]);failingObserve(f,3,code);
+  const f=fixture([finder,()=>chrome(),()=>chrome('youtube.com'),youtube]);failingObserve(f,3,code);
   const r=await spawn(f,'open YouTube in Chrome');
   expect(r).toMatchObject({status:'succeeded',reason:'GOAL_REACHED',steps:3});
  });
@@ -300,7 +302,7 @@ describe('goal evidence is best-effort',()=>{
   expect(r).toMatchObject({status:'blocked',reason:'STEP_LIMIT',steps:2});
  });
  test('a failed closing read leaves a trace the agent can read, without the provider error text',async()=>{
-  const f=fixture([finder,()=>chrome(),()=>chrome('youtube.com'),()=>chrome('youtube.com')]);failingObserve(f,3,'DEVICE_OFFLINE secret-detail');
+  const f=fixture([finder,()=>chrome(),()=>chrome('youtube.com'),youtube]);failingObserve(f,3,'DEVICE_OFFLINE secret-detail');
   const r=await spawn(f,'open YouTube in Chrome');
   expect(r).toMatchObject({status:'succeeded',reason:'GOAL_REACHED'});
   expect(waited(r)).toBe('GOAL_EVIDENCE_UNAVAILABLE');
@@ -308,7 +310,7 @@ describe('goal evidence is best-effort',()=>{
  });
  test('a good observation is kept when only the closing screenshot fails',async()=>{
   const withShot=(o:()=>any)=>()=>({...o(),screenshotAvailable:true});
-  const f=fixture([finder,withShot(chrome),withShot(()=>chrome('youtube.com')),withShot(()=>chrome('youtube.com'))]);
+  const f=fixture([finder,withShot(chrome),withShot(()=>chrome('youtube.com')),withShot(youtube)]);
   const seen:any[]=[];f.deps.observation=o=>{seen.push(o);};
   f.deps.snapshot=async()=>{throw Error('SCREENSHOT_FAILED');};
   const r=await spawn(f,'open YouTube in Chrome');
@@ -317,14 +319,14 @@ describe('goal evidence is best-effort',()=>{
   expect(r.observation).toMatchObject({application:'com.google.Chrome'});
  });
  test('lost authorization during the closing read still stops the run with ACCESS_DENIED',async()=>{
-  const f=fixture([finder,()=>chrome(),()=>chrome('youtube.com'),()=>chrome('youtube.com')]);
+  const f=fixture([finder,()=>chrome(),()=>chrome('youtube.com'),youtube]);
   let actions=0;const call=f.deps.call;f.deps.call=async(...a)=>{if(a[0]==='computer_action')actions++;return call(...a);};
   f.deps.authorized=()=>actions<3;
   const r=await spawn(f,'open YouTube in Chrome');
   expect(r).toMatchObject({status:'blocked',reason:'ACCESS_DENIED'});
  });
  test('an interruption raised during the closing read is reported as interrupted, not swallowed as missing evidence',async()=>{
-  const f=fixture([finder,()=>chrome(),()=>chrome('youtube.com'),()=>chrome('youtube.com')]);const interrupt=new AbortController();
+  const f=fixture([finder,()=>chrome(),()=>chrome('youtube.com'),youtube]);const interrupt=new AbortController();
   f.deps.interruptSignal=interrupt.signal;
   const call=f.deps.call;let actions=0;f.deps.call=async(...a)=>{if(a[0]==='computer_action')actions++;if(a[0]==='computer_observe'&&actions>=3){interrupt.abort();throw Error('DEVICE_OFFLINE');}return call(...a);};
   const r=await spawn(f,'open YouTube in Chrome');
@@ -369,7 +371,7 @@ describe('a refused action in a goal run',()=>{
 
 describe('URL fast path for agent goals',()=>{
  test('"open YouTube in Chrome" from Finder opens Chrome, then types the address: no model call',async()=>{
-  const f=fixture([finder,()=>chrome(),()=>chrome('youtube.com'),()=>chrome('youtube.com')]);
+  const f=fixture([finder,()=>chrome(),()=>chrome('youtube.com'),youtube]);
   const r=await spawn(f,'open YouTube in Chrome');
   expect(f.requests).toHaveLength(0);
   expect(f.actions()).toEqual([{kind:'open',app_id:'com.google.Chrome'},{kind:'type',ref:'c0',text:'youtube.com'},{kind:'key',key:'enter'}]);
@@ -379,7 +381,7 @@ describe('URL fast path for agent goals',()=>{
   expect(f.calls.at(-2)?.name).toBe('computer_observe');
  });
  test.each([['https://www.youtube.com/','https://www.youtube.com/'],['youtube.com','youtube.com'],['เปิด youtube ใน chrome','youtube.com']])('%s with Chrome in front types %s straight into the address bar',async(goal,address)=>{
-  const f=fixture([()=>chrome(),()=>chrome(address),()=>chrome(address)]);
+  const f=fixture([()=>chrome(),()=>chrome(address),youtube]);
   const r=await spawn(f,goal);
   expect(f.requests).toHaveLength(0);expect(r.reason).toBe('GOAL_REACHED');
   expect(f.actions()).toEqual([{kind:'type',ref:'c0',text:address},{kind:'key',key:'enter'}]);
@@ -390,7 +392,7 @@ describe('URL fast path for agent goals',()=>{
   expect(f.requests).toHaveLength(1);expect(f.actions()).toEqual([]);
  });
  test('a fast path on a direct user command still only acknowledges dispatch',async()=>{
-  const f=fixture([()=>chrome(),()=>chrome('youtube.com'),()=>chrome('youtube.com')]);
+  const f=fixture([()=>chrome(),()=>chrome('youtube.com'),youtube]);
   const r=await runComputerUse({goal:'open YouTube in Chrome',yieldAfterInteraction:true,readRequest:true},f.deps,new AbortController().signal);
   expect(r).toMatchObject({status:'needs_input',reason:'COMMAND_WAITING_INPUT'});expect(waited(r)).toBe('ACTION_DISPATCHED');
  });

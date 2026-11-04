@@ -253,3 +253,29 @@ test('the user\'s own revision-2 goal command that parks stays silent',()=>{
   expect(f.notified()).toBe(before);expect(f.delivered()).toBe(0);
  }finally{f.close();}
 });
+
+// r11 G4: a goal round that paused on its own (no progress, out of round time) waits for the user, who decides whether
+// it goes on (there is no action limit). The card says why in plain words; the agent is not woken to send another round.
+test.each([['NO_PROGRESS',"Paused: the last 3 actions didn't change the screen. Reply to continue."],['ROUND_TIME_LIMIT','Paused after 7 minutes of work. Reply to continue.']])('a goal round paused for %s waits for the user with plain card copy',(reason,line)=>{
+ const f=fixture();try{
+  const paused=f.finish({type:'paused',computerReport:{...report,steps:6,status:'needs_input',reason,durationMs:7*60_000+5_000}});
+  expect(paused.state).toBe('waiting_input');expect(paused.latestProgress?.text).toBe(line);
+  expect(paused.latestProgress?.text).not.toMatch(/[A-Z_]{10,}/);
+  expect(f.delivered()).toBe(0);
+  expect(acceptsDirectCommand(paused)).toBe(true);
+ }finally{f.close();}
+});
+
+// r11 F4: an automatic report that ends with a question for the user (follow_up asks_user) says so on response.completed,
+// so a client knows a real answer is awaited (the activity view reads it as a question).
+test('the report\'s follow_up goes with response.completed',()=>{
+ const f=fixture();try{
+  const input=f.store.acceptInput({scope:{agentId:'a',agentSessionId:'s',source:'api',accountId:'u',chatId:'c',threadKey:'',principalId:'u'},text:'next',capabilities:{execute:true,writeMemory:false}});
+  const decision=f.decisions.begin(input.conversationId,'u',[input.inputId]);
+  f.decisions.finish(decision,'Shall I keep going?','completed',undefined,true,'asks_user');
+  const events=f.store.all("SELECT payload_json FROM conversation_events WHERE conversation_id=? AND type='response.completed' ORDER BY seq",input.conversationId).map(r=>JSON.parse(String(r.payload_json)).payload);
+  expect(events.at(-1)).toMatchObject({responseId:decision.responseId,followUp:'asks_user'});
+  // A turn without one adds nothing.
+  expect(events[0].followUp).toBeUndefined();
+ }finally{f.close();}
+});

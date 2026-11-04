@@ -1,7 +1,7 @@
 import {CURRENT_CONTROL_ROUND_SQL} from '../control-notification';
 import {preparedBrowserAnswers} from '../browser-fields';
 import {ComputerInputs} from '../../jev/computer-inputs';
-import {AUTOMATION_IDLE_TIMEOUT_MS,agentGoalRunParked,automationSession,expiredWaitingRound,pausedForCommand,stoppedForCommand} from './automation-session';
+import {AUTOMATION_IDLE_TIMEOUT_MS,agentGoalRunParked,automationSession,expiredWaitingRound,pausedForCommand,stoppedForCommand,ROUND_PAUSES} from './automation-session';
 import {ANSWERED_FROM_SCREEN,computerActionText,computerOutcomeText,computerProgressText,computerRoundDone} from '../../automation/computer-outcome';
 import {browserOutcomeText} from '../../automation/browser-outcome';
 import {textCommand} from '../../automation/direct-command';
@@ -125,7 +125,7 @@ function recordAction(task: TaskSnapshot, revision: number, command: string, out
   if (result === undefined) return;
   const last = outcome.computerReport?.lastAction;
   // A step-run line counts steps; name the last completed action as well.
-  if (last && !last.blocked && !result.startsWith('Done:')) result += ` Last completed action: ${computerActionText(last)}.`;
+  if (last && !last.blocked && !result.startsWith('Done')) result += ` Last completed action: ${computerActionText(last)}.`;
   if (outcome.type === 'unknown') result = 'Outcome unknown; not replayed. ' + result;
   task.actionLog = [...(task.actionLog ?? []).filter(entry => entry.revision !== revision), { revision, command: clip(loggedCommand(command), 80), result: clip(result, 240) }].slice(-ACTION_LOG_MAX);
 }
@@ -1115,7 +1115,7 @@ export class TaskService {
       if (task.gatewayTarget?.adapter === 'browser' && outcome.browserReport) task.browserReport=outcome.browserReport;
       if (outcome.computerReport || outcome.browserReport) recordAction(task, attempt.revision, this.revision(task.taskId, attempt.revision).instructions, outcome);
       // A structured unresolved blocker is not successful task completion.
-      const waitingForCommand=outcome.type==='paused'&&['browser','computer'].includes(task.gatewayTarget?.adapter??'')&&['THINKING_WAITING_INPUT','COMMAND_WAITING_INPUT','COMPLETION_CANDIDATE','VERIFICATION_FAILED'].includes(outcome.computerReport?.reason??outcome.browserReport?.reason??'');
+      const waitingForCommand=outcome.type==='paused'&&['browser','computer'].includes(task.gatewayTarget?.adapter??'')&&['THINKING_WAITING_INPUT','COMMAND_WAITING_INPUT','COMPLETION_CANDIDATE','VERIFICATION_FAILED',...ROUND_PAUSES].includes(outcome.computerReport?.reason??outcome.browserReport?.reason??'');
       if (outcome.type === 'paused' && !waitingForCommand && !(task.state === 'waiting_input' && task.pendingQuestion) &&
         task.state !== 'interrupting' && task.state !== 'cancel_requested' && !(task.gatewayTarget && task.revision > attempt.revision)) throw new OrchestrationError('STATE_CONFLICT');
       // Keep the full final report, and preserve cancellation / new revisions / questions.

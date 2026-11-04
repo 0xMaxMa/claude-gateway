@@ -91,3 +91,51 @@ test('step-run text keeps its Details line last when the hint is added',()=>{
  expect(computerOutcomeText({status:'needs_input',reason:'COMMAND_WAITING_INPUT',steps:2,screenWithheld:true,stepRun:{total:2,completed:2,stopReason:'ALL_STEPS_DONE',remaining:[]}} as any)).not.toContain('protected app');
  expect(computerOutcomeText({status:'succeeded',reason:'GOAL_REACHED',steps:2,screenWithheld:true,trace:[]} as any)).toMatch(/^Done/);
 });
+
+// r11 R2: the last approved application a round saw is the task's target; a withheld screen ("unapproved") keeps it, and the
+// next round reopens it first (computer-use.ts reactivate) and names it to the model and the agent.
+test('the last target app survives a withheld round and is reopened by the next one',async()=>{
+ const root=mkdtempSync(join(tmpdir(),'computer-target-app-'));
+ jest.mocked(withComputerConnection).mockImplementation(async(_c,fn)=>fn({callTool:jest.fn(async()=>({content:[{type:'text',text:'{"state":"approved"}'}]}))} as any));
+ const connectors={get:()=>({connectorId:'c',scope:{}}),connection:()=>({endpoint:'https://computer.example/mcp',headers:{}}),discover:async()=>[]};
+ const adapter=new ComputerTaskAdapter({agentId:'a',root,connectors:connectors as any,allowed:()=>true,member:()=>true,active:()=>true,evaluate:jest.fn(),needsInput:()=>true});
+ const TV={id:'com.tradingview.tradingviewapp.desktop',name:'TradingView'};
+ const chart=ComputerObservation.parse({generation:'g1',application:TV.id,windowTitle:'BTCUSDT / Unnamed',controls:[],truncated:false,apps:[TV]});
+ const hidden=ComputerObservation.parse({...WITHHELD,apps:[TV]});
+ const round=async(revision:number,request:string,state:any)=>{
+  let input:any;runComputerUse.mockReset();runComputerUse.mockImplementation(async(i:any,deps:any)=>{input=i;deps.observation(state);return {...NOT_DONE,steps:0};});
+  const task={agentId:'a',taskId:'t',ownerPrincipalId:'p',conversationId:'c',revision,automationController:'user',gatewayTarget:{adapter:'computer',sessionId:'target',name:'Mac'},gatewayDispatch:{requestId:request}} as any;
+  await adapter.submit(task,request,'open the BOME chart');
+  let outcome:any;for(let i=0;i<50;i++){outcome=await adapter.inspect(task,request);if(typeof outcome==='object')break;await new Promise(r=>setImmediate(r));}
+  return {input,outcome};
+ };
+ try{
+  const first=await round(1,'r1',chart);
+  expect(first.input.reactivate).toBeUndefined();
+  const second=await round(2,'r2',hidden);
+  expect(second.input.reactivate).toEqual(TV);
+  expect(second.input.interactionContext).toContain('"lastTargetApp":{"id":"com.tradingview.tradingviewapp.desktop","name":"TradingView"}');
+  // The withheld round did not replace it: the third round still reopens TradingView, and the card says so.
+  const third=await round(3,'r3',hidden);
+  expect(third.input.reactivate).toEqual(TV);
+  expect(computerOutcomeText(third.outcome.computerReport)).toContain('The next command switches back to TradingView first.');
+  expect(computerOutcomeText(third.outcome.computerReport)).not.toMatch(/[A-Z_]{10,}/);
+ }finally{await adapter.close();rmSync(root,{recursive:true,force:true});}
+});
+
+// r11 F2: once the device session ended (a reached goal released it), a fresh read cannot observe any more: the agent gets
+// the round's last recorded screen marked sessionEnded, not one opaque error. Pod-jinawong r10, task f40127bd.
+test('evidence after the session ended is the recorded last screen, marked sessionEnded; a device refusal keeps its code',async()=>{
+ const r=await run(NOT_DONE);try{
+  const ended={...r.task,state:'completed',automationSession:{status:'closed',idleTimeoutMs:1_800_000,closedReason:'agent'}};
+  const fresh=await r.adapter.computerEvidence(ended,'fresh') as any;
+  expect(fresh).toMatchObject({recordedOnly:true,sessionEnded:true});expect(fresh.snapshot.state).toMatchObject({frontmostProtected:true});
+  expect(fresh.instruction).toContain('session of this task has ended');
+  // Still open on the gateway, but the device says the session is over: the same recorded answer, with its code.
+  jest.mocked(withComputerConnection).mockImplementation(async(_c,fn)=>fn({callTool:jest.fn(async()=>({isError:true,content:[{type:'text',text:'{"error":"CONSENT_REQUIRED"}'}]}))} as any));
+  const refused=await r.adapter.computerEvidence(r.task,'fresh') as any;
+  expect(refused).toMatchObject({recordedOnly:true,sessionEnded:true,error:'CONSENT_REQUIRED'});
+  jest.mocked(withComputerConnection).mockImplementation(async(_c,fn)=>fn({callTool:jest.fn(async()=>({isError:true,content:[{type:'text',text:'{"error":"DEVICE_OFFLINE"}'}]}))} as any));
+  await expect(r.adapter.computerEvidence(r.task,'fresh')).rejects.toThrow('DEVICE_OFFLINE');
+ }finally{await r.close();}
+});

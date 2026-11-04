@@ -41,7 +41,7 @@ test('the answer to a goal run field question resumes that goal',async()=>{
   expect(asked).toMatchObject({runToGoal:true,agentCommand:true});
   // The answer revision keeps the hand-off's executionControl (revision 2), as recorded on the pod.
   const answered=await h.round(3,'r3',TYPED,{revision:2,agentHandoff:true},[ANSWER]);
-  expect(answered).toMatchObject({runToGoal:true,maxSteps:8,readRequest:false});
+  expect(answered).toMatchObject({runToGoal:true,readRequest:false});expect(answered.maxSteps).toBeUndefined();
   expect(answered.agentCommand).toBeUndefined();
   expect(answered.goal).toContain('press enter');
  }finally{await h.close();}
