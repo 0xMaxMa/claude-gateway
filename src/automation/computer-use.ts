@@ -102,6 +102,49 @@ const fingerprint=(s:ComputerState)=>JSON.stringify([s.application,s.windowTitle
 const identity=(state:ComputerState,action:Record<string,unknown>)=>{const field=state.controls.find(c=>c.ref===action.ref),area=state.scrollAreas?.find(a=>a.ref===action.ref);return JSON.stringify([state.application,state.windowTitle,action.kind,action.key,action.direction,action.app_id,field?.label,field?.role,area?.label,area?.bounds]);};
 /** The page in front shows the site a goal's web address names: its title carries the host's main label. */
 const urlShown=(state:ComputerState,web:{label:string})=>(state.windowTitle??'').toLocaleLowerCase().includes(web.label);
+/** GetPod Desktop opens a new relay socket 3 s after one closes (its desktop-client.ts): a lease or a look that met the
+ *  gap asks again for this long before the round says the computer is offline. Pod-jinawong r11, task ec82ed05: the
+ *  socket closed at 04:31:11Z while computer_acquire waited, the app was back 4 s later, and the task had already failed
+ *  as "the computer went offline". Reads only (the lease, an observation): an action is never sent twice. */
+export const DEVICE_RECONNECT_GRACE_MS=12000;
+const DEVICE_RECONNECT_RETRY_MS=1000;
+const RECONNECT_READS=new Set(['computer_acquire','computer_observe']);
+export async function reconnecting<T>(name:string,read:()=>Promise<T>,signal:AbortSignal,graceMs=DEVICE_RECONNECT_GRACE_MS):Promise<T>{
+ const until=Date.now()+graceMs;
+ for(;;){
+  try{return await read();}
+  catch(error){
+   if(!RECONNECT_READS.has(name)||!(error instanceof Error)||error.message!=='DEVICE_OFFLINE'||Date.now()+DEVICE_RECONNECT_RETRY_MS>until)throw error;
+   await new Promise<void>((resolve,reject)=>{const stop=()=>{clearTimeout(t);reject(error);};const t=setTimeout(()=>{signal.removeEventListener('abort',stop);resolve();},DEVICE_RECONNECT_RETRY_MS);signal.addEventListener('abort',stop,{once:true});if(signal.aborted)stop();});
+  }
+ }
+}
+/** The shape of a screen without its values: application, title and each control's identity, role and label. A chart's
+ *  live price or a clock changes the text and values, not this. */
+const structure=(s:ComputerState)=>JSON.stringify([s.application,s.windowTitle,s.controls.map(c=>[c.identity,c.role,c.label])]);
+/** The one approved application a command names, for a round that starts with a protected app in front and no target
+ *  from an earlier round: an app's name as a whole word, as it is cased (any case only for a name whose casing is
+ *  distinctive: an inner capital, a digit or several words, e.g. TradingView, not Maps), else its bundle id. Two apps
+ *  named, or one name inside another's match, picks the longer; still two is none. Structural: the device's own app
+ *  list, no word list. */
+export function namedApp(text:string,apps:readonly {id:string;name:string}[]):{id:string;name:string}|undefined{
+ const edge=(c:string)=>/[A-Za-z0-9]/.test(c)?'[A-Za-z0-9]':'[\\p{L}\\p{N}]';
+ const escape=(v:string)=>v.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+ const spans:Array<{app:{id:string;name:string};from:number;to:number}>=[];
+ for(const app of apps){
+  const name=app.name.trim();if(name.length<3||name.length>80)continue;
+  const distinctive=/[A-Z0-9]/.test(name.slice(1))||/\s/.test(name);
+  for(const [needle,flags] of [[name,'gu'],...(distinctive?[[name,'giu']]:[]),[app.id,'giu']] as Array<[string,string]>){
+   if(!needle||needle.length<3)continue;
+   const re=new RegExp(`(?<!${edge(needle[0]!)})${escape(needle)}(?!${edge(needle.at(-1)!)})`,flags);
+   let hit=false;for(const m of text.matchAll(re)){spans.push({app,from:m.index!,to:m.index!+m[0].length});hit=true;}
+   if(hit)break;
+  }
+ }
+ const kept=spans.filter(a=>!spans.some(b=>b!==a&&b.app.id!==a.app.id&&b.from<=a.from&&b.to>=a.to&&b.to-b.from>a.to-a.from));
+ const ids=new Set(kept.map(s=>s.app.id));
+ return ids.size===1?kept[0]!.app:undefined;
+}
 /** A high-impact action's exact target (kind, window, control and position), hashed: a yes covers only this. The vision
  * loop hashes a click on an Accessibility control as its press, so a yes carries over when a run falls back here. */
 export const confirmationTarget=(state:ComputerState,action:string,planned:Record<string,unknown>|undefined)=>{const control=state.controls.find(c=>c.ref===planned?.ref);return createHash('sha256').update(JSON.stringify([action.split(':')[0],identity(state,planned??{kind:action}),control?.identity,control?.bounds,control?.context])).digest('hex').slice(0,32);};
@@ -154,6 +197,8 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
  // at again after a second, up to twice, before the command returns unexecuted.
  // Only while nothing of this command has run: a planned follow-up is never re-decided.
  let redecided=0;
+ // The screen's structure at the first WAIT of a run of WAITs (see `structure`).
+ let waitedOn:string|undefined;
  const settleDelay=()=>new Promise<void>((resolve,reject)=>{const stop=()=>{clearTimeout(t);reject(Error('CANCELLED'));};const t=setTimeout(()=>{runSignal.removeEventListener('abort',stop);resolve();},REDECIDE_DELAY_MS);runSignal.addEventListener('abort',stop,{once:true});});
  // The re-decided command is planned again from scratch: a plan made for the
  // rejected first input (remaining digits, Backspaces, a submit) must not resume.
@@ -207,7 +252,7 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
  const waitForCommand=(reason:string,extra:Partial<ComputerProgress>={})=>{emit('waiting',{reason,...extra});return result('needs_input','COMMAND_WAITING_INPUT');};
  const check=()=>{runSignal.throwIfAborted();if(!deps.authorized())throw Error('ACCESS_DENIED');};
  const update=()=>{const n=deps.latestGoal?.();if(n&&n.revision>goal.revision){satisfiedField=undefined;submitAfterType=undefined;previous=undefined;prematureDone=0;history.length=0;ineffective.clear();transitions.clear();consecutiveOpens=0;cycling=false;noProgress=0;goal=z.object({revision:z.number().int().positive(),goal:z.string().min(1).max(16000)}).parse(n);}};
- const call=async(name:string,args:Record<string,unknown>={})=>{check();return deps.call(name,{...args,...(lease?{lease_token:lease}:{})},runSignal);};
+ const call=async(name:string,args:Record<string,unknown>={})=>reconnecting(name,()=>{check();return deps.call(name,{...args,...(lease?{lease_token:lease}:{})},runSignal);},runSignal);
  const summary=(action:Record<string,unknown>,state=last):Partial<ComputerProgress>=>{const field=state?.controls.find(c=>c.ref===action.ref);return {targetGeneration:state?.generation,application:state?.application,...(typeof action.app_id==='string'?{appId:action.app_id}:{}),action:action.kind as ComputerProgress['action'],...(typeof action.key==='string'?{key:action.key}:{}),...(field?{ref:field.ref,role:field.role,focused:field.focused}:action.kind==='key'&&state?.focusedControl?{role:state.focusedControl.role,focused:true}:{})};};
  try{
   checkInterruption(deps.interruptSignal);
@@ -247,7 +292,8 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
     // A protected app (GetPod, where the user typed) in front withholds the screen: the task's last approved target
     // application is opened again first, once, before anything is decided on it. Pod-jinawong r10, task 457a4930: GetPod
     // stayed in front, and the agent's next command worked in Chrome's Steam tab instead of TradingView.
-    const target=input.reactivate;
+    // A task's first round has no earlier target: the app its command names, from this computer's approved apps.
+    const target=input.reactivate??(state.frontmostProtected===true?namedApp(goal.goal,state.apps):undefined);
     if(target&&!reactivated&&state.frontmostProtected===true&&state.apps.some(app=>app.id===target.id)){
      reactivated=true;const action={kind:'open',app_id:target.id};emit('decided',{...summary(action,state),reason:'REACTIVATE_TARGET'});
      return {action:{action:'reactivate',generation:state.generation,revision,targets:new Map([['reactivate',action]]),observedContinuation:true}};
@@ -458,9 +504,15 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
      // The screen was still changing: look again shortly and let Jev decide afresh.
      fastCommand=false;
      if(selected.action==='WAIT'){
+      waitedOn??=structure(state);
       if((steps===0||goalRun)&&redecided<REDECIDE_MAX){redecided++;await settleDelay();return {action:{action:'STANDARD_OBSERVE',generation:state.generation,revision,targets:new Map<string,Record<string,unknown>>()}};}
-      await capture();return {result:waitForCommand('UI_NOT_READY')};
+      // Nothing on the screen moved while it waited (its values may: a chart's price, a clock): there was no step it
+      // could take, as BLOCKED, and a goal round goes on from the screenshot (vision fallback). Pod-jinawong r11, task
+      // ec82ed05: three WAITs on a TradingView chart whose controls never changed ended as "the screen was still changing".
+      const still=waitedOn===structure(state);waitedOn=undefined;
+      await capture();return {result:waitForCommand(still?'NO_SUPPORTED_ACTION':'UI_NOT_READY',still&&input.yieldAfterInteraction&&input.readRequest?{decisionMode:mode()}:{})};
      }
+     waitedOn=undefined;
      // Jev gave up on a single direct command (decisionMode jev marks it): the gateway may hand it to the agent once.
      if(selected.action==='BLOCKED'||selected.action==='UNCLEAR'){await capture();return {result:waitForCommand(selected.action==='UNCLEAR'?'UNCLEAR':'NO_SUPPORTED_ACTION',input.yieldAfterInteraction&&input.readRequest?{decisionMode:mode()}:{})};}
      // No action: the gateway hands the command to the agent, which reads the screen.

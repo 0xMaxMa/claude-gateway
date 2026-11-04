@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { ComputerObservation, confirmationTarget, type ComputerLastAction, type ComputerProgress, type ComputerState, type ComputerUseDependencies, type ComputerUseResult } from './computer-use';
+import { ComputerObservation, confirmationTarget, reconnecting, type ComputerLastAction, type ComputerProgress, type ComputerState, type ComputerUseDependencies, type ComputerUseResult } from './computer-use';
 import { IMPACT_CRITERIA, IMPACT_QUESTION } from './computer-command';
 import { decisionState, readChoice } from './computer-policy';
 import { checkInterruption, interruptible } from './interrupt';
@@ -406,7 +406,8 @@ export async function runVisionComputerUse(raw: unknown, deps: VisionDependencie
   };
   const fallback = (reason: string): VisionFallback => { emit('waiting', { reason: 'VISION_FALLBACK_' + reason }); return { fallback: reason, trace: [...trace] }; };
   const check = () => { runSignal.throwIfAborted(); if (!deps.authorized()) throw Error('ACCESS_DENIED'); };
-  const call = async (name: string, args: Record<string, unknown> = {}) => { check(); return deps.call(name, { ...args, ...(lease ? { lease_token: lease } : {}) }, runSignal); };
+  // A lease or a look that met GetPod Desktop's reconnect gap asks again (computer-use.ts reconnecting); an action never.
+  const call = async (name: string, args: Record<string, unknown> = {}) => reconnecting(name, () => { check(); return deps.call(name, { ...args, ...(lease ? { lease_token: lease } : {}) }, runSignal); }, runSignal);
   const observe = async () => {
     checkInterruption(deps.interruptSignal); emit('observing');
     const rawState = await call('computer_observe'); last = ComputerObservation.parse(rawState); check(); deps.observation?.(last);

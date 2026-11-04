@@ -201,7 +201,9 @@ test('6cdca7c6 replay: the refusal is answered in a valid request, counts contin
 // pressed the symbol button and typed BOMEUSDT, then found no control (BLOCKED); vision pressed four times and typed again,
 // and the round hit the 8-action cap one click short of the chart: "Failed". With no action limit (r11) the same round
 // clicks the first result and reaches the goal at 9 actions. Both real loops run against a scripted Mac and models.
-test('457a4930 replay: no action cap, the round reaches the chart at 9 actions',async()=>{
+// r12: GetPod in front and the command naming TradingView, the round opens TradingView itself before the first decision
+// (computer-use.ts namedApp, no step), so the model's recorded first pick (open TradingView) is not asked: 8 actions.
+test('457a4930 replay: no action cap, the round reaches the chart at 8 actions after reopening TradingView',async()=>{
  const recorded=require('../../fixtures/computer/tradingview-457a4930.json');
  expect(recorded.rev1.outcome).toBe('STEP_LIMIT');
  expect(recorded.rev1.trace.filter((e:any)=>e.phase==='acted').length).toBe(8);
@@ -226,8 +228,8 @@ test('457a4930 replay: no action cap, the round reaches the chart at 9 actions',
  });
  jest.mocked(withComputerConnection).mockImplementation(async(_c,fn)=>fn({callTool} as any));
  const connectors={get:()=>({connectorId:'c',scope:{device_id:'d',grant_id:'g'}}),connection:()=>({endpoint:'https://computer.example/mcp',headers:{}})};
- // Accessibility as recorded: open TradingView 0.95, press the symbol button 0.85, type into the symbol field 0.95, BLOCKED 0.95.
- const ax=[{action:'open',target:'open:'+TV},{action:'press',target:'press:c56'},{action:'type',target:'type:c0',text:'BOMEUSDT'},{action:'BLOCKED'}];
+ // Accessibility as recorded after its first pick: press the symbol button 0.85, type into the symbol field 0.95, BLOCKED 0.95.
+ const ax=[{action:'press',target:'press:c56'},{action:'type',target:'type:c0',text:'BOMEUSDT'},{action:'BLOCKED'}];
  let axAsked=0;
  const evaluate=jest.fn(async(_t:any,request:any)=>{
   const answers:Record<string,unknown>={};const step=request.questions.action?ax[axAsked++]:undefined;
@@ -253,9 +255,11 @@ test('457a4930 replay: no action cap, the round reaches the chart at 9 actions',
   let outcome:any;
   for(let i=0;i<500&&typeof outcome!=='object';i++){outcome=await adapter.inspect(task,'r1');if(typeof outcome!=='object')await new Promise(r=>setTimeout(r,2));}
   expect(typeof outcome).toBe('object');
+  // The open is the round's own reopen of TradingView (not counted below); the model never asked to open it.
+  expect(actions[0]).toMatchObject({kind:'open',app_id:TV});
   expect(actions.map(a=>a.kind==='open'?'open':a.kind)).toEqual(['open','press','type','pointer','pointer','pointer','pointer','type_focused','pointer']);
   expect(outcome.type).toBe('completed');
-  expect(outcome.computerReport).toMatchObject({status:'succeeded',reason:'GOAL_REACHED',steps:9});
-  expect(computerOutcomeText(outcome.computerReport)).toMatch(/^Done after 9 actions\. Last: clicked/);
+  expect(outcome.computerReport).toMatchObject({status:'succeeded',reason:'GOAL_REACHED',steps:8});
+  expect(computerOutcomeText(outcome.computerReport)).toMatch(/^Done after 8 actions\. Last: clicked/);
  }finally{await adapter.close();rmSync(root,{recursive:true,force:true});runComputerUse.mockReset();runVisionComputerUse.mockReset();}
 });
