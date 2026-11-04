@@ -61,6 +61,11 @@ describe('files and git contracts', () => {
     expect(rootEntries.find((entry) => entry.name === 'app')!.size).toBeGreaterThan(4096);
   }, 60_000);
 
+  it('names the processes list schema like its fixture', () => {
+    const schema = readJson(path.join(CONTRACTS_DIR, 'schemas', 'processes-list.schema.json')) as { title: string };
+    expect(schema.title).toBe(fixtures['processes-list/all.json']!.schema);
+  });
+
   it('records an error fixture for the success and the failure side of every route', () => {
     const routes = new Set(Object.keys(fixtures).map((f) => f.split('/')[0]));
     expect([...routes].sort()).toEqual(['capabilities', 'errors', 'files-delete', 'files-list', 'files-mkdir', 'git-status', 'git-summary', 'processes-list', 'processes-start', 'processes-stop', 'sessions-create', 'sessions-list']);
