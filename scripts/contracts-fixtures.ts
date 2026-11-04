@@ -103,6 +103,17 @@ function fixedTimes(value: unknown): unknown {
     .replace(/"expiresAt":"[^"]+"/g, `"expiresAt":"${FIXED_TIME.toISOString()}"`));
 }
 
+/** Directory allocation and Git timezone formatting vary across CI filesystems and Git versions. */
+function normalizeHostFields(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(normalizeHostFields);
+  if (value === null || typeof value !== 'object') return value;
+  const fields = value as Record<string, unknown>;
+  return Object.fromEntries(Object.entries(fields).map(([key, item]) => [key,
+    key === 'size' && fields.type === 'dir' && typeof item === 'number' ? 4096 :
+    key === 'committed_at' && typeof item === 'string' && !Number.isNaN(Date.parse(item)) ? new Date(item).toISOString() :
+    normalizeHostFields(item)]));
+}
+
 /** Runs every step against fresh routers and returns the fixtures keyed by their path under FIXTURES_DIR. */
 export async function recordFixtures(): Promise<Record<string, Fixture>> {
   const base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'contracts-')));
@@ -178,7 +189,7 @@ export async function recordFixtures(): Promise<Record<string, Fixture>> {
       let call = request(target)[req.method === 'GET' ? 'get' : req.method === 'POST' ? 'post' : 'delete'](req.url).set('Authorization', `Bearer ${KEYS[req.key].key}`);
       if (body !== undefined) call = call.send(body as object);
       const res = await call;
-      const shownBody = fixedTimes(shown(res.body)) as { version?: string; filesystem?: unknown };
+      const shownBody = normalizeHostFields(fixedTimes(shown(res.body))) as { version?: string; filesystem?: unknown };
       if (schema === 'Capabilities') shownBody.version = '0.0.0';
       if (schema === 'FilesList' && req.url === '/api/v1/files' && shownBody.filesystem) shownBody.filesystem = { total: 107374182400, free: 53687091200, available: 50000000000 };
       out[`${name}.json`] = { request: req, status: res.status, schema, body: shownBody };

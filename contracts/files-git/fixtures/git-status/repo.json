@@ -34,7 +34,7 @@
       "sha": "13467b349cec5bedd671e21c40b139ec3c180896",
       "subject": "First commit",
       "author": "Ann Dev",
-      "committed_at": "2026-01-02T03:04:05+00:00"
+      "committed_at": "2026-01-02T03:04:05.000Z"
     },
     "operation": "none"
   }

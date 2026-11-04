@@ -19,7 +19,7 @@
         "type": "dir",
         "modified_at": "2026-01-02T03:04:05.000Z",
         "is_git": false,
-        "size": 212992
+        "size": 4096
       },
       {
         "name": "app",
@@ -28,7 +28,7 @@
         "type": "dir",
         "modified_at": "2026-01-02T03:04:05.000Z",
         "is_git": true,
-        "size": 192512
+        "size": 4096
       },
       {
         "name": "busy",
@@ -46,7 +46,7 @@
         "type": "dir",
         "modified_at": "2026-01-02T03:04:05.000Z",
         "is_git": false,
-        "size": 12288
+        "size": 4096
       },
       {
         "name": "site",
@@ -55,7 +55,7 @@
         "type": "dir",
         "modified_at": "2026-01-02T03:04:05.000Z",
         "is_git": false,
-        "size": 212992
+        "size": 4096
       }
     ],
     "filesystem": {
