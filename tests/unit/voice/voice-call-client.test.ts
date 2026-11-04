@@ -469,6 +469,12 @@ async function openPage(options: { tickets?: { status: number; body: string }[];
   return { element, location, fetch, sockets, getUserMedia, tap, worklet, order, console, loudness, hear, root, tg, themeChanged, systemThemeChanged, playedOut, deactivate, activate };
 }
 
+async function closePage(page: Awaited<ReturnType<typeof openPage>>) {
+  await page.tap('hangup');
+  // The page schedules Telegram's close 600 ms after hang-up.
+  await new Promise(resolve => setTimeout(resolve, 650));
+}
+
 /** Every inline script of a page, in page order, as one script. */
 function inlineScripts(html: string): string {
   return [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(match => match[1]).join(';\n');
@@ -494,9 +500,13 @@ describe('page after a refused ticket', () => {
     const storage = new Map<string, string>();
     const first = await openPage({ tickets: [{ status: 401, body: 'unauthorized' }], storage });
     const reloaded = await openPage({ storage });
-    const token = (fetch: jest.Mock) => JSON.parse((fetch.mock.calls[0] as any)[1].body).call_token;
-    expect(token(first.fetch)).toMatch(/^[0-9a-f]{64}$/);
-    expect(token(reloaded.fetch)).toBe(token(first.fetch));
+    try {
+      const token = (fetch: jest.Mock) => JSON.parse((fetch.mock.calls[0] as any)[1].body).call_token;
+      expect(token(first.fetch)).toMatch(/^[0-9a-f]{64}$/);
+      expect(token(reloaded.fetch)).toBe(token(first.fetch));
+    } finally {
+      await closePage(reloaded);
+    }
   });
 
   test("the gateway's initData refusal still ends the call without a sign-in offer", async () => {
@@ -965,14 +975,19 @@ describe('a used call link', () => {
 
   test('the page that holds the call token (a reload of the same call) still rejoins it with that token', async () => {
     const storage = new Map([['voice-call:' + 'a'.repeat(36), 'c'.repeat(64)]]);
-    const { element, fetch, sockets } = await openPage({ linkUsed: true, storage });
-    expect(JSON.parse((fetch.mock.calls[0] as any)[1].body).call_token).toBe('c'.repeat(64));
-    expect(sockets).toHaveLength(1);
-    expect(element('controls').hidden).toBe(false);
-    expect(element('hint').hidden).toBe(false);
-    sockets[0].open();
-    sockets[0].receive({ type: 'voice.state', state: 'listening', utterance_id: '0'.repeat(32), generation: '1'.repeat(32) });
-    expect(element('state')).toMatchObject({ textContent: 'Listening', className: 'state' });
+    const page = await openPage({ linkUsed: true, storage });
+    const { element, fetch, sockets } = page;
+    try {
+      expect(JSON.parse((fetch.mock.calls[0] as any)[1].body).call_token).toBe('c'.repeat(64));
+      expect(sockets).toHaveLength(1);
+      expect(element('controls').hidden).toBe(false);
+      expect(element('hint').hidden).toBe(false);
+      sockets[0].open();
+      sockets[0].receive({ type: 'voice.state', state: 'listening', utterance_id: '0'.repeat(32), generation: '1'.repeat(32) });
+      expect(element('state')).toMatchObject({ textContent: 'Listening', className: 'state' });
+    } finally {
+      await closePage(page);
+    }
   });
 });
 
@@ -987,22 +1002,32 @@ describe('theme', () => {
   });
 
   test("the page follows Telegram's theme as it opens and when it changes, and paints Telegram's header and background to match", async () => {
-    const { root, tg, themeChanged } = await openPage({ telegramTheme: { colorScheme: 'light', themeParams: { bg_color: '#ffffff' } } });
-    expect(root.attributes['data-theme']).toBe('light');
-    expect(root.style.colorScheme).toBe('light');
-    expect(tg.setHeaderColor).toHaveBeenLastCalledWith('bg_color');
-    expect(tg.setBackgroundColor).toHaveBeenLastCalledWith('bg_color');
-    themeChanged('dark', { bg_color: '#212121' });
-    expect(root.attributes['data-theme']).toBe('dark');
-    expect(root.style.colorScheme).toBe('dark');
-    expect(tg.setHeaderColor).toHaveBeenCalledTimes(2);
+    const page = await openPage({ telegramTheme: { colorScheme: 'light', themeParams: { bg_color: '#ffffff' } } });
+    const { root, tg, themeChanged } = page;
+    try {
+      expect(root.attributes['data-theme']).toBe('light');
+      expect(root.style.colorScheme).toBe('light');
+      expect(tg.setHeaderColor).toHaveBeenLastCalledWith('bg_color');
+      expect(tg.setBackgroundColor).toHaveBeenLastCalledWith('bg_color');
+      themeChanged('dark', { bg_color: '#212121' });
+      expect(root.attributes['data-theme']).toBe('dark');
+      expect(root.style.colorScheme).toBe('dark');
+      expect(tg.setHeaderColor).toHaveBeenCalledTimes(2);
+    } finally {
+      await closePage(page);
+    }
   });
 
   test('without a Telegram theme the page follows the system setting, live', async () => {
-    const { root, systemThemeChanged } = await openPage({ telegramTheme: { colorScheme: 'light', themeParams: {} }, prefersLight: true });
-    expect(root.attributes['data-theme']).toBe('light');
-    systemThemeChanged(false);
-    expect(root.attributes['data-theme']).toBe('dark');
+    const page = await openPage({ telegramTheme: { colorScheme: 'light', themeParams: {} }, prefersLight: true });
+    const { root, systemThemeChanged } = page;
+    try {
+      expect(root.attributes['data-theme']).toBe('light');
+      systemThemeChanged(false);
+      expect(root.attributes['data-theme']).toBe('dark');
+    } finally {
+      await closePage(page);
+    }
   });
 
   test('every colour on the call screen comes from a theme variable, with a light and a dark value for each semantic colour', () => {
