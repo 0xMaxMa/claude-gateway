@@ -14,6 +14,7 @@ export const isElevenLabsDialogueModel = (model: string): boolean => DIALOGUE_MO
 const MAX_IDLE_SECONDS = 180, KEEP_ALIVE_MS = 10000;
 // How long a send rejected by the same close may take to report its own cause.
 const SEND_SETTLE_MS = 250;
+const RETRYABLE_HANDSHAKES = new Set(['PROVIDER_HANDSHAKE_TIMEOUT', 'PROVIDER_DNS_TEMPORARY', 'PROVIDER_CONNECTION_REFUSED']);
 
 export class ElevenLabsTts implements TtsProvider {
   readonly capabilities = { textStreaming: true, wordAlignment: false, outputFormats: [PCM16] };
@@ -41,7 +42,18 @@ export class ElevenLabsTts implements TtsProvider {
     url.searchParams.set('model_id', this.model); url.searchParams.set('output_format', format);
     if (options.language) url.searchParams.set('language_code', options.language);
     if (!dialogue) url.searchParams.set('inactivity_timeout', String(MAX_IDLE_SECONDS));
-    const socket = await this.connect(url.toString(), { 'xi-api-key': this.key }, options.signal);
+    let socket;
+    try { socket = await this.connect(url.toString(), { 'xi-api-key': this.key }, options.signal); }
+    catch (error) {
+      if (!(error instanceof VoiceError) || !RETRYABLE_HANDSHAKES.has(error.code) || options.signal.aborted) throw error;
+      await new Promise<void>((resolve, reject) => {
+        const abort = () => { clearTimeout(timer); reject(new VoiceError('PROVIDER_ABORTED')); };
+        const timer = setTimeout(() => { options.signal.removeEventListener('abort', abort); resolve(); }, 250);
+        options.signal.addEventListener('abort', abort, { once: true });
+        if (options.signal.aborted) abort();
+      });
+      socket = await this.connect(url.toString(), { 'xi-api-key': this.key }, options.signal);
+    }
     voiceTiming('tts_socket_open');
     let sendError: unknown, finished = false, closing = false, keepAlive: NodeJS.Timeout | undefined;
     const fail = (error: unknown) => { sendError ??= error; socket.close(); };

@@ -532,6 +532,21 @@ describe('call page', () => {
     expect(element('state')).toMatchObject({ textContent: 'The voice provider is temporarily unavailable. Please try again later.', className: 'state err' });
   });
 
+  test('a failed reply TTS tells the caller that the answer text remains available', async () => {
+    const { element, sockets } = await openPage();
+    sockets[0].open();
+    sockets[0].receive({ type: 'response.text', text: 'Answer', final: true });
+    sockets[0].receive({ type: 'voice.error', operation: 'tts', response_id: 'reply', code: 'PROVIDER_HANDSHAKE_TIMEOUT', category: 'timeout', message: 'The voice provider did not respond in time. Please try again.' });
+    expect(element('state').textContent).toContain('audio could not be played');
+    expect(element('state').textContent).toContain('reply text');
+    sockets[0].receive({ type: 'voice.error', operation: 'tts', code: 'PROVIDER_HANDSHAKE_TIMEOUT', category: 'timeout', message: 'The voice provider did not respond in time. Please try again.' });
+    expect(element('state').textContent).toContain('Voice audio could not be played');
+    expect(element('state').textContent).not.toContain('reply text');
+    sockets[0].receive({ type: 'voice.error', operation: 'tts', response_id: 'reply', generated_samples: 160, code: 'PROVIDER_CONNECTION_FAILED', category: 'network', message: 'Could not connect to the voice provider.' });
+    expect(element('state').textContent).toContain('stopped before it finished');
+    expect(element('state').textContent).not.toContain('could not be played');
+  });
+
   test('the call clock starts on connect, keeps the call time across a reconnect, and stops at hang-up', async () => {
     const elapsed = { status: 200, body: JSON.stringify({ ...JSON.parse(TICKET.body), call_elapsed_ms: 66_000 }) };
     const { element, sockets, tap } = await openPage({ tickets: [TICKET, elapsed] });
