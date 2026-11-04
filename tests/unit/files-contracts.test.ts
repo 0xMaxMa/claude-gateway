@@ -8,12 +8,10 @@ import { CONTRACTS_DIR, Fixture, FIXTURES_DIR, recordFixtures, SchemaName } from
 const SCHEMA_FILES: Record<SchemaName, string> = {
   FilesList: 'files-list', FilesMkdirResponse: 'files-mkdir-response', FilesDeleteResponse: 'files-delete-response',
   GitStatus: 'git-status', GitSummary: 'git-summary', Capabilities: 'capabilities', Error: 'error',
-  FilesBusyResponse: 'files-busy-response', FilesMarksResponse: 'files-marks-response',
   SessionCreateResponse: 'session-create-response', SessionList: 'session-list', SessionError: 'session-error',
 };
 const REQUEST_SCHEMAS: Record<string, string> = {
   'POST /api/v1/files/mkdir': 'files-mkdir-request', 'DELETE /api/v1/files': 'files-delete-request',
-  'POST /api/v1/files/busy': 'files-busy-request', 'POST /api/v1/files/marks': 'files-marks-request',
 };
 
 const readJson = (file: string): unknown => JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -48,8 +46,8 @@ describe('files and git contracts', () => {
 
   it('records an error fixture for the success and the failure side of every route', () => {
     const routes = new Set(Object.keys(fixtures).map((f) => f.split('/')[0]));
-    expect([...routes].sort()).toEqual(['capabilities', 'errors', 'files-busy', 'files-delete', 'files-list', 'files-marks', 'files-mkdir', 'git-status', 'git-summary', 'sessions-create', 'sessions-list']);
-    for (const route of ['files-busy', 'files-delete', 'files-list', 'files-marks', 'files-mkdir', 'git-status', 'sessions-create']) {
+    expect([...routes].sort()).toEqual(['capabilities', 'errors', 'files-delete', 'files-list', 'files-mkdir', 'git-status', 'git-summary', 'sessions-create', 'sessions-list']);
+    for (const route of ['files-delete', 'files-list', 'files-mkdir', 'git-status', 'sessions-create']) {
       const statuses = Object.entries(fixtures).filter(([f]) => f.startsWith(`${route}/`)).map(([, x]) => x.status);
       expect([route, statuses.some((s) => s < 300), statuses.some((s) => s >= 400)]).toEqual([route, true, true]);
     }

@@ -6,11 +6,12 @@ import { createApiAuthMiddleware, isAdmin } from './auth';
 import { guardAsyncRoutes } from './async-guard';
 import { defineRoute } from './route-registry';
 import { FILES_ERRORS } from './files-router';
-import { resolveRealDir } from '../files/fs';
+import { resolveDir, resolveRealDir } from '../files/fs';
 import { parseRelPath, RelPath } from '../files/paths';
 import { collectListeners, Listener, listenersIn } from '../processes/listeners';
-import { STOP_TERM_WAIT_MS, stopProject, StopOptions } from '../processes/stop';
-import { DEFAULT_PORT_RANGE, parsePort, START_TIMEOUT_MS, StartErrorCode, StartFailure, startProject, StartOptions } from '../processes/start';
+import { STOP_TERM_WAIT_MS, stopFolder, StopOptions } from '../processes/stop';
+import { DEFAULT_PORT_RANGE, parsePort, START_TIMEOUT_MS, StartErrorCode, StartFailure, startFolder, StartOptions } from '../processes/start';
+import { pathWithin } from '../utils/paths';
 
 type AuthedRequest = Request & { apiKey: ApiKey };
 
@@ -30,7 +31,7 @@ export const PROCESSES_ERRORS: Record<StartErrorCode, { status: number; message:
   already_running: { status: 409, message: 'A process working in this folder already listens, or a start of it is running' },
   port_in_use: { status: 409, message: 'Something already listens on this port' },
   no_free_port: { status: 409, message: `Every port from ${DEFAULT_PORT_RANGE[0]} to ${DEFAULT_PORT_RANGE[1]} is in use` },
-  no_start_command: { status: 422, message: 'The folder has no .pod/start.sh in a real .pod directory' },
+  no_start_command: { status: 422, message: 'The configured start script is missing or not a regular file' },
   internal: FILES_ERRORS.internal,
   start_failed: { status: 502, message: 'The start script exited or did not listen in time' },
 };
@@ -46,8 +47,8 @@ function requireAdmin(req: Request, res: Response, next: NextFunction): void {
   else fail(res, 'forbidden_key');
 }
 
-/** A project folder: a non-empty path under the root, as the files API parses it. */
-function projectPath(raw: unknown): { ok: true; value: RelPath } | { ok: false; error: 'invalid_path' | 'invalid_name' } {
+/** A non-empty folder path under the root, as the files API parses it. */
+function folderPath(raw: unknown): { ok: true; value: RelPath } | { ok: false; error: 'invalid_path' | 'invalid_name' } {
   const rel = parseRelPath(raw);
   if (!rel.ok) return rel;
   return rel.value === '' ? { ok: false, error: 'invalid_path' } : rel;
@@ -67,8 +68,8 @@ export interface ProcessesRouterDeps {
 }
 
 /**
- * Which servers a project folder under the files root runs, starting one with the folder's `.pod/start.sh`, and
- * stopping them. Any key may read; starting and stopping need an admin key.
+ * Which servers folders under the files root run, starting one with the configured script, and
+ * stopping them. All routes need an admin key.
  */
 export function createProcessesRouter(apiKeys: ApiKey[], root: string, deps: ProcessesRouterDeps): Router {
   const { logger } = deps;
@@ -77,6 +78,7 @@ export function createProcessesRouter(apiKeys: ApiKey[], root: string, deps: Pro
     portRange: DEFAULT_PORT_RANGE,
     timeoutMs: START_TIMEOUT_MS,
     ...deps.start,
+    scriptPath: deps.start?.scriptPath ?? '',
   };
   const stopOptions: StopOptions = { termWaitMs: STOP_TERM_WAIT_MS, ...deps.stop };
   const router = guardAsyncRoutes(Router(), (req, res, e) => {
@@ -93,7 +95,26 @@ export function createProcessesRouter(apiKeys: ApiKey[], root: string, deps: Pro
     auth,
     requireAdmin,
     async (req: Request, res: Response) => {
-      const rel = projectPath(req.query.path);
+      if (req.query.path === undefined) {
+        const rootDir = await resolveDir(root, '' as RelPath, true);
+        if (!rootDir.ok) return fail(res, rootDir.error);
+        const realRoot = rootDir.value;
+        const grouped = new Map<string, Listener[]>();
+        for (const listener of await collectListeners()) {
+          for (const owner of listener.owners) {
+            if (!owner.cwd || !pathWithin(realRoot, owner.cwd) || owner.cwd === realRoot) continue;
+            const folder = path.relative(realRoot, owner.cwd).split(path.sep)[0];
+            if (!folder || !parseRelPath(folder).ok) continue;
+            const listed = grouped.get(folder) ?? [];
+            if (!listed.some((entry) => entry.port === listener.port && entry.address === listener.address)) {
+              listed.push({ port: listener.port, pids: listener.owners.map((o) => o.pid), command: listener.owners[0].command, address: listener.address });
+            }
+            grouped.set(folder, listed);
+          }
+        }
+        return res.json({ processes: [...grouped].sort(([a], [b]) => a.localeCompare(b)).map(([folder, listeners]) => ({ path: folder, running: true, listeners: listeners.sort((a, b) => a.port - b.port) })) });
+      }
+      const rel = folderPath(req.query.path);
       if (!rel.ok) return fail(res, rel.error);
       const dir = await resolveRealDir(root, rel.value);
       if (!dir.ok) return fail(res, dir.error);
@@ -105,16 +126,17 @@ export function createProcessesRouter(apiKeys: ApiKey[], root: string, deps: Pro
 
   defineRoute(
     router,
-    { method: 'POST', path: '/v1/processes/start', auth: 'admin', summary: "Start a folder's server with its .pod/start.sh", cli: null },
+    { method: 'POST', path: '/v1/processes/start', auth: 'admin', summary: 'Start a folder with the configured script', cli: null },
     auth,
     requireAdmin,
     async (req: Request, res: Response) => {
       const body = (req.body ?? {}) as { path?: unknown; port?: unknown };
-      const rel = projectPath(body.path);
+      if (!startOptions.scriptPath) return fail(res, 'no_start_command');
+      const rel = folderPath(body.path);
       if (!rel.ok) return fail(res, rel.error);
       const port = parsePort(body.port);
       if (!port.ok) return fail(res, port.error);
-      const started = await startProject(root, rel.value, port.value, startOptions);
+      const started = await startFolder(root, rel.value, port.value, startOptions);
       if (!started.ok) {
         if (started.error.code === 'start_failed') logger.warn(`processes: start of ${rel.value} failed`);
         return fail(res, started.error);
@@ -130,9 +152,9 @@ export function createProcessesRouter(apiKeys: ApiKey[], root: string, deps: Pro
     auth,
     requireAdmin,
     async (req: Request, res: Response) => {
-      const rel = projectPath(((req.body ?? {}) as { path?: unknown }).path);
+      const rel = folderPath(((req.body ?? {}) as { path?: unknown }).path);
       if (!rel.ok) return fail(res, rel.error);
-      const stopped = await stopProject(root, rel.value, stopOptions);
+      const stopped = await stopFolder(root, rel.value, stopOptions);
       if (!stopped.ok) return fail(res, stopped.error);
       if (stopped.value.stopped.length + stopped.value.remaining.length > 0) {
         logger.info(`processes: stopped ${rel.value}: ports ${stopped.value.stopped.map((p) => p.port).join(',') || '-'}, remaining ${stopped.value.remaining.map((p) => p.port).join(',') || '-'}`);

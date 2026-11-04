@@ -60,7 +60,6 @@ test('task_spawn asks the host which folder the chat session is bound to', async
     expect(scopes).toEqual([expect.objectContaining({ source: 'api', agentSessionId: 's1', chatId: 'c1' })]);
     const task = store.task(spawned.body.taskId)!;
     expect(task.cwd).toBe(projectDir);
-    expect(task.project).toBeUndefined();
     expect(task.resourceProfile).toEqual({ projectRoot: projectDir, mode: 'host' });
   });
 });

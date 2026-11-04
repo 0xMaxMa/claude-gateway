@@ -2,6 +2,7 @@ import { resetRegisteredRoutes, getRegisteredRoutes, RouteDef } from './route-re
 import { createCronRouter } from './cron-router';
 import { createPstackRouter } from './pstack-router';
 import { createFilesRouter } from './files-router';
+import { createGitRouter } from './git-router';
 import { createProcessesRouter } from './processes-router';
 
 /**
@@ -22,6 +23,7 @@ export function collectManifest(): RouteDef[] {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   createPstackRouter(undefined as any, new Map(), undefined, () => undefined);
   createFilesRouter([], '', { logger: console });
+  createGitRouter([], '', console);
   createProcessesRouter([], '', { logger: console });
 
   return getRegisteredRoutes();

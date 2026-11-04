@@ -17,12 +17,10 @@ import request from 'supertest';
 import { AgentRunner } from '../src/agent/runner';
 import { createCapabilitiesRouter } from '../src/api/capabilities';
 import { createFilesRouter } from '../src/api/files-router';
+import { createGitRouter } from '../src/api/git-router';
 import { GatewayRouter } from '../src/api/gateway-router';
-import { releaseHold } from '../src/files/holds';
-import { FolderWork } from '../src/files/marks';
 import { overlaps } from '../src/files/paths';
 import { createCwdResolver } from '../src/files/session-cwd';
-import type { WorkReason } from '../src/session/cwd';
 import type { AgentConfig, ApiKey, GatewayConfig, Logger } from '../src/types';
 
 export const CONTRACTS_DIR = path.join(__dirname, '..', 'contracts', 'files-git');
@@ -33,7 +31,7 @@ const SHOWN_ROOT = '/home/user/projects';
 const FIXED_TIME = new Date('2026-01-02T03:04:05.000Z');
 
 export type SchemaName = 'FilesList' | 'FilesMkdirResponse' | 'FilesDeleteResponse' | 'GitStatus' | 'GitSummary' | 'Capabilities' | 'Error'
-  | 'FilesBusyResponse' | 'FilesMarksResponse' | 'SessionCreateResponse' | 'SessionList' | 'SessionError';
+  | 'SessionCreateResponse' | 'SessionList' | 'SessionError';
 
 export interface Fixture {
   request: { method: 'GET' | 'POST' | 'DELETE'; url: string; key: 'admin' | 'reader'; body?: unknown };
@@ -117,8 +115,8 @@ export async function recordFixtures(): Promise<Record<string, Fixture>> {
     const app = express();
     app.use(express.json());
     app.use('/api', createCapabilitiesRouter(Object.values(KEYS), config));
-    const work: FolderWork = { prepare: async () => {}, reasons: (dir) => new Set<WorkReason>(overlaps(path.join(root, 'busy'), dir) ? ['turn'] : []) };
-    app.use('/api', createFilesRouter(Object.values(KEYS), root, { logger: quiet, inUse: (dir) => overlaps(path.join(root, 'busy'), dir), work }));
+    app.use('/api', createFilesRouter(Object.values(KEYS), root, { logger: quiet, inUse: (dir) => overlaps(path.join(root, 'busy'), dir) }));
+    app.use('/api', createGitRouter(Object.values(KEYS), root, quiet));
     const workspace = path.join(base, 'agents', 'alfred', 'workspace');
     fs.mkdirSync(workspace, { recursive: true });
     const agent: AgentConfig = { id: 'alfred', description: 'alfred', workspace, env: '', claude: { model: 'claude-test', dangerouslySkipPermissions: true, extraFlags: [] } };
@@ -156,25 +154,13 @@ export async function recordFixtures(): Promise<Record<string, Fixture>> {
       ['git-status/repo', { method: 'GET', url: '/api/v1/git/status?path=app', key: 'reader' }, 'GitStatus'],
       ['git-status/not_a_git_repo', { method: 'GET', url: '/api/v1/git/status?path=site/web', key: 'reader' }, 'Error'],
       ['git-summary/nested', { method: 'GET', url: '/api/v1/git/summary?path=site', key: 'reader' }, 'GitSummary'],
-      ['files-busy/report', { method: 'POST', url: '/api/v1/files/busy', key: 'admin', body: { paths: ['busy', 'app', 'nope'] } }, 'FilesBusyResponse'],
-      ['files-busy/invalid_mark', { method: 'POST', url: '/api/v1/files/busy', key: 'admin', body: { paths: [] } }, 'Error'],
-      ['files-marks/created', { method: 'POST', url: '/api/v1/files/marks', key: 'admin', body: { path: 'app', purpose: 'cleaning', ttlSec: 60 } }, 'FilesMarksResponse'],
-      ['files-mkdir/marked', { method: 'POST', url: '/api/v1/files/mkdir', key: 'admin', body: { path: 'app/new' } }, 'Error'],
-      ['files-marks/marked', { method: 'POST', url: '/api/v1/files/marks', key: 'admin', body: { path: 'app', purpose: 'starting', ttlSec: 300 } }, 'Error'],
-      ['files-marks/in_use', { method: 'POST', url: '/api/v1/files/marks', key: 'admin', body: { path: 'busy', purpose: 'cleaning', ttlSec: 60 } }, 'Error'],
-      ['files-marks/invalid_mark', { method: 'POST', url: '/api/v1/files/marks', key: 'admin', body: { path: 'site', purpose: 'cleaning', ttlSec: 30 } }, 'Error'],
-      ['files-marks/not_a_directory', { method: 'POST', url: '/api/v1/files/marks', key: 'admin', body: { path: 'notes.txt', purpose: 'cleaning', ttlSec: 60 } }, 'Error'],
-      ['files-marks/forbidden_key', { method: 'POST', url: '/api/v1/files/marks', key: 'reader', body: { path: 'site', purpose: 'cleaning', ttlSec: 60 } }, 'Error'],
-      ['files-delete/marked', { method: 'DELETE', url: '/api/v1/files', key: 'admin', body: { path: 'app', confirm: 'app' } }, 'Error'],
     ];
     const sessionSteps: Step[] = [
       ['sessions-create/created', { method: 'POST', url: '/api/v1/agents/alfred/sessions?chat_id=web', key: 'admin', body: { cwd: 'site' } }, 'SessionCreateResponse'],
       ['sessions-create/created_trusted', { method: 'POST', url: '/api/v1/agents/alfred/sessions?chat_id=web', key: 'admin', body: { cwd: `${SHOWN_ROOT}/site/web` } }, 'SessionCreateResponse'],
-      ['sessions-create/project_replaced_by_cwd', { method: 'POST', url: '/api/v1/agents/alfred/sessions?chat_id=web', key: 'admin', body: { project: 'site' } }, 'SessionError'],
       ['sessions-create/invalid_cwd', { method: 'POST', url: '/api/v1/agents/alfred/sessions?chat_id=web', key: 'admin', body: { cwd: '../x' } }, 'SessionError'],
       ['sessions-create/cwd_outside_root', { method: 'POST', url: '/api/v1/agents/alfred/sessions?chat_id=web', key: 'admin', body: { cwd: 'escape' } }, 'SessionError'],
       ['sessions-create/cwd_not_found', { method: 'POST', url: '/api/v1/agents/alfred/sessions?chat_id=web', key: 'admin', body: { cwd: 'nope' } }, 'SessionError'],
-      ['sessions-create/path_marked', { method: 'POST', url: '/api/v1/agents/alfred/sessions?chat_id=web', key: 'admin', body: { cwd: 'app' } }, 'SessionError'],
       ['sessions-list/web', { method: 'GET', url: '/api/v1/agents/alfred/sessions?chat_id=web', key: 'admin' }, 'SessionList'],
     ];
 
@@ -201,10 +187,6 @@ export async function recordFixtures(): Promise<Record<string, Fixture>> {
       pinTimes(root);
     }
     for (const [name, req, schema] of sessionSteps) await record(name, sessions as unknown as express.Express, req, schema);
-    for (const f of Object.values(out)) {
-      const markId = (f.body as { markId?: string } | null)?.markId;
-      if (markId) releaseHold(markId);
-    }
     await record('capabilities/disabled', disabled, { method: 'GET', url: '/api/v1/capabilities', key: 'admin' }, 'Capabilities');
     await record('errors/internal', thrower, { method: 'DELETE', url: '/api/v1/files', key: 'admin', body: { path: 'busy', confirm: 'busy' } }, 'Error');
     return out;

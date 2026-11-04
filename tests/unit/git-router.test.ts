@@ -5,6 +5,7 @@ import * as os from 'os';
 import * as path from 'path';
 import request from 'supertest';
 import { createFilesRouter } from '../../src/api/files-router';
+import { createGitRouter } from '../../src/api/git-router';
 import type { ApiKey } from '../../src/types';
 import { silentLogger } from '../helpers/silent-logger';
 
@@ -89,7 +90,7 @@ beforeEach(() => {
   fs.mkdirSync(process.env.HOME);
   app = express();
   app.use(express.json());
-  app.use('/api', createFilesRouter(apiKeys, root, { logger: { ...silentLogger, warn } }));
+  app.use('/api', createGitRouter(apiKeys, root, { ...silentLogger, warn }));
 });
 
 afterEach(() => {

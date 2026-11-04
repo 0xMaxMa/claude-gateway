@@ -26,27 +26,28 @@ export type FilesErrorCode =
   | 'internal';
 
 /**
- * Every segment of a path must match. It keeps dot entries, and so the `.deleting-*` trash of a failed delete, out of
- * reach of every route.
+ * Ordinary routes use entry names without a dot prefix. Delete may opt into hidden names but still refuses trash.
  */
 const ENTRY_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 const MAX_PATH_DEPTH = 32;
 
-export function parseEntryName(raw: unknown): Result<EntryName, 'invalid_name'> {
-  if (typeof raw !== 'string' || !ENTRY_NAME_RE.test(raw)) {
+export function parseEntryName(raw: unknown, allowHidden = false): Result<EntryName, 'invalid_name'> {
+  const visible = typeof raw === 'string' && ENTRY_NAME_RE.test(raw);
+  const hidden = allowHidden && typeof raw === 'string' && /^\.[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/.test(raw) && !raw.startsWith('.deleting-');
+  if (!visible && !hidden) {
     return err('invalid_name');
   }
   return ok(raw as EntryName);
 }
 
 /** `invalid_path` for a non-string, an absolute path, an empty segment or too many segments; `invalid_name` for a segment the name rule refuses. */
-export function parseRelPath(raw: unknown): Result<RelPath, 'invalid_path' | 'invalid_name'> {
+export function parseRelPath(raw: unknown, allowHidden = false): Result<RelPath, 'invalid_path' | 'invalid_name'> {
   if (typeof raw !== 'string') return err('invalid_path');
   if (raw === '') return ok(raw as RelPath);
   const segments = raw.split('/');
   if (segments.length > MAX_PATH_DEPTH || segments.some((s) => s === '')) return err('invalid_path');
-  return segments.every((s) => parseEntryName(s).ok) ? ok(raw as RelPath) : err('invalid_name');
+  return segments.every((s) => parseEntryName(s, allowHidden).ok) ? ok(raw as RelPath) : err('invalid_name');
 }
 
 export function pathSegments(rel: RelPath): EntryName[] {

@@ -11,7 +11,6 @@ import { AgentRunner } from '../../src/agent/runner';
 import { GatewayRouter } from '../../src/api/gateway-router';
 import { createCwdResolver } from '../../src/files/session-cwd';
 import type { CwdResolver } from '../../src/session/cwd';
-import { SessionStore } from '../../src/session/store';
 import { AgentConfig, ApiKey, GatewayConfig } from '../../src/types';
 import { waitForCondition } from '../helpers/wait-for';
 import { silentLogger } from '../helpers/silent-logger';
@@ -385,19 +384,6 @@ describe('a folder-bound legacy chat turn', () => {
     expect(spawns(h).filter((s) => s.cwd !== path.join(h.root, 'site'))).toEqual([]);
   });
 
-  it('fails closed with CWD_UNAVAILABLE when a dev-data binding file cannot be read', async () => {
-    h = await harness();
-    const store = new SessionStore(path.join(h.base, 'agents'));
-    const sessionId = (await store.createTelegramSession('alfred', 'web', 'old', 'api')).id;
-    fs.mkdirSync(path.join(h.base, 'agents', 'alfred', 'project-bindings'), { recursive: true });
-    fs.writeFileSync(path.join(h.base, 'agents', 'alfred', 'project-bindings', `${sessionId}.json`), '{not json');
-    const res = await send(h, sessionId, 'hi');
-    expect(res.status).toBe(409);
-    expect(res.body.code).toBe('CWD_UNAVAILABLE');
-    expect(spawns(h)).toEqual([]);
-    expect((await send(h, sessionId, 'hi', KEYS.podReader!)).body.code).toBe('CWD_UNAVAILABLE');
-  });
-
   it('carries cwd and trusted on the admin sidebar list', async () => {
     h = await harness({ trusted: ['site'] });
     const bound = await cwdSession(h);
@@ -670,7 +656,7 @@ describe('capabilities follow orchestration', () => {
     try {
       const res = await supertest(h.app).get('/api/v1/capabilities').set('Authorization', `Bearer ${KEYS.admin!.key}`);
       expect(res.body.capabilities.sessions).toEqual(cwd ? ['cwd'] : []);
-      expect(res.body.capabilities.files).toEqual(['list', 'create', 'delete', 'marks', 'cleanup']);
+      expect(res.body.capabilities.files).toEqual(['list', 'create', 'delete']);
     } finally {
       await teardown(h);
     }

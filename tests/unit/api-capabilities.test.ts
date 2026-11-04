@@ -80,13 +80,13 @@ describe('GET /api/v1/capabilities', () => {
   it('advertises every files, git and sessions token to an admin key', async () => {
     const res = await request(buildApp(apiKeys)).get('/api/v1/capabilities').set(AUTH);
     const { files, git, sessions } = res.body.capabilities;
-    expect({ files, git, sessions }).toEqual({ files: ['list', 'create', 'delete', 'marks', 'cleanup'], git: ['status', 'summary'], sessions: ['cwd'] });
+    expect({ files, git, sessions }).toEqual({ files: ['list', 'create', 'delete'], git: ['status', 'summary'], sessions: ['cwd'] });
     expect(res.body.capabilities).not.toHaveProperty('projects');
   });
 
   it('drops sessions cwd without orchestration and every token when the files API is disabled', () => {
     const gw = (g: Record<string, unknown>) => ({ gateway: g, agents: [] }) as never;
-    expect(buildCapabilitiesResponse('1', gw({ orchestration: false })).capabilities).toMatchObject({ files: ['list', 'create', 'delete', 'marks', 'cleanup'], git: ['status', 'summary'], sessions: [] });
+    expect(buildCapabilitiesResponse('1', gw({ orchestration: false })).capabilities).toMatchObject({ files: ['list', 'create', 'delete'], git: ['status', 'summary'], sessions: [] });
     expect(buildCapabilitiesResponse('1', gw({ orchestration: true })).capabilities.sessions).toEqual(['cwd']);
     expect(buildCapabilitiesResponse('1', gw({ orchestration: true, files: { enabled: false } })).capabilities).toMatchObject({ files: [], git: [], sessions: [] });
   });
@@ -102,7 +102,8 @@ describe('GET /api/v1/capabilities', () => {
 
   it('advertises processes, start and stop only to an admin key, and nothing when files are off', () => {
     const on = { gateway: { orchestration: true }, agents: [] } as never;
-    expect(buildCapabilitiesResponse('1', on, apiKeys[0]).capabilities.processes).toEqual(['list', 'start', 'stop']);
+    expect(buildCapabilitiesResponse('1', on, apiKeys[0]).capabilities.processes).toEqual(['list', 'stop']);
+    expect(buildCapabilitiesResponse('1', { gateway: { processes: { startScript: '.pod/start.sh' } }, agents: [] } as never, apiKeys[0]).capabilities.processes).toEqual(['list', 'start', 'stop']);
     expect(buildCapabilitiesResponse('1', on, apiKeys[2]).capabilities.processes).toEqual([]);
     const off = { gateway: { files: { enabled: false } }, agents: [] } as never;
     expect(buildCapabilitiesResponse('1', off, apiKeys[0]).capabilities.processes).toEqual([]);
@@ -165,8 +166,6 @@ describe('GET /api/v1/capabilities', () => {
   it('maps every files and git token to one served route, admin-only exactly where the token is', () => {
     const routes: Record<string, string[]> = {
       'files.list': ['GET /v1/files'], 'files.create': ['POST /v1/files/mkdir'], 'files.delete': ['DELETE /v1/files'],
-      'files.marks': ['POST /v1/files/busy', 'POST /v1/files/marks', 'DELETE /v1/files/marks/:markId'],
-      'files.cleanup': ['GET /v1/files/cleanup/candidates', 'POST /v1/files/cleanup'],
       'git.status': ['GET /v1/git/status'], 'git.summary': ['GET /v1/git/summary'],
     };
     const served = new Map(collectManifest().filter((r) => /^\/v1\/(files|git)\b/.test(r.path)).map((r) => [`${r.method} ${r.path}`, r.auth]));

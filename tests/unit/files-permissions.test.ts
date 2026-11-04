@@ -6,6 +6,7 @@ import request from 'supertest';
 import { AgentRunner } from '../../src/agent/runner';
 import { GatewayRouter } from '../../src/api/gateway-router';
 import { createFilesRouter } from '../../src/api/files-router';
+import { createGitRouter } from '../../src/api/git-router';
 import { createCwdResolver } from '../../src/files/session-cwd';
 import { getRegisteredRoutes } from '../../src/api/route-registry';
 import type { AgentConfig, ApiKey, GatewayConfig } from '../../src/types';
@@ -21,10 +22,8 @@ const NON_ADMIN = [KEYS.podWrite, KEYS.podRead, KEYS.alfredOnly];
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64');
 
 const ADMIN_ONLY_ROUTES = [
-  'POST /v1/files/mkdir', 'DELETE /v1/files', 'GET /v1/files/cleanup/candidates', 'POST /v1/files/cleanup',
+  'POST /v1/files/mkdir', 'DELETE /v1/files',
 ];
-/** Admin-only too; tests/integration/files-marks.test.ts checks each refuses a non-admin key. */
-const MARKS_ROUTES = ['POST /v1/files/busy', 'POST /v1/files/marks', 'DELETE /v1/files/marks/:markId'];
 const READ_ROUTES = [
   'GET /v1/files', 'GET /v1/git/summary', 'GET /v1/git/status',
 ];
@@ -42,11 +41,13 @@ describe('the /v1/files and /v1/git routes', () => {
     app = express();
     app.use(express.json());
     app.use('/api', createFilesRouter(Object.values(KEYS), root, { logger: silentLogger }));
+    app.use('/api', createGitRouter(Object.values(KEYS), root, silentLogger));
   });
   afterEach(() => fs.rmSync(base, { recursive: true, force: true }));
 
   const routes = () => {
     createFilesRouter([], '', { logger: silentLogger });
+    createGitRouter([], '', silentLogger);
     return getRegisteredRoutes().filter((r) => /^\/v1\/(files|git)\b/.test(r.path));
   };
   const call = (route: string, key?: ApiKey) => {
@@ -57,10 +58,10 @@ describe('the /v1/files and /v1/git routes', () => {
     return (key ? req.set('Authorization', `Bearer ${key.key}`) : req).send(body);
   };
 
-  it('registers the eight routes, and marks exactly mkdir, delete and the marks routes as admin', () => {
+  it('registers the five routes, and marks exactly mkdir, delete as admin', () => {
     const all = routes().map((r) => `${r.method} ${r.path}`);
-    expect(all.sort()).toEqual([...ADMIN_ONLY_ROUTES, ...MARKS_ROUTES, ...READ_ROUTES].sort());
-    expect(routes().filter((r) => r.auth === 'admin').map((r) => `${r.method} ${r.path}`).sort()).toEqual([...ADMIN_ONLY_ROUTES, ...MARKS_ROUTES].sort());
+    expect(all.sort()).toEqual([...ADMIN_ONLY_ROUTES, ...READ_ROUTES].sort());
+    expect(routes().filter((r) => r.auth === 'admin').map((r) => `${r.method} ${r.path}`).sort()).toEqual([...ADMIN_ONLY_ROUTES].sort());
   });
 
   it.each(NON_ADMIN)('lets $key read every read route', async (key) => {

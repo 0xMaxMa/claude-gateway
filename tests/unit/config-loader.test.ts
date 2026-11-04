@@ -639,13 +639,15 @@ describe('config-loader', () => {
     };
     const loadRoot = (root: unknown) => load({ files: { root } });
 
-    it('loads a config with no files key', () => {
-      expect(load({}).gateway.files).toBeUndefined();
+    it('accepts a relative start script and refuses unsafe script paths', () => {
+      expect(load({ processes: { startScript: '.pod/start.sh' } }).gateway.processes?.startScript).toBe('.pod/start.sh');
+      for (const script of ['/tmp/run.sh', '../run.sh', 'app/../../run.sh', '', 42, null]) {
+        expect(() => load({ processes: { startScript: script } })).toThrow('gateway.processes.startScript must be a relative script path');
+      }
     });
 
-    it.each([{ root: '~/x' }, {}, null])('fails the load on the old gateway.projects key (%j) and names gateway.files', (projects) => {
-      expect(() => load({ projects })).toThrow(ConfigValidationError);
-      expect(() => load({ projects })).toThrow('gateway.projects was renamed to gateway.files');
+    it('loads a config with no files key', () => {
+      expect(load({}).gateway.files).toBeUndefined();
     });
 
     it('accepts a ~/ path and an absolute path outside HOME', () => {

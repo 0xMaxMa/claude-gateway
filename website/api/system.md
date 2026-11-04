@@ -164,10 +164,10 @@ curl -H "Authorization: Bearer $KEY" http://localhost:10850/api/v1/capabilities 
   "version": "2.0.9",
   "capabilities": {
     "cross_channel_message": ["telegram", "discord", "line", "slack", "whatsapp", "whatsapp_cloud", "wechat"],
-    "files": ["list", "create", "delete", "marks", "cleanup"],
+    "files": ["list", "create", "delete"],
     "git": ["status", "summary"],
     "sessions": ["cwd"],
-    "processes": ["list", "start", "stop"]
+    "processes": ["list", "stop"]
   },
   "filesRoot": "/home/user/projects"
 }
@@ -180,7 +180,7 @@ curl -H "Authorization: Bearer $KEY" http://localhost:10850/api/v1/capabilities 
 | `version` | `string` | The gateway's `package.json` version. **Informational only** — never gate a feature on it; use the capability keys. |
 | `capabilities` | `object` | One entry per supported feature. A key that is **absent** means the feature is **not** supported. |
 | `capabilities.cross_channel_message` | `string[]` | Channel identifiers for which a client may inject a message into a session that belongs to that channel via `POST /api/v1/agents/:agentId/chats/:chatId/sessions/:sessionId/messages`. The injected message is delivered into the session and echoed to the channel's conversation so its users see what was sent from elsewhere. A channel is listed only once that round-trip actually works for it. |
-| `capabilities.files` | `string[]` | Operations of the [Files API](/api/files) this key can use right now. A key that is not an admin key gets every operation except `create`, `delete`, `marks` and `cleanup` (see below). |
+| `capabilities.files` | `string[]` | Operations of the [Files API](/api/files) this key can use right now. A key that is not an admin key gets every operation except `create` and `delete` (see below). |
 | `capabilities.git` | `string[]` | Routes of the read-only [Git API](/api/git). |
 | `capabilities.sessions` | `string[]` | `cwd` when a session may be bound to a folder under the files root (see below). |
 | `capabilities.processes` | `string[]` | Routes of the processes API for folders under the files root (see below). |
@@ -192,10 +192,10 @@ curl -H "Authorization: Bearer $KEY" http://localhost:10850/api/v1/capabilities 
 | Key | Value | Meaning |
 |-----|-------|---------|
 | `cross_channel_message` | `string[]` of channel ids | Cross-channel message injection is supported for sessions whose channel is in the array. Currently every channel the gateway supports: `["telegram", "discord", "line", "slack", "whatsapp", "whatsapp_cloud", "wechat"]` — the web→channel echo fires for all of them. |
-| `files` | `string[]` of operations | The [Files API](/api/files) is served. Currently `["list", "create", "delete", "marks", "cleanup"]`. Check `includes("list")` before showing a listing, `includes("create")` before showing folder create ([`POST /files/mkdir`](/api/files#post-files-mkdir)), `includes("delete")` before showing [delete](/api/files#delete-files), and `includes("marks")` before calling the [busy and marks routes](/api/files#marks). The list is per key: a key that is not an admin key gets `["list"]`, because creating, deleting and marks need an admin key. Empty when `gateway.files.enabled` is `false`, which the config loader also sets when the default root (`~/projects`) is or contains your home or config directory, or when the root holds `:`. Later releases may append values. |
+| `files` | `string[]` of operations | The [Files API](/api/files) is served. Currently `["list", "create", "delete"]`. Check `includes("list")` before showing a listing, `includes("create")` before showing folder create ([`POST /files/mkdir`](/api/files#post-files-mkdir)), `includes("delete")` before showing [delete](/api/files#delete-files). The list is per key: a key that is not an admin key gets `["list"]`, because creating and deleting need an admin key. Empty when `gateway.files.enabled` is `false`, which the config loader also sets when the default root (`~/projects`) is or contains your home or config directory, or when the root holds `:`. Later releases may append values. |
 | `git` | `string[]` of routes | The read-only [Git API](/api/git) is served. Currently `["status", "summary"]`, for [`GET /git/status`](/api/git#get-git-status) and [`GET /git/summary`](/api/git#get-git-summary). Empty when the files API is off. |
 | `sessions` | `string[]` of operations | Currently `["cwd"]`: [session create](/api/sessions#post-apiv1agentsagentidsessions) accepts `cwd`, a folder under the files root, and runs the chat there. `cwd` is listed only when `gateway.orchestration` is on, because such a chat is started through [`POST /messages/accept`](/api/messages), which needs orchestration. Empty when the files API is off. |
-| `processes` | `string[]` of operations | Currently `["list", "start", "stop"]`. `list` is `GET /api/v1/processes?path=<folder>`, which answers `{ path, running, listeners: [{ port, pids, command, address }] }`: the listening TCP sockets of processes whose working directory is the folder or inside it, with secret-looking argv values masked and `command` cut to 200 characters. `start` is `POST /api/v1/processes/start` with `{ path, port? }`, which runs the folder's `.pod/start.sh` as `sh .pod/start.sh` with only `PATH`, `HOME`, `LANG` and `PORT` set, picks the first free port from 3000 to 3099 when `port` is absent, waits up to 20 s for it to listen, and answers `202 { path, port, pid, running: true }`. Errors: the files API's path codes, `400 invalid_port`, `409 already_running` (with `port`, or `starting: true` while another start of the folder runs), `409 port_in_use`, `409 no_free_port`, `422 no_start_command`, `502 start_failed` (with `log`, the last 4 KiB of the script's output, secrets masked). `stop` is `POST /api/v1/processes/stop` with `{ path }`: it sends SIGTERM to the listening processes working in the folder, SIGKILL to those still listening after 5 s, re-reads each process's start time before every signal so a reused pid is never hit, and answers `200 { path, stopped: [{ port, pids }], remaining: [{ port, pids }], running }`. `start` and `stop` need an admin key, so other keys get `["list"]`. Empty when the files API is off. |
+| `processes` | `string[]` of operations | Admin keys receive `list` and `stop`. `start` appears only when `gateway.processes.startScript` is configured. `GET /api/v1/processes?path=<folder>` reports one folder; without `path` it returns `{ processes: [{ path, running, listeners }] }` for every folder with a listener under the root. Start runs the configured relative script with `PORT` set; an explicit `port` may be supplied. Without a port the gateway chooses a free unprivileged port. Stop takes `{ path }` and signals matching listeners after checking process identity. Other keys receive an empty array. |
 
 Channel identifiers are the gateway's canonical channel names — the same strings a
 session reports as its `channel` — drawn from `CHAT_CHANNELS` in

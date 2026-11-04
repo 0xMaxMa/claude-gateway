@@ -4,6 +4,7 @@ import * as os from 'os';
 import * as path from 'path';
 import request from 'supertest';
 import { createFilesRouter } from '../../src/api/files-router';
+import { createGitRouter } from '../../src/api/git-router';
 import { resolveFilesRoot } from '../../src/files/config';
 import type { ApiKey, GatewayConfig } from '../../src/types';
 import { silentLogger } from '../helpers/silent-logger';
@@ -32,6 +33,7 @@ beforeEach(() => {
   app = express();
   app.use(express.json());
   app.use('/api', createFilesRouter(apiKeys, root, { logger: silentLogger }));
+  app.use('/api', createGitRouter(apiKeys, root, silentLogger));
 });
 
 afterEach(() => fs.rmSync(base, { recursive: true, force: true }));

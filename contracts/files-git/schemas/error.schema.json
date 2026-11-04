@@ -31,14 +31,10 @@
         "not_a_git_repo",
         "git_unsafe_owner",
         "git_unreadable",
-        "too_many_marks",
-        "invalid_cleanup",
         "internal",
         "git_failed",
         "git_unavailable",
-        "timeout",
-        "marked",
-        "invalid_mark"
+        "timeout"
       ]
     },
     "reasons": {

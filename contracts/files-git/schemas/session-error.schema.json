@@ -16,12 +16,10 @@
     },
     "code": {
       "enum": [
-        "project_replaced_by_cwd",
         "invalid_cwd",
         "cwd_outside_root",
         "cwd_not_found",
         "files_disabled",
-        "path_marked",
         "cwd_unavailable",
         "cwd_unsupported_agent"
       ]

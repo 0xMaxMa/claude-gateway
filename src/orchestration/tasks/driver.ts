@@ -67,7 +67,6 @@ async function startCwd(tasks: TaskService, task: TaskSnapshot): Promise<Session
   if (task.resourceProfile?.mode !== 'host') throw new OrchestrationError('CWD_UNSUPPORTED_AGENT', 'Folder-bound tasks run only in host workspace mode. No worker was started.');
   const root = task.resourceProfile?.projectRoot ?? '';
   const cwd = tasks.cwd ? await tasks.cwd.resolver.resolve(stored) : undefined;
-  if (cwd && !cwd.ok && cwd.error === 'marked') throw new OrchestrationError('PATH_MARKED', 'The chat\'s working folder is held by a cleaning mark. No worker was started.');
   const dir = cwd?.ok ? await realpathWithin(cwd.value.dir, root) : undefined;
   if (!cwd?.ok || dir !== root) throw new OrchestrationError('CWD_UNAVAILABLE', 'The chat\'s working folder is no longer available. No worker was started.');
   return cwd.value;

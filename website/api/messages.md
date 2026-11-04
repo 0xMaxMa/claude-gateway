@@ -140,7 +140,7 @@ curl -X POST \
 | 401 | Missing API key |
 | 403 | Invalid key or key has no access to that agent |
 | 404 | Agent ID not found, or `session_id` names no session in this `chat_id` (`code: "SESSION_NOT_FOUND"`). A session id that belongs to another `chat_id` of this agent gets this answer too, and nothing is written |
-| 409 | Session is busy processing another request. With `code: "CWD_UNAVAILABLE"`, the session's folder is gone, renamed, outside the files root, or being deleted. With `code: "PATH_MARKED"`, a [mark](/api/files#marks) holds the session's folder. See [folder-bound sessions](/api/sessions#post-apiv1agentsagentidsessions) |
+| 409 | Session is busy processing another request. With `code: "CWD_UNAVAILABLE"`, the session's folder is gone, renamed, outside the files root, or being deleted. See [folder-bound sessions](/api/sessions#post-apiv1agentsagentidsessions) |
 | 504 | Agent did not respond within timeout (default 60s) — **sync mode only** |
 | 503 | Provider capacity is exhausted or the provider is temporarily unavailable |
 | 500 | Internal error |

@@ -216,6 +216,5 @@ describe('folder-bound chat session fixes', () => {
     expect(del.status).toBeLessThan(300);
     expect(await h.runners[0]!.sessionCwdView(sid)).toEqual({ cwd: null, trusted: false, cwdState: null, active: false });
     expect(await h.runners[0]!.hasActiveWorkIn(path.join(h.root, 'site'))).toBe(false);
-    expect(fs.existsSync(path.join(h.base, 'agents', 'alfred', 'project-bindings'))).toBe(false);
   }, 30000);
 });

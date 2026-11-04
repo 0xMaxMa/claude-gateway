@@ -85,7 +85,7 @@ export async function stopTargets(targets: StopTarget[], opts: StopOptions): Pro
  * Stop the servers of the folder `rel` names: every process that listens and works in the folder or inside it. A
  * process working elsewhere is never signalled.
  */
-export async function stopProject(root: string, rel: RelPath, opts: StopOptions): Promise<Result<Stopped, FilesErrorCode>> {
+export async function stopFolder(root: string, rel: RelPath, opts: StopOptions): Promise<Result<Stopped, FilesErrorCode>> {
   const dir = await resolveRealDir(root, rel);
   if (!dir.ok) return err(dir.error);
   const all = await collectListeners();

@@ -44,16 +44,15 @@ export const CROSS_CHANNEL_MESSAGE_CHANNELS: readonly ChatChannel[] = [...CHAT_C
 /**
  * Folder operations served by files-router.ts under the one files root. Clients gate listing on `includes('list')`,
  * `POST /v1/files/mkdir` on `includes('create')`, `DELETE /v1/files` on `includes('delete')`, and
- * `POST /v1/files/busy` with `POST|DELETE /v1/files/marks` on `includes('marks')`, and the cleanup candidates and
- * removal on `includes('cleanup')`. The gateway serves no file contents; they are viewed in code-server.
+ * The gateway serves no file contents; they are viewed in code-server.
  */
-export const FILES_CAPABILITIES = ['list', 'create', 'delete', 'marks', 'cleanup'] as const;
+export const FILES_CAPABILITIES = ['list', 'create', 'delete'] as const;
 export type FilesCapability = (typeof FILES_CAPABILITIES)[number];
 
 /** The operations files-router.ts serves only to an admin key; every other token is open to any key. */
-export const FILES_ADMIN_CAPABILITIES: ReadonlySet<FilesCapability> = new Set(['create', 'delete', 'marks', 'cleanup']);
+export const FILES_ADMIN_CAPABILITIES: ReadonlySet<FilesCapability> = new Set(['create', 'delete']);
 
-/** Read-only git routes served by files-router.ts: `GET /v1/git/status` and `GET /v1/git/summary`. */
+/** Read-only git routes served by git-router.ts: `GET /v1/git/status` and `GET /v1/git/summary`. */
 export const GIT_CAPABILITIES = ['status', 'summary'] as const;
 export type GitCapability = (typeof GIT_CAPABILITIES)[number];
 
@@ -71,9 +70,6 @@ export type SessionsCapability = (typeof SESSIONS_CAPABILITIES)[number];
  */
 export const PROCESSES_CAPABILITIES = ['list', 'start', 'stop'] as const;
 export type ProcessesCapability = (typeof PROCESSES_CAPABILITIES)[number];
-
-/** The processes operations served only to an admin key. */
-export const PROCESSES_ADMIN_CAPABILITIES: ReadonlySet<ProcessesCapability> = new Set(['list', 'start', 'stop']);
 
 export interface CapabilitiesResponse {
   /** Gateway version from package.json. Informational — clients should key off `capabilities`, not parse this. */
@@ -108,7 +104,7 @@ export function filesAvailability(config?: GatewayConfig, apiKey?: ApiKey): File
     files: FILES_CAPABILITIES.filter((c) => admin || !FILES_ADMIN_CAPABILITIES.has(c)),
     git: [...GIT_CAPABILITIES],
     sessions: orchestrated ? [...SESSIONS_CAPABILITIES] : [],
-    processes: PROCESSES_CAPABILITIES.filter((c) => admin || !PROCESSES_ADMIN_CAPABILITIES.has(c)),
+    processes: admin ? PROCESSES_CAPABILITIES.filter((c) => c !== 'start' || Boolean(config?.gateway.processes?.startScript)) : [],
   };
 }
 

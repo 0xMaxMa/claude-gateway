@@ -466,8 +466,15 @@ export function loadConfig(configPath: string, options?: LoadConfigOptions): Gat
     interpolatedGateway.publicUrl = normalizedPublicUrl;
   }
 
-  if ('projects' in interpolatedGateway) {
-    throw new ConfigValidationError('gateway.projects was renamed to gateway.files; move its root, trusted and enabled keys there');
+  const processes = interpolatedGateway.processes;
+  if (processes !== undefined) {
+    if (typeof processes !== 'object' || processes === null || Array.isArray(processes)) {
+      throw new ConfigValidationError('gateway.processes must be an object');
+    }
+    const script = (processes as Record<string, unknown>).startScript;
+    if (script !== undefined && (typeof script !== 'string' || script === '' || !parseRelPath(script, true).ok)) {
+      throw new ConfigValidationError('gateway.processes.startScript must be a relative script path inside a folder');
+    }
   }
   const files = interpolatedGateway.files;
   if (files !== undefined) {

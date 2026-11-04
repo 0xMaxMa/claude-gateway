@@ -92,9 +92,6 @@ Paths are relative to `gateway.files.root` (default `~/projects`). See [Files](/
 | `GET` | `/api/v1/files?path=` | Key | List the folders directly under a path of the root |
 | `POST` | `/api/v1/files/mkdir` | Admin key | Create one new folder, optionally with `git init` |
 | `DELETE` | `/api/v1/files` | Admin key | Delete a folder and everything in it (JSON body `path`, `confirm`) |
-| `POST` | `/api/v1/files/busy` | Admin key | Report what works in each of 1 to 200 folders (advisory) |
-| `POST` | `/api/v1/files/marks` | Admin key | Hold a folder for 60 to 300 seconds while a cleaner works in it |
-| `DELETE` | `/api/v1/files/marks/:markId` | Admin key | Release a mark (always `204`) |
 
 ## Git API {#git-api}
 

@@ -159,7 +159,7 @@ export class TaskService {
     if (this.workerHarness?.(context.model) === 'codex') throw new OrchestrationError('CWD_UNSUPPORTED_AGENT', 'No task was queued: folder-bound tasks cannot run on the Codex worker harness.');
     if (!cwd.ok) {
       const code = (cwdError(cwd.error) as Error & { code: string }).code;
-      throw new OrchestrationError(code, code === 'PATH_MARKED' ? 'No task was queued: this chat\'s working folder is held by a cleaning mark.' : 'No task was queued: this chat\'s working folder is no longer available.');
+      throw new OrchestrationError(code, 'No task was queued: this chat\'s working folder is no longer available.');
     }
     if (workingDirectory === undefined) return { cwd: cwd.value.path, dir: await this.priorCwdDir(context, cwd.value, continueTaskId) ?? cwd.value.dir };
     const dir = typeof workingDirectory === 'string' ? await realpathWithin(cwd.value.dir, workingDirectory) : undefined;
@@ -172,11 +172,8 @@ export class TaskService {
     const dir = prior?.conversationId === context.conversationId && this.taskCwd(prior) === cwd.path ? prior.resourceProfile?.projectRoot : undefined;
     return dir ? realpathWithin(cwd.dir, dir) : undefined;
   }
-  /** The task's chat folder, with the dev-data fallback for a snapshot that names a project instead. */
-  taskCwd(task: Pick<TaskSnapshot, 'cwd' | 'project'>): string | undefined {
-    if (task.cwd) return task.cwd;
-    return task.project && this.cwd ? this.cwd.resolver.legacyProjectCwd(task.project) : task.project;
-  }
+  /** The task's chat folder. */
+  taskCwd(task: Pick<TaskSnapshot, 'cwd'>): string | undefined { return task.cwd; }
 
   /** Admission feedback reaches the agent before a doomed task is committed. */
   async validateSpawnProfile(context: CommandContext, targetProfile: string): Promise<void> {

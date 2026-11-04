@@ -8,7 +8,7 @@ import { pathWithin } from '../utils/paths';
 import { err, ok, Result } from '../utils/result';
 import type { Logger } from '../types';
 
-export type DeleteErrorCode = 'in_use' | 'deleting' | 'marked';
+export type DeleteErrorCode = 'in_use' | 'deleting';
 
 export interface Removed {
   path: RelPath;
@@ -75,7 +75,7 @@ export async function deleteEntry(root: string, rel: RelPath, deps: DeleteDeps):
   if (await busy()) return err('in_use');
   const now = held();
   if (now) return err(now);
-  const hold = addHold({ kind: 'deleting', dir: dir.value });
+  const hold = addHold(dir.value);
   try {
     if (await busy()) return err('in_use');
     return await remove(parent, rel, name, deps.logger);
@@ -85,7 +85,7 @@ export async function deleteEntry(root: string, rel: RelPath, deps: DeleteDeps):
 }
 
 function heldCode(hold: Hold): DeleteErrorCode {
-  return hold.kind === 'deleting' ? 'deleting' : 'marked';
+  return 'deleting';
 }
 
 async function remove(parent: string, rel: RelPath, name: string, logger: Logger): Promise<DeleteResult> {

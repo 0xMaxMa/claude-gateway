@@ -258,7 +258,7 @@ async function parentOf(root: string, parentRel: RelPath): Promise<FsResult<stri
   return realRootOf(root);
 }
 
-type MakeDirError = FilesErrorCode | 'marked' | 'deleting';
+type MakeDirError = FilesErrorCode | 'deleting';
 
 async function makeOneDir(parent: string, dir: string, name: EntryName): Promise<Result<void, MakeDirError>> {
   // Case-folding filesystems already answer EEXIST; this makes Linux agree so a client never gets "Site" and "site"
@@ -267,9 +267,9 @@ async function makeOneDir(parent: string, dir: string, name: EntryName): Promise
   try {
     const lower = name.toLowerCase();
     if ((await fsp.readdir(parent)).some((n) => n.toLowerCase() === lower)) return err('already_exists');
-    // A cleaner holding the parent (or a delete removing it) expects no new folder to appear inside.
+    // A delete removing the parent must not see a new folder appear inside.
     const hold = findHold(dir);
-    if (hold) return err(hold.kind === 'deleting' ? 'deleting' : 'marked');
+    if (hold) return err('deleting');
     await fsp.mkdir(dir);
     return ok(undefined);
   } catch (e) {

@@ -21,9 +21,7 @@
       "files": [
         "list",
         "create",
-        "delete",
-        "marks",
-        "cleanup"
+        "delete"
       ],
       "git": [
         "status",
@@ -34,7 +32,6 @@
       ],
       "processes": [
         "list",
-        "start",
         "stop"
       ]
     },

@@ -31,7 +31,7 @@ function makeApp(portRange: [number, number] = [41000, 41010], timeoutMs = 8000)
   app = express();
   app.use(express.json());
   app.use('/api', createProcessesRouter(apiKeys, root, {
-    logger: silentLogger, start: { logDir, portRange, timeoutMs, pollMs: 50 }, stop: { termWaitMs: 300, pollMs: 50 },
+    logger: silentLogger, start: { logDir, portRange, timeoutMs, pollMs: 50, scriptPath: '.pod/start.sh' }, stop: { termWaitMs: 300, pollMs: 50 },
   }));
 }
 
@@ -134,6 +134,21 @@ describe('path rejection', () => {
 });
 
 describe('GET /v1/processes', () => {
+  it('returns listeners grouped by folder in one root-wide request', async () => {
+    const first = project('first');
+    const second = project('second');
+    fs.mkdirSync(path.join(first, 'nested'));
+    const a = await listenIn(path.join(first, 'nested'));
+    const b = await listenIn(second);
+    const result = await get(undefined);
+    expect(result.status).toBe(200);
+    expect(result.body.processes).toEqual([
+      expect.objectContaining({ path: 'first', listeners: [expect.objectContaining({ port: a.port })] }),
+      expect.objectContaining({ path: 'second', listeners: [expect.objectContaining({ port: b.port })] }),
+    ]);
+    expect((await get(undefined, 'k-read')).status).toBe(403);
+  });
+
   it('lists the listener of a process working in the folder or inside it, and only there', async () => {
     const dir = project('app');
     fs.mkdirSync(path.join(dir, 'server'));
@@ -169,6 +184,20 @@ describe('GET /v1/processes', () => {
 });
 
 describe('POST /v1/processes/start', () => {
+  it('uses the configured script path and refuses an unset script', async () => {
+    const dir = project('app');
+    fs.mkdirSync(path.join(dir, 'scripts'));
+    fs.writeFileSync(path.join(dir, 'scripts', 'serve.sh'), LISTEN_SCRIPT);
+    app = express();
+    app.use(express.json());
+    app.use('/api', createProcessesRouter(apiKeys, root, { logger: silentLogger, start: { scriptPath: 'scripts/serve.sh', logDir, timeoutMs: 8000, pollMs: 50 } }));
+    expect((await start({ path: 'app', port: await freePort() })).status).toBe(202);
+    app = express();
+    app.use(express.json());
+    app.use('/api', createProcessesRouter(apiKeys, root, { logger: silentLogger }));
+    expect((await start({ path: 'app' })).body.code).toBe('no_start_command');
+  });
+
   it('needs an admin key', async () => {
     project('app', LISTEN_SCRIPT);
     const res = await start({ path: 'app' }, 'k-read');

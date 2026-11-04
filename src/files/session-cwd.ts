@@ -52,7 +52,7 @@ export function createCwdResolver(config: GatewayConfig, logger: Logger): CwdRes
     const dir = await resolveDir(root(), rel);
     if (!dir.ok) return err(UNAVAILABLE[dir.error] ?? 'internal');
     const hold = findHold(dir.value);
-    if (hold) return err(hold.kind === 'deleting' ? 'deleting' : 'marked');
+    if (hold) return err('deleting');
     const st = await fsp.stat(dir.value).catch(() => null);
     if (!st) return err('not_found');
     const stored = path.join(realRoot, rel);
@@ -94,10 +94,6 @@ export function createCwdResolver(config: GatewayConfig, logger: Logger): CwdRes
         ...(host ? [`remote ${host}`] : []),
       ];
       return `${cwd.location} Git: ${git.join(', ')}.`;
-    },
-
-    legacyProjectCwd(project) {
-      return path.join(root(), project);
     },
   };
 }

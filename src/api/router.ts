@@ -130,17 +130,15 @@ export function isValidAgentId(v: unknown): v is string {
  * session and checks as anything typed).
  */
 /**
- * Every error POST /v1/agents/:agentId/sessions answers for its `cwd` or the removed `project` field. website/api/sessions.md
+ * Every error POST /v1/agents/:agentId/sessions answers for its `cwd` . website/api/sessions.md
  * publishes this table.
  * A turn on a session whose folder stopped resolving answers the uppercase send-time codes instead.
  */
 export const SESSION_CWD_ERRORS = {
-  project_replaced_by_cwd: { status: 400, message: 'project was removed: send cwd, the folder path under the files root' },
   invalid_cwd: { status: 400, message: 'cwd must be an absolute path under the files root, or a path relative to it' },
   cwd_outside_root: { status: 403, message: 'cwd resolves outside the files root, or is the root itself' },
   cwd_not_found: { status: 404, message: 'cwd does not exist' },
   files_disabled: { status: 409, message: 'The files API is disabled on this gateway' },
-  path_marked: { status: 409, message: 'cwd is held by a cleaning mark' },
   cwd_unavailable: { status: 409, message: 'cwd is not a folder the session can run in' },
   cwd_unsupported_agent: { status: 409, message: 'This agent cannot run a chat in a folder' },
 } as const;
@@ -150,7 +148,7 @@ export type SessionCwdErrorCode = keyof typeof SESSION_CWD_ERRORS;
 function sessionCwdError(failure: CwdFailure | 'invalid'): { status: number; error: string; code: SessionCwdErrorCode; reason?: string } {
   const code: SessionCwdErrorCode = failure === 'invalid' ? 'invalid_cwd'
     : failure.code === 'unsupported_agent' ? 'cwd_unsupported_agent'
-      : ({ disabled: 'files_disabled', outside_root: 'cwd_outside_root', not_found: 'cwd_not_found', marked: 'path_marked' } as Partial<Record<string, SessionCwdErrorCode>>)[failure.reason] ?? 'cwd_unavailable';
+      : ({ disabled: 'files_disabled', outside_root: 'cwd_outside_root', not_found: 'cwd_not_found' } as Partial<Record<string, SessionCwdErrorCode>>)[failure.reason] ?? 'cwd_unavailable';
   const reason = failure !== 'invalid' && (code === 'cwd_unavailable' || code === 'cwd_unsupported_agent') ? failure.reason : undefined;
   return { status: SESSION_CWD_ERRORS[code].status, error: SESSION_CWD_ERRORS[code].message, code, ...(reason ? { reason } : {}) };
 }
@@ -4530,8 +4528,7 @@ export function createApiRouter(
         ...index,
         sessions: await Promise.all(index.sessions.map(async (s) => {
           const lastMessageRole = roleMap.get(s.id) ?? undefined;
-          const { project: _legacy, ...entry } = s;
-          const view = { ...entry, ...await runner.sessionCwdView(s.id) };
+          const view = { ...s, ...await runner.sessionCwdView(s.id) };
           return lastMessageRole !== undefined ? { ...view, lastMessageRole } : view;
         })),
       };
@@ -4549,11 +4546,7 @@ export function createApiRouter(
     const ctx = resolveApiSession(req, res);
     if (!ctx) return;
     const { runner, agentId, chatId } = ctx;
-    const body = req.body as { prompt?: unknown; name?: unknown; cwd?: unknown; project?: unknown };
-    if (body.project !== undefined && body.project !== null) {
-      const { status, message: error } = SESSION_CWD_ERRORS.project_replaced_by_cwd;
-      res.status(status).json({ error, code: 'project_replaced_by_cwd' }); return;
-    }
+    const body = req.body as { prompt?: unknown; name?: unknown; cwd?: unknown };
     const promptText = typeof body.prompt === 'string' ? body.prompt.trim() : undefined;
     const explicitName = typeof body.name === 'string' ? body.name.trim() : undefined;
     let cwd: Awaited<ReturnType<AgentRunner['parseApiCwd']>> | undefined;

@@ -25,7 +25,6 @@ const explanations: Readonly<Record<string, string>> = {
   CAPACITY_EXCEEDED: 'The gateway has reached its active-session limit. Wait for current work to finish and try again.',
   CONFLICT: 'This session already has a pending request.',
   CWD_UNAVAILABLE: 'This chat\'s working folder is missing, renamed or outside the files root. Open the folder again or start a chat without one.',
-  PATH_MARKED: 'This chat\'s working folder is being cleaned. Try again in a moment.',
   SESSION_ID_IN_USE: 'This session belongs to another chat.',
   ORCHESTRATION_CLOSING: 'The gateway is shutting down. Try again after it restarts.',
   GATEWAY_SHUTDOWN: 'The gateway shut down before the response completed.',

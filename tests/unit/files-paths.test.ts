@@ -17,6 +17,14 @@ describe('parseEntryName', () => {
 });
 
 describe('parseRelPath', () => {
+  it('allows dot-prefixed segments only when the delete route opts in', () => {
+    expect(parseRelPath('site/.venv')).toEqual({ ok: false, error: 'invalid_name' });
+    expect(parseRelPath('site/.venv', true)).toEqual({ ok: true, value: 'site/.venv' });
+    for (const name of ['.', '..', '.deleting-old', 'site/.deleting-old', 'site/../x']) {
+      expect(parseRelPath(name, true)).toEqual({ ok: false, error: 'invalid_name' });
+    }
+  });
+
   it.each(['', 'app', 'app/node_modules', 'a/b.c/d-e_f', Array(32).fill('a').join('/')])('accepts %p', (rel) => {
     expect(parseRelPath(rel)).toEqual({ ok: true, value: rel });
   });

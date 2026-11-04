@@ -17,7 +17,7 @@ export class SessionNotInIndexError extends Error {
   }
 }
 
-/** The only shape of session id the API accepts or a legacy binding file may name; anything else names no session. */
+/** The only shape of session id the API accepts. */
 export const SESSION_ID_RE = /^[a-zA-Z0-9_-]{1,64}$/;
 
 /** True when `name` joined to a folder stays a file directly inside it: no separator, no `.` or `..`, no NUL. */
@@ -29,11 +29,7 @@ function isPlainFileName(name: string): boolean {
 export interface ApiSessionRecord {
   chatId: string;
   cwd?: string;
-  project?: string;
 }
-
-/** A dev-data `project-bindings/<id>.json` file: its project name, `none` when there is no file, `unreadable` otherwise. */
-export type LegacyBinding = { project: string } | 'none' | 'unreadable';
 
 export class SessionStore {
   private readonly agentsBaseDir: string;
@@ -705,32 +701,12 @@ export class SessionStore {
       const chatId = entry.name.slice('api-'.length);
       const index = await this.loadIndex(agentId, chatId, 'api').catch(() => null);
       for (const s of index?.sessions ?? []) {
-        const record = { chatId, ...(typeof s.cwd === 'string' ? { cwd: s.cwd } : {}), ...(typeof s.project === 'string' ? { project: s.project } : {}) };
+        const record = { chatId, ...(typeof s.cwd === 'string' ? { cwd: s.cwd } : {}),  };
         const held = out.get(s.id);
-        if (!held || (!held.cwd && !held.project)) out.set(s.id, record);
+        if (!held || !held.cwd) out.set(s.id, record);
       }
     }
     return out;
-  }
-
-  /**
-   * The `project-bindings/<id>.json` file dev pods wrote before sessions stored a cwd. Read only, for the fallback;
-   * nothing writes these files any more. No file means no binding; a file that cannot be read fails closed.
-   */
-  async readLegacyBinding(agentId: string, sessionId: string): Promise<LegacyBinding> {
-    if (!SESSION_ID_RE.test(sessionId)) return 'none';
-    let raw: string;
-    try {
-      raw = await fs.promises.readFile(path.join(this.agentsBaseDir, agentId, 'project-bindings', `${sessionId}.json`), 'utf-8');
-    } catch (e) {
-      return (e as NodeJS.ErrnoException).code === 'ENOENT' ? 'none' : 'unreadable';
-    }
-    try {
-      const project = (JSON.parse(raw) as { project?: unknown }).project;
-      return typeof project === 'string' ? { project } : 'unreadable';
-    } catch {
-      return 'unreadable';
-    }
   }
 
   /** Get all session metadata (name) for an agent, keyed by sessionId. */

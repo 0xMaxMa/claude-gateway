@@ -10,7 +10,6 @@ import { AgentRunner } from '../../src/agent/runner';
 import { GatewayRouter } from '../../src/api/gateway-router';
 import { createCwdResolver } from '../../src/files/session-cwd';
 import type { CwdResolver } from '../../src/session/cwd';
-import { SessionStore } from '../../src/session/store';
 import { AgentConfig, ApiKey, GatewayConfig } from '../../src/types';
 import { silentLogger } from '../helpers/silent-logger';
 import { waitForCondition } from '../helpers/wait-for';
@@ -116,17 +115,6 @@ describe('session cwd', () => {
       expect([cwd, res.status, res.body.code]).toEqual([cwd, 403, 'cwd_outside_root']);
     }
     expect(fs.existsSync(indexFile(h, 'web'))).toBe(false);
-  });
-
-  it('1b. the removed project field answers 400 project_replaced_by_cwd and creates no session, alone or beside cwd', async () => {
-    h = harness();
-    for (const body of [{ project: 'site' }, { project: 'site', cwd: 'site' }, { project: '' }]) {
-      const res = await create(h, body);
-      expect([body, res.status, res.body.code]).toEqual([body, 400, 'project_replaced_by_cwd']);
-      expect(res.body.error).toMatch(/cwd/);
-    }
-    expect(fs.existsSync(indexFile(h, 'web'))).toBe(false);
-    expect((await create(h, { project: null })).status).toBe(201);
   });
 
   it('2. the root itself is refused 403 cwd_outside_root, by absolute path or by a link to it', async () => {
@@ -250,87 +238,6 @@ describe('session cwd', () => {
     expect(outcomes.filter((o) => !o.endsWith('in_use=1 in_both=false'))).toEqual([]);
   }, 60_000);
 
-  describe('8. dev data written before sessions stored a cwd', () => {
-    const seed = async (base: string, entry: Record<string, unknown>, binding?: string): Promise<string> => {
-      const sid = (await new SessionStore(path.join(base, 'agents')).createTelegramSession('alfred', 'web', 'old', 'api')).id;
-      const file = path.join(base, 'agents', 'alfred', 'sessions', 'api-web', 'index.json');
-      const index = JSON.parse(fs.readFileSync(file, 'utf8'));
-      index.sessions = index.sessions.map((s: { id: string }) => s.id === sid ? { ...s, ...entry } : s);
-      fs.writeFileSync(file, JSON.stringify(index, null, 2));
-      if (binding !== undefined) {
-        fs.mkdirSync(path.join(base, 'agents', 'alfred', 'project-bindings'), { recursive: true });
-        fs.writeFileSync(path.join(base, 'agents', 'alfred', 'project-bindings', `${sid}.json`), binding);
-      }
-      return sid;
-    };
-
-    it.each([
-      ['an index entry naming a project', { project: 'site' }, undefined],
-      ['a binding file beside an entry with no project', {}, '{"project":"site"}'],
-    ])('binds the folder under the configured root for %s', async (_label, entry, binding) => {
-      h = harness();
-      const sid = await seed(h.base, entry, binding);
-      expect(await row(h, sid)).toMatchObject({ cwd: path.join(h.root, 'site'), cwdState: 'available' });
-      expect(await row(h, sid)).not.toHaveProperty('project');
-      expect((await send(h, sid, 'hi')).status).toBe(200);
-      expect(spawns(h).map((s) => s.cwd)).toEqual([path.join(h.root, 'site')]);
-    }, 30_000);
-
-    it('fails closed with 409 CWD_UNAVAILABLE and no spawn when the project folder is missing', async () => {
-      h = harness();
-      const sid = await seed(h.base, { project: 'gone' });
-      expect(await row(h, sid)).toMatchObject({ cwd: path.join(h.root, 'gone'), cwdState: 'missing' });
-      const res = await send(h, sid, 'hi');
-      expect([res.status, res.body.code]).toEqual([409, 'CWD_UNAVAILABLE']);
-      expect(spawns(h)).toEqual([]);
-    }, 30_000);
-
-    it('fails closed with 409 CWD_UNAVAILABLE (unreadable) and no spawn when the binding file is corrupt', async () => {
-      h = harness();
-      const sid = await seed(h.base, {}, '{not json');
-      expect(await row(h, sid)).toMatchObject({ cwd: null, cwdState: 'unavailable' });
-      const res = await send(h, sid, 'hi');
-      expect([res.status, res.body.code]).toEqual([409, 'CWD_UNAVAILABLE']);
-      await expect(h.runner.assertApiCwdAvailable(sid)).rejects.toMatchObject({ code: 'CWD_UNAVAILABLE', reason: 'unreadable' });
-      expect(spawns(h)).toEqual([]);
-    }, 30_000);
-
-    it('reads the same way twice and after a restart, and rewrites no file', async () => {
-      h = harness();
-      const viaIndex = await seed(h.base, { project: 'site' });
-      const viaFile = await seed(h.base, {}, '{"project":"site"}');
-      const corrupt = await seed(h.base, {}, '{not json');
-      const agentDir = path.join(h.base, 'agents', 'alfred');
-      const snapshot = () => {
-        const out: Record<string, string> = {};
-        const walk = (dir: string) => {
-          for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
-            const p = path.join(dir, e.name);
-            if (e.isDirectory()) { if (e.name !== 'workspace') walk(p); } else if (p.includes(`${path.sep}sessions${path.sep}`) || p.includes('project-bindings')) out[p] = fs.readFileSync(p, 'base64');
-          }
-        };
-        walk(agentDir);
-        return out;
-      };
-      const before = snapshot();
-      const views = async () => Promise.all([viaIndex, viaFile, corrupt].map(async (sid) => {
-        const r = await row(h, sid);
-        return { cwd: r?.cwd, cwdState: r?.cwdState };
-      }));
-      const first = await views();
-      expect(first).toEqual([
-        { cwd: path.join(h.root, 'site'), cwdState: 'available' },
-        { cwd: path.join(h.root, 'site'), cwdState: 'available' },
-        { cwd: null, cwdState: 'unavailable' },
-      ]);
-      expect(await views()).toEqual(first);
-      await h.runner.stop();
-      h = boot(h);
-      expect(await views()).toEqual(first);
-      expect(snapshot()).toEqual(before);
-    }, 30_000);
-  });
-
   it('9. active is true exactly while a turn runs or a spawn is pending, and false at rest', async () => {
     h = harness();
     const sid = await bound(h, 'site');
@@ -361,7 +268,7 @@ describe('session cwd', () => {
     expect((await h.runner.sessionCwdView(sid)).active).toBe(false);
   }, 40_000);
 
-  it('9. an unfinished task keeps its folder busy and its session active, a dev-data task naming a project included', async () => {
+  it('9. an unfinished task keeps its folder busy and its session active', async () => {
     h = harness({ orchestration: true });
     const sid = await bound(h, 'site');
     fs.mkdirSync(path.join(h.root, 'other'));
@@ -378,15 +285,13 @@ describe('session cwd', () => {
     const insert = (id: string, snapshot: object) => runtime().store.run('INSERT INTO tasks(id,conversation_id,state,state_version,revision,active_attempt_id,snapshot_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)',
       id, conv.id, 'running', 1, 1, null, JSON.stringify(snapshot), now, now);
     insert('task-cwd', { cwd: path.join(h.root, 'site') });
-    insert('task-legacy', { project: 'other' });
 
     expect((await h.runner.sessionCwdView(sid)).active).toBe(true);
     expect((await row(h, sid))?.active).toBe(true);
     await h.runner.prepareWorkCheck();
     expect([...h.runner.workIn(path.join(h.root, 'site'))]).toContain('task');
-    expect([...h.runner.workIn(path.join(h.root, 'other'))]).toEqual(['task']);
 
-    runtime().store.run("UPDATE tasks SET state='completed' WHERE id IN ('task-cwd','task-legacy')");
+    runtime().store.run("UPDATE tasks SET state='completed' WHERE id='task-cwd'");
     expect((await h.runner.sessionCwdView(sid)).active).toBe(false);
     await h.runner.prepareWorkCheck();
     expect([...h.runner.workIn(path.join(h.root, 'other'))]).toEqual([]);

@@ -25,8 +25,6 @@ export type CwdUnavailableReason =
   | 'not_a_directory'
   | 'permission_denied'
   | 'deleting'
-  | 'marked'
-  | 'unreadable'
   | 'internal';
 
 /** Why an agent cannot work in a folder: its process or its workers would not run there. */
@@ -57,11 +55,7 @@ export interface CwdResolver {
   resolve(path: string): Promise<CwdResolution>;
   /** The location plus, when git answers in time, branch, change count and remote host. For the system prompt. */
   note(cwd: SessionCwd): Promise<string>;
-  /**
-   * Session index entries, binding files and task snapshots written before sessions stored a cwd name a project
-   * directly under the root. Remove one release after the r6 and r7 dev pods update.
-   */
-  legacyProjectCwd(project: string): string;
+
 }
 
 /** For a gateway built without the files module, and for tests that never bind a folder. */
@@ -69,25 +63,22 @@ export const NO_CWD_RESOLVER: CwdResolver = {
   parse: async () => ({ ok: false, error: 'disabled' }),
   resolve: async () => ({ ok: false, error: 'disabled' }),
   note: async (cwd) => cwd.location,
-  legacyProjectCwd: (project) => project,
 };
 
-/** What a session record says about its folder. A binding that cannot be read is not the same as no binding. */
-export type StoredCwd = { kind: 'none' } | { kind: 'path'; path: string } | { kind: 'unreadable' };
+/** What a session record says about its folder. */
+export type StoredCwd = { kind: 'none' } | { kind: 'path'; path: string };
 
-/** The read-time fallback for dev data: `cwd ?? join(root, project)`. */
-export function storedCwd(meta: { cwd?: unknown; project?: unknown }, resolver: Pick<CwdResolver, 'legacyProjectCwd'>): StoredCwd {
-  if (typeof meta.cwd === 'string') return { kind: 'path', path: meta.cwd };
-  if (typeof meta.project === 'string') return { kind: 'path', path: resolver.legacyProjectCwd(meta.project) };
-  return { kind: 'none' };
+/** The cwd stored on a session or task, if present. */
+export function storedCwd(meta: { cwd?: unknown }): StoredCwd {
+  return typeof meta.cwd === 'string' ? { kind: 'path', path: meta.cwd } : { kind: 'none' };
 }
 
 /** The send-time error: a turn, spawn or task that cannot run because its folder failed to resolve. */
 export function cwdError(failure: CwdFailure): Error {
-  const code = failure.reason === 'marked' ? 'PATH_MARKED' : 'CWD_UNAVAILABLE';
-  const message = failure.reason === 'marked' ? 'The working folder is held by a cleaning mark' : `Working folder is unavailable (${failure.reason})`;
+  const code = 'CWD_UNAVAILABLE';
+  const message = `Working folder is unavailable (${failure.reason})`;
   return Object.assign(new Error(message), { code, reason: failure.reason });
 }
 
 /** The uppercase codes a turn answers with 409 when its folder does not resolve. */
-export const CWD_SEND_ERRORS: ReadonlySet<string> = new Set(['CWD_UNAVAILABLE', 'PATH_MARKED', 'SESSION_ID_IN_USE']);
+export const CWD_SEND_ERRORS: ReadonlySet<string> = new Set(['CWD_UNAVAILABLE', 'SESSION_ID_IN_USE']);

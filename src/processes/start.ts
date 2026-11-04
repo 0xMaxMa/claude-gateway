@@ -4,7 +4,7 @@ import { constants, promises as fsp } from 'fs';
 import * as path from 'path';
 import { redactLines } from '../cli/redact';
 import { resolveRealDir } from '../files/fs';
-import { FilesErrorCode, RelPath } from '../files/paths';
+import { FilesErrorCode, parseRelPath, RelPath } from '../files/paths';
 import { err, ok, Result } from '../utils/result';
 import { collectListeners, listenersIn, listeningPorts } from './listeners';
 
@@ -35,24 +35,29 @@ export interface StartOptions {
   /** How long the started server has to listen. */
   timeoutMs: number;
   pollMs?: number;
+  /** Relative script inside the selected folder, configured by the operator. */
+  scriptPath: string;
 }
 
-export const DEFAULT_PORT_RANGE = [3000, 3099] as const;
+export const DEFAULT_PORT_RANGE = [1024, 65535] as const;
 export const START_TIMEOUT_MS = 20_000;
 export const LOG_TAIL_BYTES = 4096;
-/** The only command this API runs, relative to the folder. */
-export const START_SCRIPT = path.join('.pod', 'start.sh');
 
 /** Real folders with a start in flight. One gateway process starts servers, so memory is enough. */
 const starting = new Set<string>();
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-/** `.pod` is a real directory and `.pod/start.sh` a regular file, neither reached through a symlink. */
-async function hasStartScript(dir: string): Promise<boolean> {
-  const pod = await fsp.lstat(path.join(dir, '.pod')).catch(() => null);
-  if (!pod?.isDirectory()) return false;
-  const script = await fsp.lstat(path.join(dir, START_SCRIPT)).catch(() => null);
+/** Require real directories on the way and a regular script, with no symlink. */
+async function hasStartScript(dir: string, scriptPath: string): Promise<boolean> {
+  let current = dir;
+  const segments = scriptPath.split('/');
+  for (const segment of segments.slice(0, -1)) {
+    current = path.join(current, segment);
+    const entry = await fsp.lstat(current).catch(() => null);
+    if (!entry?.isDirectory()) return false;
+  }
+  const script = await fsp.lstat(path.join(current, segments[segments.length - 1])).catch(() => null);
   return script?.isFile() === true;
 }
 
@@ -105,7 +110,7 @@ async function pickPort(wanted: number | undefined, range: readonly [number, num
 }
 
 async function run(realDir: string, rel: RelPath, wanted: number | undefined, opts: StartOptions): Promise<Result<Started, StartFailure>> {
-  if (!(await hasStartScript(realDir))) return err({ code: 'no_start_command' });
+  if (!(await hasStartScript(realDir, opts.scriptPath))) return err({ code: 'no_start_command' });
   const existing = listenersIn(await collectListeners(), realDir)[0];
   if (existing) return err({ code: 'already_running', port: existing.port });
   const port = await pickPort(wanted, opts.portRange);
@@ -116,7 +121,7 @@ async function run(realDir: string, rel: RelPath, wanted: number | undefined, op
   let child;
   try {
     // argv only: the command is fixed and the body never reaches it. `detached` gives the child its own session.
-    child = spawn('sh', [START_SCRIPT], {
+    child = spawn('sh', [opts.scriptPath], {
       cwd: realDir,
       env: {
         PATH: process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin',
@@ -148,11 +153,12 @@ async function run(realDir: string, rel: RelPath, wanted: number | undefined, op
 }
 
 /**
- * Run `sh .pod/start.sh` in the folder `rel` names with PORT set, and wait until a process of its session listens
+ * Run the configured script in the folder `rel` names with PORT set, and wait until a process of its session listens
  * there. The folder must sit under `root` with no symlink on the way. One start per folder runs at a time; a second
  * one meanwhile is refused with `already_running` and `starting: true`.
  */
-export async function startProject(root: string, rel: RelPath, wanted: number | undefined, opts: StartOptions): Promise<Result<Started, StartFailure>> {
+export async function startFolder(root: string, rel: RelPath, wanted: number | undefined, opts: StartOptions): Promise<Result<Started, StartFailure>> {
+  if (!opts.scriptPath || !parseRelPath(opts.scriptPath, true).ok) return err({ code: 'no_start_command' });
   const dir = await resolveRealDir(root, rel);
   if (!dir.ok) return err({ code: dir.error });
   if (starting.has(dir.value)) return err({ code: 'already_running', starting: true });

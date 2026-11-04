@@ -108,10 +108,9 @@ list `GET /v1/agents/sessions`. List entries carry no `project` field.
 |------------|---------|
 | `available` | The folder exists under the files root. |
 | `missing` | No folder exists at that path, for example after it was deleted or renamed. |
-| `unavailable` | The folder exists but cannot be used, for example a symlink that leaves the root, a file in place of a folder, or a folder held by a delete or a [mark](/api/files#marks). |
+| `unavailable` | The folder exists but cannot be used, for example a symlink that leaves the root, a file in place of a folder, or a folder held by a delete. |
 
-A session whose `cwdState` is `missing` or `unavailable` cannot run. A message to it fails with `409 CWD_UNAVAILABLE`,
-or `409 PATH_MARKED` while a mark holds the folder.
+A session whose `cwdState` is `missing` or `unavailable` cannot run. A message to it fails with `409 CWD_UNAVAILABLE`.
 
 ---
 
@@ -202,13 +201,11 @@ on any of them.
 
 | Status | `code` | When |
 |--------|--------|------|
-| `400` | `project_replaced_by_cwd` | The body has a `project` field. `cwd` replaced it: send the folder path under the files root as `cwd`. A `null` `project` is ignored |
 | `400` | `invalid_cwd` | `cwd` is not a string, is empty, ends with `/`, is an absolute path that is not normalized, or has a segment that fails the entry-name rule |
 | `403` | | `Write permission required`: the key cannot write to this agent (it has no `write` and is not an admin key). `API key has no access to agent '<id>'`: the key does not list this agent. Binding a chat needs the same write access as any other change to the agent |
 | `403` | `cwd_outside_root` | `cwd` resolves outside the files root, through symlinks included, or is the root itself, including through a link such as `all -> .` |
 | `404` | `cwd_not_found` | No folder exists at `cwd` |
 | `409` | `files_disabled` | The files API is disabled on this gateway (`gateway.files.enabled` is `false`) |
-| `409` | `path_marked` | A [mark](/api/files#marks) holds the folder, a folder inside it, or a folder holding it |
 | `409` | `cwd_unavailable` | The folder exists but cannot be used. `reason` is `not_a_directory`, `permission_denied`, `deleting` (a `DELETE` is removing an overlapping folder) or `internal` |
 | `409` | `cwd_unsupported_agent` | The agent cannot run in a folder. `reason` is `container` for container (app) agents, `workspace_mode` when an orchestrated agent's `tasks.workspaceMode` is not `host`, or `codex` when its workers would run on the Codex harness |
 
@@ -216,7 +213,6 @@ Each check runs again when the session starts its process and at every turn. If
 the folder has gone, been renamed, moved out of the root, or is held by a delete,
 the message fails with code `CWD_UNAVAILABLE` (uppercase), and the gateway does
 not fall back to the workspace. The response carries no `reason` field. While a mark holds the folder the
-message fails with `PATH_MARKED`. A synchronous [`POST /messages`](/api/messages)
 answers `409`. A streaming request gets an SSE `error` frame with that code.
 
 **A session id belongs to one chat.** Each session id belongs to one `chat_id` of an agent. A request that would
@@ -259,7 +255,6 @@ or in a `working_directory` inside it. Task failures use uppercase codes:
 | Task `failure.code` or `task_spawn` error | When |
 |--------|------|
 | `CWD_UNAVAILABLE` | The folder is gone, renamed or moved when the task is queued or its worker starts |
-| `PATH_MARKED` | A [mark](/api/files#marks) holds the folder when the task is queued or its worker starts |
 | `WORKING_DIRECTORY_OUTSIDE_CWD` | `working_directory` does not resolve, through symlinks, to an existing folder inside the chat's folder. It may be absolute or relative to that folder |
 | `CWD_UNSUPPORTED_AGENT` | Workers do not run in `host` workspace mode, or the task would run on the Codex worker harness |
 

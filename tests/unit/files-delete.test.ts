@@ -49,6 +49,17 @@ afterEach(() => {
 });
 
 describe('DELETE /api/v1/files', () => {
+  it('deletes a hidden folder while refusing delete trash and parent traversal', async () => {
+    fs.mkdirSync(path.join(root, 'api', '.venv'));
+    fs.writeFileSync(path.join(root, 'api', '.venv', 'data'), 'x');
+    expect((await del('api/.venv')).status).toBe(200);
+    expect(exists('api', '.venv')).toBe(false);
+    fs.mkdirSync(path.join(root, '.deleting-old'));
+    expect((await del('.deleting-old')).body.code).toBe('invalid_name');
+    expect((await del('api/..')).body.code).toBe('invalid_name');
+    expect(exists('.deleting-old')).toBe(true);
+  });
+
   it('removes the folder and everything in it, and only that folder', async () => {
     const res = await del();
     expect(res.status).toBe(200);

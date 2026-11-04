@@ -522,6 +522,11 @@ export interface GatewayConfig {
        */
       trusted?: string[];
     };
+    /** Optional generic process start command. No script is assumed when unset. */
+    processes?: {
+      /** Relative script path within the folder supplied to POST /v1/processes/start. */
+      startScript?: string;
+    };
     /**
      * true (default) = headless backend (claude --print + stream-json).
      * false = interactive backend: claude TUI under the claude-pty-shell PTY wrapper.
@@ -839,8 +844,6 @@ export interface SessionMeta {
   /** Absolute working folder under gateway.files.root this API session is bound to, fixed at creation. It is
    *  re-resolved at every spawn and turn. */
   cwd?: string;
-  /** Dev data only: a folder name under the root, written before sessions stored `cwd`. Read, never written. */
-  project?: string;
 }
 
 export interface SessionIndex {

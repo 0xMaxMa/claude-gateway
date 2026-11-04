@@ -505,13 +505,9 @@ export class AgentRunner extends EventEmitter {
     return this.apiSessionOwnersLoading;
   }
 
-  /** The index entry's cwd, else the dev-data fallbacks: its project name, then a binding file. Unreadable fails closed. */
-  private async recordCwd(sessionId: string, record: Partial<ApiSessionRecord>): Promise<StoredCwd> {
-    const indexed = storedCwd(record, this.cwdResolver);
-    if (indexed.kind !== 'none') return indexed;
-    const legacy = await this.sessionStore.readLegacyBinding(this.agentConfig.id, sessionId);
-    if (legacy === 'none') return indexed;
-    return legacy === 'unreadable' ? { kind: 'unreadable' } : { kind: 'path', path: this.cwdResolver.legacyProjectCwd(legacy.project) };
+  /** The cwd recorded in the session index. */
+  private async recordCwd(_sessionId: string, record: Partial<ApiSessionRecord>): Promise<StoredCwd> {
+    return storedCwd(record);
   }
 
   /**
@@ -569,7 +565,7 @@ export class AgentRunner extends EventEmitter {
     }
   }
 
-  /** Throws CWD_UNAVAILABLE or PATH_MARKED when the session's folder no longer resolves; a no-op for unbound sessions. */
+  /** Throws CWD_UNAVAILABLE when the session's folder no longer resolves; a no-op for unbound sessions. */
   async assertApiCwdAvailable(sessionId: string): Promise<void> {
     const cwd = await this.apiSessionCwd(sessionId);
     if (cwd && !cwd.ok) throw cwdError(cwd.error);
@@ -578,7 +574,6 @@ export class AgentRunner extends EventEmitter {
   private async apiSessionCwd(sessionId: string): Promise<Result<SessionCwd, CwdFailure> | undefined> {
     const stored = await this.sessionCwdOf(sessionId);
     if (stored.kind === 'none') return undefined;
-    if (stored.kind === 'unreadable') return err({ code: 'unavailable', reason: 'unreadable' });
     const reason = this.cwdUnsupportedReason();
     if (reason) return err({ code: 'unsupported_agent', reason });
     const resolved = await this.cwdResolver.resolve(stored.path);
@@ -4929,7 +4924,7 @@ export class AgentRunner extends EventEmitter {
       throw err;
     }
 
-    this.pendingApiSessions.add(sessionId); // reserved before the first await so a project delete sees the turn while it is still preparing
+    this.pendingApiSessions.add(sessionId); // reserved before the first await so a folder delete sees the turn while it is still preparing
     const { session, imageParams, videoParams, imagePaths } = await (async () => {
     // Register session in api-{chatId} index.json on first use (store adds channel prefix internally)
     await this.registerApiSession(chatId, sessionId, (err: unknown) => {
@@ -5266,7 +5261,7 @@ export class AgentRunner extends EventEmitter {
       throw err;
     }
 
-    this.pendingApiSessions.add(sessionId); // reserved before the first await so a project delete sees the turn while it is still preparing
+    this.pendingApiSessions.add(sessionId); // reserved before the first await so a folder delete sees the turn while it is still preparing
     const { session, imageParams: imageParamsStream, videoParams: videoParamsStream, imagePaths: imagePathsStream } = await (async () => {
     // Register session in api-{chatId} index.json on first use (store adds channel prefix internally)
     await this.registerApiSession(chatId, sessionId, (err: unknown) => {
@@ -5630,7 +5625,6 @@ export class AgentRunner extends EventEmitter {
     const owners = this.apiSessionOwners ?? new Map<string, ApiSessionOwner>();
     const touches = (stored: StoredCwd | undefined): boolean => {
       if (!stored || stored.kind === 'none') return false;
-      if (stored.kind === 'unreadable') return true;
       const real = realpathOrNull(stored.path);
       return real !== null && (pathWithin(real, dir) || pathWithin(dir, real));
     };
@@ -5639,7 +5633,7 @@ export class AgentRunner extends EventEmitter {
       if (touches(owners.get(sessionId)?.cwd)) reasons.add(this.sessionSpawnLocks.has(sessionId) ? 'spawn' : 'turn');
     }
     for (const task of this.orchestration?.activeTaskCwds() ?? []) {
-      if (touches(storedCwd(task, this.cwdResolver))) reasons.add('task');
+      if (touches(storedCwd(task))) reasons.add('task');
     }
     for (const proc of this.sessions.values()) {
       const cwd = proc.cwdDir;
@@ -5800,7 +5794,6 @@ export class AgentRunner extends EventEmitter {
     const active = this.isApiSessionLive(sessionId);
     const stored = await this.sessionCwdOf(sessionId);
     if (stored.kind === 'none') return { cwd: null, trusted: false, cwdState: null, active };
-    if (stored.kind === 'unreadable') return { cwd: null, trusted: false, cwdState: 'unavailable', active };
     const resolved = await this.cwdResolver.resolve(stored.path);
     if (resolved.ok) return { cwd: stored.path, trusted: resolved.value.trusted, cwdState: 'available', active };
     return { cwd: stored.path, trusted: false, cwdState: resolved.error === 'not_found' ? 'missing' : 'unavailable', active };
