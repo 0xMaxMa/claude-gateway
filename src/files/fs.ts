@@ -47,6 +47,8 @@ export interface DirListing {
   path: RelPath;
   abs: string;
   entries: Entry[];
+  /** Root filesystem capacity in bytes; absent if statfs fails or a value cannot fit safely in JSON. */
+  filesystem?: { total: number; free: number; available: number };
   /** Folders and links the list left out, at most SKIPPED_LIMIT, sorted by name. Absent when there are none. */
   skipped?: SkippedEntry[];
   /** Hidden `.deleting-*` folders a failed delete left behind, at most SKIPPED_LIMIT, sorted. Absent when there are none. */
@@ -168,6 +170,14 @@ export async function listDir(root: string, rel: RelPath, includeHidden = false)
   }
   const dir = await resolveDir(root, rel, true);
   if (!dir.ok) return dir;
+  let filesystem: DirListing['filesystem'];
+  if (rel === '') {
+    try {
+      const stats = await fsp.statfs(realRoot.value, { bigint: true });
+      const bytes = [stats.blocks, stats.bfree, stats.bavail].map((blocks) => Number(blocks * BigInt(stats.bsize)));
+      if (bytes.every((value) => Number.isSafeInteger(value) && value >= 0)) filesystem = { total: bytes[0], free: bytes[1], available: bytes[2] };
+    } catch { /* Capacity is optional when statfs is unavailable. */ }
+  }
   let dirents: Dirent[];
   try {
     dirents = await fsp.readdir(dir.value, { withFileTypes: true });
@@ -212,6 +222,7 @@ export async function listDir(root: string, rel: RelPath, includeHidden = false)
     path: rel,
     abs: dir.value,
     entries,
+    ...(filesystem ? { filesystem } : {}),
     ...(skipped.length > 0 ? { skipped: skipped.slice(0, SKIPPED_LIMIT) } : {}),
     ...(leftovers.length > 0 ? { leftovers: leftovers.slice(0, SKIPPED_LIMIT) } : {}),
   });

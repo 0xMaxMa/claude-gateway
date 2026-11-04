@@ -32,6 +32,7 @@
       ],
       "processes": [
         "list",
+        "start",
         "stop"
       ]
     },

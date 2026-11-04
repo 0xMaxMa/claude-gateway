@@ -2,6 +2,7 @@ import Ajv2020 from 'ajv/dist/2020';
 import * as fs from 'fs';
 import * as path from 'path';
 import { FILES_ERRORS } from '../../src/api/files-router';
+import { PROCESSES_ERRORS } from '../../src/api/processes-router';
 import { SESSION_CWD_ERRORS } from '../../src/api/router';
 import { CONTRACTS_DIR, Fixture, FIXTURES_DIR, recordFixtures, SchemaName } from '../../scripts/contracts-fixtures';
 
@@ -9,9 +10,12 @@ const SCHEMA_FILES: Record<SchemaName, string> = {
   FilesList: 'files-list', FilesMkdirResponse: 'files-mkdir-response', FilesDeleteResponse: 'files-delete-response',
   GitStatus: 'git-status', GitSummary: 'git-summary', Capabilities: 'capabilities', Error: 'error',
   SessionCreateResponse: 'session-create-response', SessionList: 'session-list', SessionError: 'session-error',
+  ProcessesList: 'processes-list', ProcessesFolder: 'processes-folder', ProcessesStartResponse: 'processes-start-response',
+  ProcessesStopResponse: 'processes-stop-response', ProcessesError: 'processes-error',
 };
 const REQUEST_SCHEMAS: Record<string, string> = {
   'POST /api/v1/files/mkdir': 'files-mkdir-request', 'DELETE /api/v1/files': 'files-delete-request',
+  'POST /api/v1/processes/start': 'processes-start-request', 'POST /api/v1/processes/stop': 'processes-stop-request',
 };
 
 const readJson = (file: string): unknown => JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -46,10 +50,32 @@ describe('files and git contracts', () => {
 
   it('records an error fixture for the success and the failure side of every route', () => {
     const routes = new Set(Object.keys(fixtures).map((f) => f.split('/')[0]));
-    expect([...routes].sort()).toEqual(['capabilities', 'errors', 'files-delete', 'files-list', 'files-mkdir', 'git-status', 'git-summary', 'sessions-create', 'sessions-list']);
+    expect([...routes].sort()).toEqual(['capabilities', 'errors', 'files-delete', 'files-list', 'files-mkdir', 'git-status', 'git-summary', 'processes-list', 'processes-start', 'processes-stop', 'sessions-create', 'sessions-list']);
     for (const route of ['files-delete', 'files-list', 'files-mkdir', 'git-status', 'sessions-create']) {
       const statuses = Object.entries(fixtures).filter(([f]) => f.startsWith(`${route}/`)).map(([, x]) => x.status);
       expect([route, statuses.some((s) => s < 300), statuses.some((s) => s >= 400)]).toEqual([route, true, true]);
+    }
+  });
+
+  it('covers every process-specific error code and its HTTP status', () => {
+    const errors = Object.values(fixtures).filter((f) => f.schema === 'ProcessesError');
+    expect(new Set(errors.map((f) => (f.body as { code: string }).code))).toEqual(new Set([
+      'invalid_port', 'invalid_script', 'invalid_executable', 'no_start_command', 'already_running',
+      'port_in_use', 'no_free_port', 'start_failed',
+    ]));
+    expect(errors.find((f) => (f.body as { starting?: boolean }).starting)?.status).toBe(409);
+    for (const fixture of errors) {
+      const body = fixture.body as { code: keyof typeof PROCESSES_ERRORS; error: string };
+      expect(fixture.status).toBe(PROCESSES_ERRORS[body.code].status);
+      expect(body.error).toBe(PROCESSES_ERRORS[body.code].message);
+    }
+  });
+
+  it('documents each process-specific error code', () => {
+    const doc = fs.readFileSync(path.join(__dirname, '../../website/api/processes.md'), 'utf8');
+    for (const code of ['invalid_port', 'invalid_script', 'invalid_executable', 'no_start_command',
+      'already_running', 'port_in_use', 'no_free_port', 'start_failed']) {
+      expect(doc).toContain(`\`${code}\``);
     }
   });
 

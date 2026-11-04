@@ -6,7 +6,7 @@
 |--------|------|------|-------------|
 | `GET` | `/health` | None | Liveness only — returns `{"status":"ok"}` (no agent list) |
 | `GET` | `/status` | Admin key or dashboard session¹ | Per-agent stats, legacy/managed sessions, worker pools + heartbeat history |
-| `GET` | `/processes` | Admin key or dashboard session¹ | Host process tree for the dashboard |
+| `GET` | `/processes` | Admin key or dashboard session¹ | Host process tree for the dashboard; distinct from the [files root Processes API](/api/processes) at `GET /api/v1/processes` |
 | `GET` | `/knowledge/graph` | Admin key or dashboard session¹ | Memory-wiki as `{ nodes, edges, demo, scope }` for the dashboard **Knowledge base** tab. `?scope=shared` (default) = the cross-agent Shared KB; `?scope=agent:<id>` = that agent's Lane-2 memory (`workspace/memory/*.md`, id validated against the known-agents allowlist). Computed on-demand (independent of `gateway.knowledge.shared.graph` and the nightly reindex). Shared scope serves a labelled demo (`demo:true`) when empty; `?demo=off` returns the real model; `?demo=<N>` a synthetic N-node graph for scale testing |
 | `GET` | `/knowledge/sources` | Admin key or dashboard session¹ | Graph sources for the KB tab's selector: `{ sources: [{ id, label, count }] }` — the Shared KB plus every agent with ≥1 Lane-2 memory note |
 | `GET` | `/knowledge/note` | Admin key or dashboard session¹ | Full Markdown body of one note for the KB tab's detail section: `{ id, scope, path, updated, body }` (frontmatter stripped, ≤20 KB; `path` = gateway-root-relative location, `updated` = ISO last-modified). `?scope=shared\|agent:<id>` selects the vault (same allowlist guard as `/knowledge/graph`); `?id=<relPath>.md` must be a `.md` path that resolves **inside** that vault (no traversal) |
@@ -101,6 +101,16 @@ Read-only. See [Git](/api/git).
 |--------|------|------|-------------|
 | `GET` | `/api/v1/git/status?path=` | Key | Git status of one folder under the files root |
 | `GET` | `/api/v1/git/summary?path=` | Key | Git sync summary of every repository directly under a path of the root |
+
+## Processes API {#processes-api}
+
+Admin key only. See [Processes](/api/processes).
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `GET` | `/api/v1/processes` | Admin key | List listeners by top-level folder, or use `?path=` for one folder |
+| `POST` | `/api/v1/processes/start` | Admin key | Start a script with per-request `path`, `script`, `executable`, and optional `port` |
+| `POST` | `/api/v1/processes/stop` | Admin key | Stop listeners working in one folder |
 
 ## Telegram Channel API {#telegram-channel-api}
 

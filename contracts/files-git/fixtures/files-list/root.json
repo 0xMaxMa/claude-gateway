@@ -19,7 +19,7 @@
         "type": "dir",
         "modified_at": "2026-01-02T03:04:05.000Z",
         "is_git": false,
-        "size": 208896
+        "size": 212992
       },
       {
         "name": "app",
@@ -55,9 +55,14 @@
         "type": "dir",
         "modified_at": "2026-01-02T03:04:05.000Z",
         "is_git": false,
-        "size": 208896
+        "size": 212992
       }
     ],
+    "filesystem": {
+      "total": 107374182400,
+      "free": 53687091200,
+      "available": 50000000000
+    },
     "skipped": [
       {
         "name": "Bad Name",

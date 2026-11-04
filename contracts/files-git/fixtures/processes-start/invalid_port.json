@@ -1,0 +1,19 @@
+{
+  "request": {
+    "method": "POST",
+    "url": "/api/v1/processes/start",
+    "key": "admin",
+    "body": {
+      "path": "site",
+      "script": ".pod/start.sh",
+      "executable": "sh",
+      "port": 3001
+    }
+  },
+  "status": 400,
+  "schema": "ProcessesError",
+  "body": {
+    "code": "invalid_port",
+    "error": "port must be an integer from 1024 to 65535"
+  }
+}

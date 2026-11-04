@@ -39,6 +39,12 @@
         "is_git": false,
         "size": 4096
       }
+    ],
+    "skipped": [
+      {
+        "name": ".venv",
+        "reason": "invalid_name"
+      }
     ]
   }
 }

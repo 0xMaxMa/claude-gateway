@@ -1,0 +1,19 @@
+{
+  "request": {
+    "method": "POST",
+    "url": "/api/v1/processes/start",
+    "key": "admin",
+    "body": {
+      "path": "site",
+      "script": ".pod/start.sh",
+      "executable": "sh",
+      "port": 3001
+    }
+  },
+  "status": 400,
+  "schema": "ProcessesError",
+  "body": {
+    "code": "invalid_script",
+    "error": "script must be a relative path to a regular file in the working folder"
+  }
+}

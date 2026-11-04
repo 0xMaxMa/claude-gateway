@@ -1,0 +1,21 @@
+{
+  "request": {
+    "method": "POST",
+    "url": "/api/v1/processes/start",
+    "key": "admin",
+    "body": {
+      "path": "site",
+      "script": ".pod/start.sh",
+      "executable": "sh",
+      "port": 3001
+    }
+  },
+  "status": 202,
+  "schema": "ProcessesStartResponse",
+  "body": {
+    "path": "site",
+    "port": 3001,
+    "pid": 4242,
+    "running": true
+  }
+}

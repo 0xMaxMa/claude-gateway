@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://claude-gateway.dev/contracts/files-git/session-list.schema.json",
   "title": "SessionList",
-  "description": "200 body of GET /v1/agents/:agentId/sessions: the cwd fields every session entry carries. Other entry fields may appear; project never does.",
+  "description": "200 body of GET /v1/agents/:agentId/sessions, including cwd binding fields.",
   "type": "object",
   "required": [
     "sessions"

@@ -95,7 +95,7 @@ curl -H "X-Api-Key: my-secret-key-123" \
 
 Every session response carries `cwd`, `trusted`, `cwdState` and `active`: here, on create, in the
 [info](#get-apiv1agentsagentidsessionssessionidinfo) response and on the admin
-list `GET /v1/agents/sessions`. List entries carry no `project` field.
+list `GET /v1/agents/sessions`. List entries carry folder binding in `cwd` when present.
 
 | Field | Meaning |
 |-------|---------|
@@ -229,10 +229,6 @@ A key that does not list the agent gets `403` with `API key has no access to age
 streams, media, attachments, shares and catalogs show folder-bound chats to every key that reaches the agent, with
 their `cwd`, `trusted`, `cwdState` and `active` fields. Only binding a chat to a folder adds a check: the key must be
 able to write to the agent (see the table above).
-
-**Sessions from development builds.** Earlier development builds stored a project name instead of a `cwd`. The gateway
-reads such a session as `<root>/<name>`. A session whose folder no longer resolves fails closed, like any other
-session whose folder is gone. Nothing is rewritten on disk.
 
 **Session ids.** A session id in the path of any route under `/api/v1/agents/:agentId/sessions/:sessionId`, the voice
 and browser-binding routes included, and in `POST /chats/:chatId/sessions/:sessionId/messages`, must be 1 to 64 of `[A-Za-z0-9_-]`. Any other id answers `400` with

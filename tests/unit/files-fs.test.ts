@@ -37,6 +37,31 @@ function makeDirs(
 }
 
 describe("listDir", () => {
+  it("reports statfs capacity only on the real root listing", async () => {
+    makeDirs("alpha");
+    const link = path.join(base, "projects-link");
+    fs.symlinkSync(root, link);
+    const rootResult = await listDir(link, rel(""));
+    if (!rootResult.ok) throw new Error(rootResult.error);
+    const st = await fs.promises.statfs(root, { bigint: true });
+    expect(rootResult.value.filesystem).toEqual({
+      total: Number(st.blocks * BigInt(st.bsize)),
+      free: Number(st.bfree * BigInt(st.bsize)),
+      available: Number(st.bavail * BigInt(st.bsize)),
+    });
+    const nested = await listDir(link, rel("alpha"));
+    if (!nested.ok) throw new Error(nested.error);
+    expect(nested.value.filesystem).toBeUndefined();
+  });
+
+  it("omits filesystem capacity if statfs fails", async () => {
+    makeDirs("alpha");
+    jest.spyOn(fs.promises, "statfs").mockRejectedValueOnce(Object.assign(new Error("unavailable"), { code: "ENOSYS" }));
+    const result = await listDir(root, rel(""));
+    if (!result.ok) throw new Error(result.error);
+    expect(result.value.filesystem).toBeUndefined();
+    expect(result.value.entries).toHaveLength(1);
+  });
   it("reports a missing root as exists:false without creating it", async () => {
     expect(await listDir(root, rel(""))).toEqual({
       ok: true,

@@ -1,0 +1,23 @@
+{
+  "request": {
+    "method": "GET",
+    "url": "/api/v1/processes?path=site",
+    "key": "admin"
+  },
+  "status": 200,
+  "schema": "ProcessesFolder",
+  "body": {
+    "path": "site",
+    "running": true,
+    "listeners": [
+      {
+        "port": 3001,
+        "pids": [
+          4242
+        ],
+        "command": "node server.js",
+        "address": "0.0.0.0"
+      }
+    ]
+  }
+}

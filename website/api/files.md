@@ -39,7 +39,7 @@ Errors have `{ "error": string, "code": string }`. Git errors may include additi
 
 ## GET /api/v1/files {#get-files}
 
-List direct child folders. `?path=<relative-folder>` chooses a parent; no path lists the root. `?include_hidden=true` also lists valid dot-prefixed folders, except delete trash; it defaults to `false`. The response contains `root`, `exists`, `path`, `abs`, and `entries`. Each entry includes `name`, `path`, `abs`, `type`, `modified_at`, `is_git`, and `size` in bytes or `null` if size measurement times out. Invalid or unsafe entries appear in `skipped`; hidden trash appears in `leftovers`.
+List direct child folders. `?path=<relative-folder>` chooses a parent; no path lists the root. `?include_hidden=true` also lists valid dot-prefixed folders, except delete trash; it defaults to `false`. The response contains `root`, `exists`, `path`, `abs`, and `entries`. Each entry includes `name`, `path`, `abs`, `type`, `modified_at`, `is_git`, and `size` in bytes or `null` if size measurement times out. Invalid or unsafe entries appear in `skipped`; hidden trash appears in `leftovers`. The root listing also includes `filesystem: { total, free, available }` in bytes, measured with `statfs` on the real root. This field is omitted if the measurement fails.
 
 ## POST /api/v1/files/mkdir {#post-files-mkdir}
 

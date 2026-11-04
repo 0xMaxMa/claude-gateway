@@ -48,7 +48,7 @@ describe('GET /api/v1/files skipped', () => {
   });
   it('is absent when every folder is listed, so old responses keep their shape', async () => {
     const res = await list();
-    expect(Object.keys(res.body).sort()).toEqual(['abs', 'entries', 'exists', 'path', 'root']);
+    expect(Object.keys(res.body).sort()).toEqual(['abs', 'entries', 'exists', 'filesystem', 'path', 'root']);
   });
 
   it('names folders the name rules reject, and keeps the other entries unchanged', async () => {

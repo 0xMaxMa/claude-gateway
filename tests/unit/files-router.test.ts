@@ -88,6 +88,7 @@ describe('GET /api/v1/files', () => {
     const top = await list();
     expect(top.body).toEqual({
       root, exists: true, path: '', abs: root,
+      filesystem: { total: expect.any(Number), free: expect.any(Number), available: expect.any(Number) },
       entries: [{ name: 'app', path: 'app', abs: path.join(root, 'app'), type: 'dir', modified_at: expect.any(String), is_git: false, size: expect.any(Number) }],
     });
     const nested = await list('app');

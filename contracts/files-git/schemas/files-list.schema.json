@@ -14,7 +14,7 @@
     },
     "path": {
       "type": "string",
-      "pattern": "^$|^[A-Za-z0-9][A-Za-z0-9._-]{0,63}(/[A-Za-z0-9][A-Za-z0-9._-]{0,63}){0,31}$"
+      "pattern": "^$|^\\.?[A-Za-z0-9][A-Za-z0-9._-]{0,63}(/\\.?[A-Za-z0-9][A-Za-z0-9._-]{0,63}){0,31}$"
     },
     "abs": {
       "type": "string",
@@ -60,6 +60,29 @@
         "type": "string",
         "pattern": "^\\.deleting-"
       }
+    },
+    "filesystem": {
+      "type": "object",
+      "properties": {
+        "total": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "free": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "available": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "total",
+        "free",
+        "available"
+      ],
+      "additionalProperties": false
     }
   },
   "required": [
@@ -76,11 +99,11 @@
       "properties": {
         "name": {
           "type": "string",
-          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+          "pattern": "^\\.?[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
         },
         "path": {
           "type": "string",
-          "pattern": "^$|^[A-Za-z0-9][A-Za-z0-9._-]{0,63}(/[A-Za-z0-9][A-Za-z0-9._-]{0,63}){0,31}$"
+          "pattern": "^$|^\\.?[A-Za-z0-9][A-Za-z0-9._-]{0,63}(/\\.?[A-Za-z0-9][A-Za-z0-9._-]{0,63}){0,31}$"
         },
         "abs": {
           "type": "string",
@@ -97,7 +120,10 @@
           "type": "boolean"
         },
         "size": {
-          "type": ["integer", "null"],
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": 0
         }
       },

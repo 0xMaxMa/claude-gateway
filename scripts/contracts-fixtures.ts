@@ -1,5 +1,5 @@
 /**
- * Records the golden fixtures of the files and git API from real responses of the real routers.
+ * Records golden files, git and session fixtures from routers, plus stable process examples.
  *
  * Run:   npm run contracts:fixtures           (rewrites contracts/files-git/fixtures)
  * Check: tests/unit/files-contracts.test.ts   (fails when a fixture is stale or breaks its schema)
@@ -18,6 +18,7 @@ import { AgentRunner } from '../src/agent/runner';
 import { createCapabilitiesRouter } from '../src/api/capabilities';
 import { createFilesRouter } from '../src/api/files-router';
 import { createGitRouter } from '../src/api/git-router';
+import { PROCESSES_ERRORS } from '../src/api/processes-router';
 import { GatewayRouter } from '../src/api/gateway-router';
 import { overlaps } from '../src/files/paths';
 import { createCwdResolver } from '../src/files/session-cwd';
@@ -31,7 +32,7 @@ const SHOWN_ROOT = '/home/user/projects';
 const FIXED_TIME = new Date('2026-01-02T03:04:05.000Z');
 
 export type SchemaName = 'FilesList' | 'FilesMkdirResponse' | 'FilesDeleteResponse' | 'GitStatus' | 'GitSummary' | 'Capabilities' | 'Error'
-  | 'SessionCreateResponse' | 'SessionList' | 'SessionError';
+  | 'SessionCreateResponse' | 'SessionList' | 'SessionError' | 'ProcessesList' | 'ProcessesFolder' | 'ProcessesStartResponse' | 'ProcessesStopResponse' | 'ProcessesError';
 
 export interface Fixture {
   request: { method: 'GET' | 'POST' | 'DELETE'; url: string; key: 'admin' | 'reader'; body?: unknown };
@@ -76,6 +77,7 @@ function seed(root: string, outside: string): void {
   fs.mkdirSync(outside, { recursive: true });
   repo(path.join(root, 'app'), 'https://ann:secret-token@github.com/acme/app.git');
   fs.mkdirSync(path.join(root, 'site', 'web'), { recursive: true });
+  fs.mkdirSync(path.join(root, 'site', '.venv'));
   fs.mkdirSync(path.join(root, 'site', 'node_modules', 'left-pad'), { recursive: true });
   repo(path.join(root, 'site', 'api'));
   fs.mkdirSync(path.join(root, 'Bad Name'));
@@ -135,6 +137,7 @@ export async function recordFixtures(): Promise<Record<string, Fixture>> {
       ['capabilities/reader', { method: 'GET', url: '/api/v1/capabilities', key: 'reader' }, 'Capabilities'],
       ['files-list/root', { method: 'GET', url: '/api/v1/files', key: 'reader' }, 'FilesList'],
       ['files-list/nested', { method: 'GET', url: '/api/v1/files?path=site', key: 'reader' }, 'FilesList'],
+      ['files-list/include_hidden', { method: 'GET', url: '/api/v1/files?path=site&include_hidden=true', key: 'reader' }, 'FilesList'],
       ['files-list/path_escape', { method: 'GET', url: '/api/v1/files?path=escape', key: 'reader' }, 'Error'],
       ['files-list/invalid_name', { method: 'GET', url: '/api/v1/files?path=..', key: 'reader' }, 'Error'],
       ['files-list/invalid_path', { method: 'GET', url: '/api/v1/files?path=%2Fetc', key: 'reader' }, 'Error'],
@@ -174,8 +177,9 @@ export async function recordFixtures(): Promise<Record<string, Fixture>> {
       let call = request(target)[req.method === 'GET' ? 'get' : req.method === 'POST' ? 'post' : 'delete'](req.url).set('Authorization', `Bearer ${KEYS[req.key].key}`);
       if (body !== undefined) call = call.send(body as object);
       const res = await call;
-      const shownBody = fixedTimes(shown(res.body)) as { version?: string };
+      const shownBody = fixedTimes(shown(res.body)) as { version?: string; filesystem?: unknown };
       if (schema === 'Capabilities') shownBody.version = '0.0.0';
+      if (schema === 'FilesList' && req.url === '/api/v1/files' && shownBody.filesystem) shownBody.filesystem = { total: 107374182400, free: 53687091200, available: 50000000000 };
       out[`${name}.json`] = { request: req, status: res.status, schema, body: shownBody };
     };
     for (const [name, req, schema, prepare] of steps) {
@@ -189,6 +193,7 @@ export async function recordFixtures(): Promise<Record<string, Fixture>> {
     for (const [name, req, schema] of sessionSteps) await record(name, sessions as unknown as express.Express, req, schema);
     await record('capabilities/disabled', disabled, { method: 'GET', url: '/api/v1/capabilities', key: 'admin' }, 'Capabilities');
     await record('errors/internal', thrower, { method: 'DELETE', url: '/api/v1/files', key: 'admin', body: { path: 'busy', confirm: 'busy' } }, 'Error');
+    Object.assign(out, processExamples());
     return out;
   } finally {
     await Promise.all(runners.splice(0).map((r) => r.stop().catch(() => {})));
@@ -199,6 +204,31 @@ export async function recordFixtures(): Promise<Record<string, Fixture>> {
     execFileSync('chmod', ['-R', 'u+w', base]);
     fs.rmSync(base, { recursive: true, force: true });
   }
+}
+
+/** Stable public examples for process responses that depend on the host's listeners and PIDs. */
+function processExamples(): Record<string, Fixture> {
+  const out: Record<string, Fixture> = {};
+  const add = (name: string, method: Fixture['request']['method'], url: string, body: unknown, status: number, schema: SchemaName, requestBody?: unknown) => {
+    out[`processes-${name}.json`] = { request: { method, url, key: 'admin', ...(requestBody === undefined ? {} : { body: requestBody }) }, status, schema, body };
+  };
+  const listener = { port: 3001, pids: [4242], command: 'node server.js', address: '0.0.0.0' };
+  add('list/all', 'GET', '/api/v1/processes', { processes: [{ path: 'site', running: true, listeners: [listener] }] }, 200, 'ProcessesList');
+  add('list/folder', 'GET', '/api/v1/processes?path=site', { path: 'site', running: true, listeners: [listener] }, 200, 'ProcessesFolder');
+  const start = { path: 'site', script: '.pod/start.sh', executable: 'sh', port: 3001 };
+  add('start/started', 'POST', '/api/v1/processes/start', { path: 'site', port: 3001, pid: 4242, running: true }, 202, 'ProcessesStartResponse', start);
+  add('stop/stopped', 'POST', '/api/v1/processes/stop', { path: 'site', stopped: [{ port: 3001, pids: [4242] }], remaining: [], running: false }, 200, 'ProcessesStopResponse', { path: 'site' });
+  const errors: Array<[string, number, Record<string, unknown>]> = [
+    ['invalid_port', 400, {}], ['invalid_script', 400, {}], ['invalid_executable', 400, {}],
+    ['no_start_command', 422, {}], ['already_running', 409, { port: 3001 }],
+    ['already_running_starting', 409, { starting: true }], ['port_in_use', 409, { port: 3001 }],
+    ['no_free_port', 409, {}], ['start_failed', 502, { log: 'token=[REDACTED]' }],
+  ];
+  for (const [name, status, extra] of errors) {
+    const code = name === 'already_running_starting' ? 'already_running' : name;
+    add(`start/${name}`, 'POST', '/api/v1/processes/start', { code, error: PROCESSES_ERRORS[code as keyof typeof PROCESSES_ERRORS].message, ...extra }, status, 'ProcessesError', start);
+  }
+  return out;
 }
 
 export function writeFixtures(fixtures: Record<string, Fixture>): void {

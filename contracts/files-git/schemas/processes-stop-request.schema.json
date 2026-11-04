@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://claude-gateway.dev/contracts/files-git/processes-stop-request.schema.json",
+  "title": "processes-stop-request",
+  "type": "object",
+  "properties": {
+    "path": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "required": [
+    "path"
+  ],
+  "additionalProperties": false
+}

@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://claude-gateway.dev/contracts/files-git/processes-error.schema.json",
+  "title": "processes-error",
+  "type": "object",
+  "properties": {
+    "error": {
+      "type": "string",
+      "minLength": 1
+    },
+    "code": {
+      "enum": [
+        "invalid_port",
+        "invalid_script",
+        "invalid_executable",
+        "no_start_command",
+        "already_running",
+        "port_in_use",
+        "no_free_port",
+        "start_failed"
+      ]
+    },
+    "port": {
+      "type": "integer",
+      "minimum": 1024,
+      "maximum": 65535
+    },
+    "starting": {
+      "const": true
+    },
+    "log": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "error",
+    "code"
+  ],
+  "additionalProperties": false
+}
