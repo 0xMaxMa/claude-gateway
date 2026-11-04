@@ -137,12 +137,15 @@ describe('GET /v1/processes', () => {
   it('returns listeners grouped by folder in one root-wide request', async () => {
     const first = project('first');
     const second = project('second');
+    const hidden = project('.hidden');
     fs.mkdirSync(path.join(first, 'nested'));
     const a = await listenIn(path.join(first, 'nested'));
     const b = await listenIn(second);
+    const c = await listenIn(hidden);
     const result = await get(undefined);
     expect(result.status).toBe(200);
     expect(result.body.processes).toEqual([
+      expect.objectContaining({ path: '.hidden', listeners: [expect.objectContaining({ port: c.port })] }),
       expect.objectContaining({ path: 'first', listeners: [expect.objectContaining({ port: a.port })] }),
       expect.objectContaining({ path: 'second', listeners: [expect.objectContaining({ port: b.port })] }),
     ]);

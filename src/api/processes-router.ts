@@ -104,7 +104,7 @@ export function createProcessesRouter(apiKeys: ApiKey[], root: string, deps: Pro
           for (const owner of listener.owners) {
             if (!owner.cwd || !pathWithin(realRoot, owner.cwd) || owner.cwd === realRoot) continue;
             const folder = path.relative(realRoot, owner.cwd).split(path.sep)[0];
-            if (!folder || !parseRelPath(folder).ok) continue;
+            if (!folder) continue;
             const listed = grouped.get(folder) ?? [];
             if (!listed.some((entry) => entry.port === listener.port && entry.address === listener.address)) {
               listed.push({ port: listener.port, pids: listener.owners.map((o) => o.pid), command: listener.owners[0].command, address: listener.address });
