@@ -69,6 +69,14 @@ describe('files and git contracts', () => {
       expect(fixture.status).toBe(PROCESSES_ERRORS[body.code].status);
       expect(body.error).toBe(PROCESSES_ERRORS[body.code].message);
     }
+    for (const [name, fixture] of Object.entries(fixtures).filter(([name]) => name.startsWith('processes-start/'))) {
+      const caseName = name.split('/')[1].replace(/\.json$/, '');
+      const expected = caseName === 'already_running_starting' ? 'already_running' : caseName;
+      if (expected !== 'started') expect((fixture.body as { code: string }).code).toBe(expected);
+    }
+    expect(fixtures['processes-start/already_running_starting.json']!.body).toMatchObject({ starting: true });
+    expect(fixtures['processes-start/started.json']!.status).toBe(202);
+    expect(fixtures['processes-stop/stopped.json']!.status).toBe(200);
   });
 
   it('documents each process-specific error code', () => {

@@ -1,5 +1,5 @@
 import { promises as fsp } from 'fs';
-import { redactLine } from '../cli/redact';
+import { redactLine, redactUntrustedItem } from '../cli/redact';
 import { pathWithin } from '../utils/paths';
 
 /** One listening TCP socket from /proc/net/tcp or tcp6. */
@@ -82,7 +82,7 @@ export async function listeningPorts(): Promise<Set<number>> {
 
 /** argv joined by spaces, with secret-looking values masked and the result cut to {@link MAX_COMMAND_CHARS}. */
 export function displayCommand(argv: string[]): string {
-  const text = redactLine(argv.join(' '));
+  const text = redactLine(argv.map(redactUntrustedItem).join(' '));
   return text.length > MAX_COMMAND_CHARS ? `${text.slice(0, MAX_COMMAND_CHARS - 1)}…` : text;
 }
 
@@ -142,6 +142,9 @@ export async function collectListeners(): Promise<OwnedListener[]> {
 export function listenersIn(all: OwnedListener[], realDir: string): Listener[] {
   return all
     .filter((l) => l.owners.some((o) => o.cwd !== undefined && pathWithin(realDir, o.cwd)))
-    .map((l) => ({ port: l.port, pids: l.owners.map((o) => o.pid), command: l.owners[0].command, address: l.address }))
+    .map((l) => {
+      const owners = l.owners.filter((o) => o.cwd !== undefined && pathWithin(realDir, o.cwd));
+      return { port: l.port, pids: owners.map((o) => o.pid), command: owners[0].command, address: l.address };
+    })
     .sort((a, b) => a.port - b.port || (a.address < b.address ? -1 : a.address > b.address ? 1 : 0));
 }

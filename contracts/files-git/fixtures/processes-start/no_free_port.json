@@ -5,15 +5,14 @@
     "key": "admin",
     "body": {
       "path": "site",
-      "script": ".pod/start.sh",
-      "executable": "sh",
-      "port": 3001
+      "script": "scripts/serve.sh",
+      "executable": "sh"
     }
   },
   "status": 409,
   "schema": "ProcessesError",
   "body": {
-    "code": "no_free_port",
-    "error": "Every port from 1024 to 65535 is in use"
+    "error": "No free port is available in the search range",
+    "code": "no_free_port"
   }
 }

@@ -5,15 +5,15 @@
     "key": "admin",
     "body": {
       "path": "site",
-      "script": ".pod/start.sh",
-      "executable": "sh",
+      "script": "scripts/serve.sh",
+      "executable": "node",
       "port": 3001
     }
   },
   "status": 400,
   "schema": "ProcessesError",
   "body": {
-    "code": "invalid_executable",
-    "error": "executable must be sh or bash"
+    "error": "executable must be sh or bash",
+    "code": "invalid_executable"
   }
 }

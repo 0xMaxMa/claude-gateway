@@ -11,6 +11,7 @@
 import { execFileSync } from 'child_process';
 import express from 'express';
 import * as fs from 'fs';
+import * as net from 'net';
 import * as os from 'os';
 import * as path from 'path';
 import request from 'supertest';
@@ -18,7 +19,7 @@ import { AgentRunner } from '../src/agent/runner';
 import { createCapabilitiesRouter } from '../src/api/capabilities';
 import { createFilesRouter } from '../src/api/files-router';
 import { createGitRouter } from '../src/api/git-router';
-import { PROCESSES_ERRORS } from '../src/api/processes-router';
+import { createProcessesRouter } from '../src/api/processes-router';
 import { GatewayRouter } from '../src/api/gateway-router';
 import { overlaps } from '../src/files/paths';
 import { createCwdResolver } from '../src/files/session-cwd';
@@ -193,7 +194,7 @@ export async function recordFixtures(): Promise<Record<string, Fixture>> {
     for (const [name, req, schema] of sessionSteps) await record(name, sessions as unknown as express.Express, req, schema);
     await record('capabilities/disabled', disabled, { method: 'GET', url: '/api/v1/capabilities', key: 'admin' }, 'Capabilities');
     await record('errors/internal', thrower, { method: 'DELETE', url: '/api/v1/files', key: 'admin', body: { path: 'busy', confirm: 'busy' } }, 'Error');
-    Object.assign(out, processExamples());
+    Object.assign(out, await processExamples(root, base));
     return out;
   } finally {
     await Promise.all(runners.splice(0).map((r) => r.stop().catch(() => {})));
@@ -206,27 +207,69 @@ export async function recordFixtures(): Promise<Record<string, Fixture>> {
   }
 }
 
-/** Stable public examples for process responses that depend on the host's listeners and PIDs. */
-function processExamples(): Record<string, Fixture> {
+/** Record real process-route responses, normalizing only host-specific ports, PIDs and commands. */
+async function processExamples(root: string, base: string): Promise<Record<string, Fixture>> {
   const out: Record<string, Fixture> = {};
-  const add = (name: string, method: Fixture['request']['method'], url: string, body: unknown, status: number, schema: SchemaName, requestBody?: unknown) => {
-    out[`processes-${name}.json`] = { request: { method, url, key: 'admin', ...(requestBody === undefined ? {} : { body: requestBody }) }, status, schema, body };
+  const server = net.createServer();
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = (server.address() as net.AddressInfo).port;
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  const script = 'scripts/serve.sh';
+  fs.mkdirSync(path.join(root, 'site', 'scripts'));
+  fs.writeFileSync(path.join(root, 'site', script), `exec node -e "require('net').createServer().listen(Number(process.env.PORT), '127.0.0.1')"\n`);
+  fs.writeFileSync(path.join(root, 'site', 'scripts', 'fail.sh'), 'echo "SECRET_TOKEN=fake-contract-secret"\nexit 3\n');
+  fs.writeFileSync(path.join(root, 'site', 'scripts', 'slow.sh'), `sleep 2\nexec node -e "require('net').createServer().listen(Number(process.env.PORT), '127.0.0.1')"\n`);
+  const app = express();
+  app.use(express.json());
+  app.use('/api', createProcessesRouter(Object.values(KEYS), root, { logger: quiet,
+    start: { logDir: path.join(base, 'process-logs'), portRange: [port, port], timeoutMs: 5000, pollMs: 50 },
+    stop: { termWaitMs: 300, pollMs: 50 } }));
+  const normalize = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(normalize);
+    if (!value || typeof value !== 'object') return value;
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key,
+      key === 'port' && item === port ? 3001 :
+      key === 'pid' && typeof item === 'number' ? 4242 :
+      key === 'pids' && Array.isArray(item) ? item.map(() => 4242) :
+      key === 'command' && typeof item === 'string' ? 'node server.js' : normalize(item)]));
   };
-  const listener = { port: 3001, pids: [4242], command: 'node server.js', address: '0.0.0.0' };
-  add('list/all', 'GET', '/api/v1/processes', { processes: [{ path: 'site', running: true, listeners: [listener] }] }, 200, 'ProcessesList');
-  add('list/folder', 'GET', '/api/v1/processes?path=site', { path: 'site', running: true, listeners: [listener] }, 200, 'ProcessesFolder');
-  const start = { path: 'site', script: '.pod/start.sh', executable: 'sh', port: 3001 };
-  add('start/started', 'POST', '/api/v1/processes/start', { path: 'site', port: 3001, pid: 4242, running: true }, 202, 'ProcessesStartResponse', start);
-  add('stop/stopped', 'POST', '/api/v1/processes/stop', { path: 'site', stopped: [{ port: 3001, pids: [4242] }], remaining: [], running: false }, 200, 'ProcessesStopResponse', { path: 'site' });
-  const errors: Array<[string, number, Record<string, unknown>]> = [
-    ['invalid_port', 400, {}], ['invalid_script', 400, {}], ['invalid_executable', 400, {}],
-    ['no_start_command', 422, {}], ['already_running', 409, { port: 3001 }],
-    ['already_running_starting', 409, { starting: true }], ['port_in_use', 409, { port: 3001 }],
-    ['no_free_port', 409, {}], ['start_failed', 502, { log: 'token=[REDACTED]' }],
-  ];
-  for (const [name, status, extra] of errors) {
-    const code = name === 'already_running_starting' ? 'already_running' : name;
-    add(`start/${name}`, 'POST', '/api/v1/processes/start', { code, error: PROCESSES_ERRORS[code as keyof typeof PROCESSES_ERRORS].message, ...extra }, status, 'ProcessesError', start);
+  const add = async (name: string, target: express.Express, method: Fixture['request']['method'], url: string, schema: SchemaName, body?: object) => {
+    let call = request(target)[method === 'GET' ? 'get' : 'post'](url).set('Authorization', `Bearer ${KEYS.admin.key}`);
+    if (body) call = call.send(body);
+    const response = await call;
+    out[`processes-${name}.json`] = { request: { method, url, key: 'admin', ...(body ? { body: normalize(body) } : {}) }, status: response.status, schema, body: normalize(response.body) };
+  };
+  const start = { path: 'site', script, executable: 'sh', port };
+  await add('start/invalid_port', app, 'POST', '/api/v1/processes/start', 'ProcessesError', { ...start, port: 80 });
+  await add('start/invalid_script', app, 'POST', '/api/v1/processes/start', 'ProcessesError', { ...start, script: '../bad' });
+  await add('start/invalid_executable', app, 'POST', '/api/v1/processes/start', 'ProcessesError', { ...start, executable: 'node' });
+  await add('start/no_start_command', app, 'POST', '/api/v1/processes/start', 'ProcessesError', { ...start, script: 'scripts/missing.sh' });
+  await add('start/start_failed', app, 'POST', '/api/v1/processes/start', 'ProcessesError', { ...start, script: 'scripts/fail.sh' });
+  await add('start/started', app, 'POST', '/api/v1/processes/start', 'ProcessesStartResponse', start);
+  try {
+    await add('list/all', app, 'GET', '/api/v1/processes', 'ProcessesList');
+    await add('list/folder', app, 'GET', '/api/v1/processes?path=site', 'ProcessesFolder');
+    await add('start/already_running', app, 'POST', '/api/v1/processes/start', 'ProcessesError', start);
+    await add('stop/stopped', app, 'POST', '/api/v1/processes/stop', 'ProcessesStopResponse', { path: 'site' });
+  } finally {
+    // The stop route also checks identity before signalling; retry cleanup only if a fixture call failed.
+    await request(app).post('/api/v1/processes/stop').set('Authorization', `Bearer ${KEYS.admin.key}`).send({ path: 'site' });
+  }
+  const occupied = net.createServer();
+  await new Promise<void>((resolve) => occupied.listen(port, '127.0.0.1', resolve));
+  try {
+    await add('start/port_in_use', app, 'POST', '/api/v1/processes/start', 'ProcessesError', start);
+    await add('start/no_free_port', app, 'POST', '/api/v1/processes/start', 'ProcessesError', { path: 'site', script, executable: 'sh' });
+  } finally { await new Promise<void>((resolve) => occupied.close(() => resolve())); }
+  const pending = request(app).post('/api/v1/processes/start').set('Authorization', `Bearer ${KEYS.admin.key}`).send({ ...start, script: 'scripts/slow.sh' });
+  const first = pending.then((response) => response);
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  try {
+    await add('start/already_running_starting', app, 'POST', '/api/v1/processes/start', 'ProcessesError', start);
+    await first;
+  } finally {
+    await first.catch(() => {});
+    await request(app).post('/api/v1/processes/stop').set('Authorization', `Bearer ${KEYS.admin.key}`).send({ path: 'site' });
   }
   return out;
 }

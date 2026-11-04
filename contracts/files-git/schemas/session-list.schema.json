@@ -49,8 +49,7 @@
           },
           "active": {
             "type": "boolean"
-          },
-          "project": false
+          }
         }
       }
     }

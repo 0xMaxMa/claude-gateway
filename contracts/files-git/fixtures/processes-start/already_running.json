@@ -5,7 +5,7 @@
     "key": "admin",
     "body": {
       "path": "site",
-      "script": ".pod/start.sh",
+      "script": "scripts/serve.sh",
       "executable": "sh",
       "port": 3001
     }
@@ -13,8 +13,8 @@
   "status": 409,
   "schema": "ProcessesError",
   "body": {
-    "code": "already_running",
     "error": "A process working in this folder already listens, or a start of it is running",
+    "code": "already_running",
     "port": 3001
   }
 }

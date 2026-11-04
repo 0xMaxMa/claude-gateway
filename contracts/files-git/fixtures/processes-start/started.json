@@ -5,7 +5,7 @@
     "key": "admin",
     "body": {
       "path": "site",
-      "script": ".pod/start.sh",
+      "script": "scripts/serve.sh",
       "executable": "sh",
       "port": 3001
     }

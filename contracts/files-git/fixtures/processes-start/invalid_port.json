@@ -5,15 +5,15 @@
     "key": "admin",
     "body": {
       "path": "site",
-      "script": ".pod/start.sh",
+      "script": "scripts/serve.sh",
       "executable": "sh",
-      "port": 3001
+      "port": 80
     }
   },
   "status": 400,
   "schema": "ProcessesError",
   "body": {
-    "code": "invalid_port",
-    "error": "port must be an integer from 1024 to 65535"
+    "error": "port must be an integer from 1024 to 65535",
+    "code": "invalid_port"
   }
 }

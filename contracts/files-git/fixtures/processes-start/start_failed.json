@@ -5,7 +5,7 @@
     "key": "admin",
     "body": {
       "path": "site",
-      "script": ".pod/start.sh",
+      "script": "scripts/fail.sh",
       "executable": "sh",
       "port": 3001
     }
@@ -13,8 +13,8 @@
   "status": 502,
   "schema": "ProcessesError",
   "body": {
-    "code": "start_failed",
     "error": "The start script exited or did not listen in time",
-    "log": "token=[REDACTED]"
+    "code": "start_failed",
+    "log": "«redacted»\n"
   }
 }

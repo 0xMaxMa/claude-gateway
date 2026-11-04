@@ -32,7 +32,7 @@ export const PROCESSES_ERRORS: Record<StartErrorCode, { status: number; message:
   cross_device: FILES_ERRORS.cross_device,
   already_running: { status: 409, message: 'A process working in this folder already listens, or a start of it is running' },
   port_in_use: { status: 409, message: 'Something already listens on this port' },
-  no_free_port: { status: 409, message: `Every port from ${DEFAULT_PORT_RANGE[0]} to ${DEFAULT_PORT_RANGE[1]} is in use` },
+  no_free_port: { status: 409, message: 'No free port is available in the search range' },
   no_start_command: { status: 422, message: 'The requested script is missing or not a regular file' },
   internal: FILES_ERRORS.internal,
   start_failed: { status: 502, message: 'The start script exited or did not listen in time' },
@@ -51,7 +51,7 @@ function requireAdmin(req: Request, res: Response, next: NextFunction): void {
 
 /** A non-empty folder path under the root, as the files API parses it. */
 function folderPath(raw: unknown): { ok: true; value: RelPath } | { ok: false; error: 'invalid_path' | 'invalid_name' } {
-  const rel = parseRelPath(raw);
+  const rel = parseRelPath(raw, true);
   if (!rel.ok) return rel;
   return rel.value === '' ? { ok: false, error: 'invalid_path' } : rel;
 }
@@ -108,7 +108,8 @@ export function createProcessesRouter(apiKeys: ApiKey[], root: string, deps: Pro
             if (!folder) continue;
             const listed = grouped.get(folder) ?? [];
             if (!listed.some((entry) => entry.port === listener.port && entry.address === listener.address)) {
-              listed.push({ port: listener.port, pids: listener.owners.map((o) => o.pid), command: listener.owners[0].command, address: listener.address });
+              const attributed = listenersIn([listener], path.join(realRoot, folder))[0];
+              if (attributed) listed.push(attributed);
             }
             grouped.set(folder, listed);
           }

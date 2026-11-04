@@ -2,7 +2,7 @@ import { spawn } from 'child_process';
 import { createHash } from 'crypto';
 import { constants, promises as fsp } from 'fs';
 import * as path from 'path';
-import { redactLines } from '../cli/redact';
+import { redactUntrustedItem } from '../cli/redact';
 import { resolveRealDir } from '../files/fs';
 import { FilesErrorCode, parseRelPath, RelPath } from '../files/paths';
 import { err, ok, Result } from '../utils/result';
@@ -38,7 +38,7 @@ export interface StartOptions {
   pollMs?: number;
 }
 
-export const DEFAULT_PORT_RANGE = [1024, 65535] as const;
+export const DEFAULT_PORT_RANGE = [49152, 65535] as const;
 export const START_TIMEOUT_MS = 20_000;
 export const LOG_TAIL_BYTES = 4096;
 
@@ -83,8 +83,13 @@ async function logTail(file: string): Promise<string> {
     const { size } = await handle.stat();
     const length = Math.min(size, LOG_TAIL_BYTES);
     const buf = Buffer.alloc(length);
-    await handle.read(buf, 0, length, size - length);
-    return redactLines(buf.toString('utf8').split('\n')).join('\n');
+    const { bytesRead } = await handle.read(buf, 0, length, size - length);
+    if (bytesRead !== length) return '«redacted»';
+    const tail = buf.toString('utf8');
+    // A truncated prefix could start in the middle of a secret assignment.
+    const complete = size > length ? tail.slice(tail.indexOf('\n') + 1) : tail;
+    if (size > length && !tail.includes('\n')) return '«redacted»';
+    return complete.split('\n').map(redactUntrustedItem).join('\n');
   } catch {
     return '';
   } finally {

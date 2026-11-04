@@ -6,7 +6,7 @@ import * as os from 'os';
 import * as path from 'path';
 import request from 'supertest';
 import { createProcessesRouter } from '../../src/api/processes-router';
-import { listeningPorts, parseProcNetTcp, readStartTicks } from '../../src/processes/listeners';
+import { displayCommand, listeningPorts, listenersIn, parseProcNetTcp, readStartTicks } from '../../src/processes/listeners';
 import { signalIfSame, stopTargets } from '../../src/processes/stop';
 import type { ApiKey } from '../../src/types';
 import { silentLogger } from '../helpers/silent-logger';
@@ -51,12 +51,12 @@ afterEach(() => {
   fs.rmSync(base, { recursive: true, force: true });
 });
 
-function project(name: string, script?: string): string {
+function folder(name: string, script?: string): string {
   const dir = path.join(root, name);
   fs.mkdirSync(dir, { recursive: true });
   if (script !== undefined) {
-    fs.mkdirSync(path.join(dir, '.pod'));
-    fs.writeFileSync(path.join(dir, '.pod', 'start.sh'), script);
+    fs.mkdirSync(path.join(dir, 'scripts'));
+    fs.writeFileSync(path.join(dir, 'scripts', 'serve.sh'), script);
   }
   return dir;
 }
@@ -83,7 +83,7 @@ async function freePort(): Promise<number> {
 
 const get = (rel: unknown, key = 'k-admin') => request(app).get('/api/v1/processes').query(rel === undefined ? {} : { path: rel }).set(as(key));
 const start = async (body: object, key = 'k-admin') => {
-  const res = await request(app).post('/api/v1/processes/start').set(as(key)).send({ script: '.pod/start.sh', executable: 'sh', ...body });
+  const res = await request(app).post('/api/v1/processes/start').set(as(key)).send({ script: 'scripts/serve.sh', executable: 'sh', ...body });
   if (res.status === 202) startedPids.push(res.body.pid);
   return res;
 };
@@ -105,9 +105,16 @@ describe('parseProcNetTcp', () => {
   });
 });
 
+it('masks credentials in a reported command, including quoted values and URL userinfo', () => {
+  const command = displayCommand(['node', "SECRET_TOKEN='fake value with spaces'", 'postgres://user:fake-pass@db.invalid/db', 'plain-arg']);
+  expect(command).toContain('plain-arg');
+  expect(command).not.toMatch(/fake value with spaces|fake-pass/);
+  expect(command).toContain('«redacted»');
+});
+
 describe('path rejection', () => {
   beforeEach(() => {
-    project('app', LISTEN_SCRIPT);
+    folder('app', LISTEN_SCRIPT);
     fs.mkdirSync(path.join(base, 'outside'));
     fs.symlinkSync(path.join(root, 'app'), path.join(root, 'alias'));
     fs.symlinkSync(path.join(base, 'outside'), path.join(root, 'out'));
@@ -134,10 +141,33 @@ describe('path rejection', () => {
 });
 
 describe('GET /v1/processes', () => {
+  it('reports only owners in the requested folder for a shared socket', () => {
+    const inside = path.join(root, 'site');
+    const socket = [{ inode: '1', port: 3001, address: '127.0.0.1', owners: [
+      { pid: 1, cwd: base, command: 'external' }, { pid: 2, cwd: inside, command: 'internal' },
+    ] }];
+    expect(listenersIn(socket, inside)).toEqual([{ port: 3001, address: '127.0.0.1', pids: [2], command: 'internal' }]);
+  });
+
+  it('accepts a hidden folder shown by the root-wide listing', async () => {
+    const dir = folder('.hidden');
+    const { port, pid } = await listenIn(dir);
+    expect((await get(undefined)).body.processes).toEqual([expect.objectContaining({ path: '.hidden' })]);
+    expect((await get('.hidden')).body.listeners[0].pids).toEqual([pid]);
+    expect((await stop({ path: '.hidden' })).body.stopped).toEqual([{ port, pids: [pid] }]);
+  });
+
+  it('starts in a hidden folder without allowing trash paths', async () => {
+    folder('.hidden', LISTEN_SCRIPT);
+    const res = await start({ path: '.hidden', port: await freePort() });
+    expect(res.status).toBe(202);
+    expect((await stop({ path: '.hidden' })).body.running).toBe(false);
+    expect((await start({ path: '.deleting-old', port: await freePort() })).body.code).toBe('invalid_name');
+  });
   it('returns listeners grouped by folder in one root-wide request', async () => {
-    const first = project('first');
-    const second = project('second');
-    const hidden = project('.hidden');
+    const first = folder('first');
+    const second = folder('second');
+    const hidden = folder('.hidden');
     fs.mkdirSync(path.join(first, 'nested'));
     const a = await listenIn(path.join(first, 'nested'));
     const b = await listenIn(second);
@@ -153,9 +183,9 @@ describe('GET /v1/processes', () => {
   });
 
   it('lists the listener of a process working in the folder or inside it, and only there', async () => {
-    const dir = project('app');
+    const dir = folder('app');
     fs.mkdirSync(path.join(dir, 'server'));
-    project('other');
+    folder('other');
     const { port, pid } = await listenIn(path.join(dir, 'server'), 0, ['api_key=abcdef123456', 'plain-arg']);
 
     const res = await get('app');
@@ -172,13 +202,13 @@ describe('GET /v1/processes', () => {
   });
 
   it('needs an admin key, so a read-only key cannot see what runs on the pod', async () => {
-    project('app');
+    folder('app');
     const res = await get('app', 'k-read');
     expect([res.status, res.body.code]).toEqual([403, 'forbidden_key']);
   });
 
   it('truncates a long command', async () => {
-    const dir = project('app');
+    const dir = folder('app');
     await listenIn(dir, 0, Array.from({ length: 12 }, (_, i) => `arg${i}-${'y'.repeat(20)}`));
     const [listener] = (await get('app')).body.listeners;
     expect(listener.command.length).toBeLessThanOrEqual(200);
@@ -188,7 +218,7 @@ describe('GET /v1/processes', () => {
 
 describe('POST /v1/processes/start', () => {
   it('uses the script and executable selected per request', async () => {
-    const dir = project('app');
+    const dir = folder('app');
     fs.mkdirSync(path.join(dir, 'scripts'));
     fs.writeFileSync(path.join(dir, 'scripts', 'serve.sh'), LISTEN_SCRIPT);
     app = express();
@@ -198,52 +228,63 @@ describe('POST /v1/processes/start', () => {
   });
 
   it('runs a Bash script selected by the client', async () => {
-    project('app', LISTEN_SCRIPT);
+    folder('app', LISTEN_SCRIPT);
     const res = await start({ path: 'app', executable: 'bash', port: await freePort() });
     expect(res.status).toBe(202);
   });
 
   it('requires a valid script and a constrained executable', async () => {
-    project('app', LISTEN_SCRIPT);
+    folder('app', LISTEN_SCRIPT);
     for (const script of [undefined, '', '../outside.sh', '/tmp/run.sh', 'app/../../run.sh', 'scripts/run.sh;id', 4]) {
       expect((await start({ path: 'app', script, executable: 'sh' })).body.code).toBe('invalid_script');
     }
     for (const executable of [undefined, 'bash -c', '/bin/sh', 'node', 4]) {
-      expect((await start({ path: 'app', script: '.pod/start.sh', executable })).body.code).toBe('invalid_executable');
+      expect((await start({ path: 'app', script: 'scripts/serve.sh', executable })).body.code).toBe('invalid_executable');
     }
   });
 
   it('needs an admin key', async () => {
-    project('app', LISTEN_SCRIPT);
+    folder('app', LISTEN_SCRIPT);
     const res = await start({ path: 'app' }, 'k-read');
     expect([res.status, res.body.code]).toEqual([403, 'forbidden_key']);
   });
 
-  it('refuses a folder without .pod/start.sh', async () => {
-    project('app');
+  it('refuses a folder without the requested script', async () => {
+    folder('app');
     const res = await start({ path: 'app' });
     expect([res.status, res.body.code]).toEqual([422, 'no_start_command']);
   });
 
-  it('refuses a symlinked .pod and a symlinked start.sh', async () => {
-    const dir = project('app');
-    fs.mkdirSync(path.join(base, 'pod'));
-    fs.writeFileSync(path.join(base, 'pod', 'start.sh'), LISTEN_SCRIPT);
-    fs.symlinkSync(path.join(base, 'pod'), path.join(dir, '.pod'));
+  it('refuses a symlinked script folder and script file', async () => {
+    const dir = folder('app');
+    fs.mkdirSync(path.join(base, 'external-scripts'));
+    fs.writeFileSync(path.join(base, 'external-scripts', 'serve.sh'), LISTEN_SCRIPT);
+    fs.symlinkSync(path.join(base, 'external-scripts'), path.join(dir, 'scripts'));
     expect((await start({ path: 'app' })).body.code).toBe('no_start_command');
 
-    const dir2 = project('app2');
-    fs.mkdirSync(path.join(dir2, '.pod'));
-    fs.symlinkSync(path.join(base, 'pod', 'start.sh'), path.join(dir2, '.pod', 'start.sh'));
+    const dir2 = folder('app2');
+    fs.mkdirSync(path.join(dir2, 'scripts'));
+    fs.symlinkSync(path.join(base, 'external-scripts', 'serve.sh'), path.join(dir2, 'scripts', 'serve.sh'));
     const res = await start({ path: 'app2' });
     expect([res.status, res.body.code]).toEqual([422, 'no_start_command']);
   });
 
   it('refuses a port outside 1024..65535', async () => {
-    project('app', LISTEN_SCRIPT);
+    folder('app', LISTEN_SCRIPT);
     for (const port of [80, 70000, '3000', 1.5]) {
       expect((await start({ path: 'app', port })).body.code).toBe('invalid_port');
     }
+  });
+
+  it('uses an ephemeral port when the caller omits a port', async () => {
+    folder('app', LISTEN_SCRIPT);
+    app = express();
+    app.use(express.json());
+    app.use('/api', createProcessesRouter(apiKeys, root, { logger: silentLogger, start: { logDir, timeoutMs: 8000, pollMs: 50 } }));
+    const res = await start({ path: 'app' });
+    expect(res.status).toBe(202);
+    expect(res.body.port).toBeGreaterThanOrEqual(49152);
+    expect(res.body.port).toBeLessThanOrEqual(65535);
   });
 
   it('starts on the first free port of the range and the server is then listed', async () => {
@@ -253,7 +294,7 @@ describe('POST /v1/processes/start', () => {
       const ports = await listeningPorts();
       for (let p = busy.port; ; p++) if (!ports.has(p)) return p;
     })();
-    project('app', LISTEN_SCRIPT);
+    folder('app', LISTEN_SCRIPT);
 
     const res = await start({ path: 'app' });
     expect(res.status).toBe(202);
@@ -262,16 +303,16 @@ describe('POST /v1/processes/start', () => {
     expect(listed.running).toBe(true);
     expect(listed.listeners.map((l: { port: number }) => l.port)).toEqual([expected]);
     expect(listed.listeners[0].pids).toContain(res.body.pid);
-    // The log is the gateway's, private, and nothing was written into the project.
+    // The log is the gateway's, private, and nothing was written into the folder.
     const [log] = fs.readdirSync(logDir);
     expect(log).toMatch(/^[0-9a-f]{64}\.log$/);
     expect(fs.statSync(path.join(logDir, log)).mode & 0o777).toBe(0o600);
-    expect(fs.readdirSync(path.join(root, 'app'))).toEqual(['.pod']);
-    expect(fs.readdirSync(path.join(root, 'app', '.pod'))).toEqual(['start.sh']);
+    expect(fs.readdirSync(path.join(root, 'app'))).toEqual(['scripts']);
+    expect(fs.readdirSync(path.join(root, 'app', 'scripts'))).toEqual(['serve.sh']);
   });
 
   it('starts on a given free port', async () => {
-    project('app', LISTEN_SCRIPT);
+    folder('app', LISTEN_SCRIPT);
     const port = await freePort();
     const res = await start({ path: 'app', port });
     expect([res.status, res.body.port]).toEqual([202, port]);
@@ -279,7 +320,7 @@ describe('POST /v1/processes/start', () => {
 
   it('answers 409 port_in_use for a given busy port', async () => {
     const busy = await listenIn(base);
-    project('app', LISTEN_SCRIPT);
+    folder('app', LISTEN_SCRIPT);
     const res = await start({ path: 'app', port: busy.port });
     expect([res.status, res.body.code, res.body.port]).toEqual([409, 'port_in_use', busy.port]);
   });
@@ -287,13 +328,13 @@ describe('POST /v1/processes/start', () => {
   it('answers 409 no_free_port when every port of the range is busy', async () => {
     const busy = await listenIn(base);
     makeApp([busy.port, busy.port]);
-    project('app', LISTEN_SCRIPT);
+    folder('app', LISTEN_SCRIPT);
     const res = await start({ path: 'app' });
     expect([res.status, res.body.code]).toEqual([409, 'no_free_port']);
   });
 
   it('answers 409 already_running with the port when the folder already listens', async () => {
-    const dir = project('app', LISTEN_SCRIPT);
+    const dir = folder('app', LISTEN_SCRIPT);
     const running = await listenIn(dir);
     const res = await start({ path: 'app' });
     expect([res.status, res.body.code, res.body.port]).toEqual([409, 'already_running', running.port]);
@@ -302,7 +343,7 @@ describe('POST /v1/processes/start', () => {
   it('answers 502 start_failed with the masked log tail when the script exits, and passes only the env allowlist', async () => {
     process.env.PROCESSES_TEST_SENTINEL = 'leaked-into-child';
     try {
-      project('app', 'env\necho "token=hunter2hunter2"\necho boom >&2\nexit 3\n');
+      folder('app', 'env\necho "token=hunter2hunter2"\necho boom >&2\nexit 3\n');
       const res = await start({ path: 'app' });
       expect([res.status, res.body.code]).toEqual([502, 'start_failed']);
       expect(res.body.log).toContain('boom');
@@ -314,9 +355,26 @@ describe('POST /v1/processes/start', () => {
     }
   });
 
+  it('does not return URL credentials or secret assignments in a failed start log', async () => {
+    folder('app', 'echo "DATABASE_URL=postgres://user:fake-password@db.invalid/db"\necho "SECRET_TOKEN=fake-token-123"\necho "API_KEY=quoted fake secret"\nexit 3\n');
+    const res = await start({ path: 'app' });
+    expect([res.status, res.body.code]).toEqual([502, 'start_failed']);
+    expect(res.body.log).not.toMatch(/fake-password|fake-token-123|quoted fake secret/);
+    expect(res.body.log).toContain('«redacted»');
+  });
+
+  it('drops a log tail that starts in the middle of a credential', async () => {
+    const secret = 'fake-fragmented-password';
+    folder('app', `printf 'DATABASE_URL=postgres://user:${'x'.repeat(5000)}${secret}@db.invalid/db'\nexit 3\n`);
+    const res = await start({ path: 'app' });
+    expect([res.status, res.body.code]).toEqual([502, 'start_failed']);
+    expect(res.body.log).toBe('«redacted»');
+    expect(res.body.log).not.toContain(secret);
+  });
+
   it('kills a script that never listens and answers 502', async () => {
     makeApp([41000, 41010], 500);
-    project('app', 'echo started\nexec sleep 30\n');
+    folder('app', 'echo started\nexec sleep 30\n');
     const res = await start({ path: 'app' });
     expect([res.status, res.body.code]).toEqual([502, 'start_failed']);
     expect(res.body.log).toContain('started');
@@ -328,7 +386,7 @@ describe('POST /v1/processes/start', () => {
   });
 
   it('holds a per-folder lock: a concurrent second start gets 409 already_running while the first runs', async () => {
-    project('app', `sleep 1\n${LISTEN_SCRIPT}`);
+    folder('app', `sleep 1\n${LISTEN_SCRIPT}`);
     const [a, b] = await Promise.all([start({ path: 'app' }), start({ path: 'app' })]);
     const [won, lost] = a.status === 202 ? [a, b] : [b, a];
     expect(won.status).toBe(202);
@@ -341,19 +399,19 @@ describe('POST /v1/processes/start', () => {
 
 describe('POST /v1/processes/stop', () => {
   it('needs an admin key', async () => {
-    project('app');
+    folder('app');
     expect((await stop({ path: 'app' }, 'k-read')).status).toBe(403);
   });
 
   it('answers 200 with empty lists for a folder with no listeners', async () => {
-    project('app');
+    folder('app');
     const res = await stop({ path: 'app' });
     expect([res.status, res.body]).toEqual([200, { path: 'app', stopped: [], remaining: [], running: false }]);
   });
 
   it('stops a real child listening in the folder and leaves other folders alone', async () => {
-    const dir = project('app');
-    const other = await listenIn(project('other'));
+    const dir = folder('app');
+    const other = await listenIn(folder('other'));
     const { port, pid } = await listenIn(dir);
     const res = await stop({ path: 'app' });
     expect([res.status, res.body]).toEqual([200, { path: 'app', stopped: [{ port, pids: [pid] }], remaining: [], running: false }]);
@@ -362,14 +420,14 @@ describe('POST /v1/processes/stop', () => {
   });
 
   it('SIGKILLs a process that ignores SIGTERM', async () => {
-    const dir = project('app');
+    const dir = folder('app');
     const { port, pid } = await listenIn(dir, 0, [], "process.on('SIGTERM',()=>{});");
     const res = await stop({ path: 'app' });
     expect(res.body).toEqual({ path: 'app', stopped: [{ port, pids: [pid] }], remaining: [], running: false });
   });
 
   it('signals nothing when the recorded start time no longer matches the pid', async () => {
-    const dir = project('app');
+    const dir = folder('app');
     const { port, pid } = await listenIn(dir);
     const ticks = await readStartTicks(pid);
     expect(ticks).toMatch(/^\d+$/);

@@ -6,11 +6,11 @@ All three routes require an admin API key and `gateway.files` to be available. P
 
 With no query, returns `{ "processes": [{ "path": "site", "running": true, "listeners": [{ "port": 3001, "pids": [4242], "command": "node server.js", "address": "0.0.0.0" }] }] }`. `path` is the top-level folder under the root: a listener working in `site/web` is reported as `site`. Only folders with listeners appear.
 
-`?path=site` instead returns one folder as `{ "path": "site", "running": true, "listeners": [...] }`. A folder with no listeners returns `running: false` and an empty `listeners` array.
+`?path=site` instead returns one folder as `{ "path": "site", "running": true, "listeners": [...] }`. A folder with no listeners returns `running: false` and an empty `listeners` array. Dot-prefixed folders are accepted; paths through symlinks or outside the files root are refused. Each listener's `pids` and `command` are attributed only to processes working in the reported folder.
 
 ## POST /api/v1/processes/start {#post-processes-start}
 
-Body: `{ "path": "site", "script": ".pod/start.sh", "executable": "sh", "port": 3001 }`. `path` is the working folder; `script` is a regular file relative to it, with no symlink in its path. `executable` must be `sh` or `bash`. `port` is optional; when omitted, the gateway searches for a free unprivileged port. On success, returns `202 { "path": "site", "port": 3001, "pid": 4242, "running": true }`.
+Body: `{ "path": "site", "script": "scripts/serve.sh", "executable": "sh", "port": 3001 }`. `path` is the working folder; `script` is a regular file relative to it, with no symlink in its path. `executable` must be `sh` or `bash`. `port` is optional; when omitted, the gateway searches for a free port from 49152 to 65535. On success, returns `202 { "path": "site", "port": 3001, "pid": 4242, "running": true }`.
 
 The started process receives only `PATH`, `HOME` (when set), `LANG`, and `PORT`. Scripts needing a login shell's `PATH` must set it themselves.
 

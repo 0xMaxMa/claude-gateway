@@ -1,0 +1,57 @@
+name: Files and processes API
+
+on:
+  pull_request:
+    paths:
+      - 'src/api/files-router.ts'
+      - 'src/api/processes-router.ts'
+      - 'src/files/**'
+      - 'src/processes/**'
+      - 'src/cli/redact.ts'
+      - 'scripts/contracts-fixtures.ts'
+      - 'contracts/files-git/**'
+      - 'tests/unit/files-*.test.ts'
+      - 'tests/unit/cli-redact.test.ts'
+      - 'tests/unit/processes-router.test.ts'
+      - '.github/workflows/files-processes.yml'
+      - 'package.json'
+      - 'package-lock.json'
+  push:
+    branches: [main]
+    paths:
+      - 'src/api/files-router.ts'
+      - 'src/api/processes-router.ts'
+      - 'src/files/**'
+      - 'src/processes/**'
+      - 'src/cli/redact.ts'
+      - 'scripts/contracts-fixtures.ts'
+      - 'contracts/files-git/**'
+      - 'tests/unit/files-*.test.ts'
+      - 'tests/unit/cli-redact.test.ts'
+      - 'tests/unit/processes-router.test.ts'
+      - '.github/workflows/files-processes.yml'
+      - 'package.json'
+      - 'package-lock.json'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: files-processes-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contracts-and-processes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm run typecheck:tests
+      - run: npm run build
+      - run: NODE_OPTIONS=--max-old-space-size=1536 npx jest --ci --runInBand tests/unit/files-contracts.test.ts tests/unit/processes-router.test.ts tests/unit/files-fs.test.ts tests/unit/files-permissions.test.ts tests/unit/cli-redact.test.ts
