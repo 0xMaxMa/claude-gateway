@@ -2,7 +2,7 @@
 
 Manage API sessions for a specific agent and `chat_id`. Sessions are stored at `sessions/api-{chat_id}/` — symmetric with Telegram (`telegram-{id}`) and Discord (`discord-{id}`).
 
-**`chat_id`** identifies the caller. Use any stable string (e.g. `"myapp"`, `"user-123"`, `"getpod"`). It is **required** on all session endpoints — pass it as:
+**`chat_id`** identifies the caller. Use any stable string (e.g. `"myapp"`, `"user-123"`). It is **required** on all session endpoints — pass it as:
 - Query string for `GET` and `DELETE` requests: `?chat_id=myapp`
 - Request body for `POST` and `PATCH` requests: `{"chat_id": "myapp", ...}`
 
@@ -38,15 +38,15 @@ curl -N -X POST \
   -H "X-Api-Key: my-write-key" \
   -H "Content-Type: application/json" \
   -d '{"session_id": "7f3a1c2d-89ab-4def-b012-345678901234", "chat_id": "myapp"}' \
-  http://localhost:10850/api/v1/agents/getpod/greeting
+  http://localhost:10850/api/v1/agents/alfred/greeting
 ```
 
 **Response `200` (SSE stream)** — greeting is streaming:
 
 ```
 data: {"type":"text_delta","text":"Hello! "}
-data: {"type":"text_delta","text":"Welcome to GetPod."}
-data: {"type":"result","text":"Hello! Welcome to GetPod.","session_id":"7f3a1c2d-..."}
+data: {"type":"text_delta","text":"Welcome to your workspace."}
+data: {"type":"result","text":"Hello! Welcome to your workspace.","session_id":"7f3a1c2d-..."}
 data: [DONE]
 ```
 
@@ -82,12 +82,19 @@ curl -H "X-Api-Key: my-secret-key-123" \
 
 ```json
 {
+  "activeSessionId": "da19d84a-6a36-4f57-b419-d322d82c4db8",
   "sessions": [
     {
       "id": "da19d84a-6a36-4f57-b419-d322d82c4db8",
-      "name": "Project Planning",
+      "name": "Planning",
       "createdAt": 1775737709000,
-      "lastActivity": 1775823600000
+      "lastActive": 1775823600000,
+      "messageCount": 0,
+      "totalTokensUsed": 0,
+      "cwd": null,
+      "trusted": false,
+      "cwdState": null,
+      "active": false
     }
   ]
 }
