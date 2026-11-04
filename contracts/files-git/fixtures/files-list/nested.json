@@ -19,7 +19,7 @@
         "type": "dir",
         "modified_at": "2026-01-02T03:04:05.000Z",
         "is_git": true,
-        "size": 4096
+        "size": 192512
       },
       {
         "name": "node_modules",
@@ -28,7 +28,7 @@
         "type": "dir",
         "modified_at": "2026-01-02T03:04:05.000Z",
         "is_git": false,
-        "size": 4096
+        "size": 8192
       },
       {
         "name": "web",

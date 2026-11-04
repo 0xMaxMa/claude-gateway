@@ -112,6 +112,12 @@ it('masks credentials in a reported command, including quoted values and URL use
   expect(command).toContain('«redacted»');
 });
 
+it('masks separated CLI options and environment assignments in a reported command', () => {
+  const command = displayCommand(['node', '--password', 'fake pass', '--token', 'fake-token', 'PGPASSWORD=fake-pg']);
+  expect(command).not.toMatch(/fake pass|fake-token|fake-pg/);
+  expect(command).toContain('«redacted»');
+});
+
 describe('path rejection', () => {
   beforeEach(() => {
     folder('app', LISTEN_SCRIPT);
@@ -361,6 +367,13 @@ describe('POST /v1/processes/start', () => {
     expect([res.status, res.body.code]).toEqual([502, 'start_failed']);
     expect(res.body.log).not.toMatch(/fake-password|fake-token-123|quoted fake secret/);
     expect(res.body.log).toContain('«redacted»');
+  });
+
+  it('does not return separated CLI secrets or password environment variables in a failed start log', async () => {
+    folder('app', 'echo "--password fake-pass --token fake-token --secret fake-secret --api-key fake-key PGPASSWORD=fake-pg DB_PASS=fake-db"\nexit 3\n');
+    const res = await start({ path: 'app' });
+    expect([res.status, res.body.code]).toEqual([502, 'start_failed']);
+    expect(res.body.log).not.toMatch(/fake-pass|fake-token|fake-secret|fake-key|fake-pg|fake-db/);
   });
 
   it('drops a log tail that starts in the middle of a credential', async () => {

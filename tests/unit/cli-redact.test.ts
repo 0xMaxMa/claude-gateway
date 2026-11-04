@@ -14,6 +14,14 @@ describe('cli redact redactLine', () => {
     expect(redactLine('token: myopaquetoken98765')).not.toContain('myopaquetoken98765');
   });
 
+  it('masks separated CLI options and environment suffixes', () => {
+    const input = '--password fake-pass --token fake-token --secret "fake secret" --api-key=fake-key PGPASSWORD=fake-pg DB_PASS=fake-db ACCESS_TOKEN=fake-access CLIENT_SECRET=fake-client PRIVATE_KEY=fake-private --password --token fake-last';
+    const output = redactLine(input);
+    for (const value of ['fake-pass', 'fake-token', 'fake secret', 'fake-key', 'fake-pg', 'fake-db', 'fake-access', 'fake-client', 'fake-private', 'fake-last']) {
+      expect(output).not.toContain(value);
+    }
+  });
+
   it('masks provider-style keys and long opaque tokens', () => {
     expect(redactLine('using sk-abcdefgh12345678')).not.toContain('sk-abcdefgh12345678');
     const longTok = 'A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6';

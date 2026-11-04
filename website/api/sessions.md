@@ -212,8 +212,8 @@ on any of them.
 Each check runs again when the session starts its process and at every turn. If
 the folder has gone, been renamed, moved out of the root, or is held by a delete,
 the message fails with code `CWD_UNAVAILABLE` (uppercase), and the gateway does
-not fall back to the workspace. The response carries no `reason` field. While a mark holds the folder the
-answers `409`. A streaming request gets an SSE `error` frame with that code.
+not fall back to the workspace. The response carries no `reason` field. A streaming request gets an SSE
+`error` frame with that code.
 
 **A session id belongs to one chat.** Each session id belongs to one `chat_id` of an agent. A request that would
 register the id under another `chat_id` answers `409 SESSION_ID_IN_USE` and writes nothing. That covers rename

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://claude-gateway.dev/contracts/files-git/processes-list.schema.json",
-  "title": "processes-list",
+  "title": "ProcessesList",
   "type": "object",
   "properties": {
     "processes": {

@@ -103,17 +103,6 @@ function fixedTimes(value: unknown): unknown {
     .replace(/"expiresAt":"[^"]+"/g, `"expiresAt":"${FIXED_TIME.toISOString()}"`));
 }
 
-/** Directory allocation and Git timezone formatting vary across CI filesystems and Git versions. */
-function normalizeHostFields(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(normalizeHostFields);
-  if (value === null || typeof value !== 'object') return value;
-  const fields = value as Record<string, unknown>;
-  return Object.fromEntries(Object.entries(fields).map(([key, item]) => [key,
-    key === 'size' && fields.type === 'dir' && typeof item === 'number' ? 4096 :
-    key === 'committed_at' && typeof item === 'string' && !Number.isNaN(Date.parse(item)) ? new Date(item).toISOString() :
-    normalizeHostFields(item)]));
-}
-
 /** Runs every step against fresh routers and returns the fixtures keyed by their path under FIXTURES_DIR. */
 export async function recordFixtures(): Promise<Record<string, Fixture>> {
   const base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'contracts-')));
@@ -189,7 +178,7 @@ export async function recordFixtures(): Promise<Record<string, Fixture>> {
       let call = request(target)[req.method === 'GET' ? 'get' : req.method === 'POST' ? 'post' : 'delete'](req.url).set('Authorization', `Bearer ${KEYS[req.key].key}`);
       if (body !== undefined) call = call.send(body as object);
       const res = await call;
-      const shownBody = normalizeHostFields(fixedTimes(shown(res.body))) as { version?: string; filesystem?: unknown };
+      const shownBody = fixedTimes(shown(res.body)) as { version?: string; filesystem?: unknown };
       if (schema === 'Capabilities') shownBody.version = '0.0.0';
       if (schema === 'FilesList' && req.url === '/api/v1/files' && shownBody.filesystem) shownBody.filesystem = { total: 107374182400, free: 53687091200, available: 50000000000 };
       out[`${name}.json`] = { request: req, status: res.status, schema, body: shownBody };
@@ -229,7 +218,8 @@ async function processExamples(root: string, base: string): Promise<Record<strin
   fs.mkdirSync(path.join(root, 'site', 'scripts'));
   fs.writeFileSync(path.join(root, 'site', script), `exec node -e "require('net').createServer().listen(Number(process.env.PORT), '127.0.0.1')"\n`);
   fs.writeFileSync(path.join(root, 'site', 'scripts', 'fail.sh'), 'echo "SECRET_TOKEN=fake-contract-secret"\nexit 3\n');
-  fs.writeFileSync(path.join(root, 'site', 'scripts', 'slow.sh'), `sleep 2\nexec node -e "require('net').createServer().listen(Number(process.env.PORT), '127.0.0.1')"\n`);
+  const slowReady = path.join(base, 'slow-start-ready');
+  fs.writeFileSync(path.join(root, 'site', 'scripts', 'slow.sh'), `touch '${slowReady}'\nsleep 2\nexec node -e "require('net').createServer().listen(Number(process.env.PORT), '127.0.0.1')"\n`);
   const app = express();
   app.use(express.json());
   app.use('/api', createProcessesRouter(Object.values(KEYS), root, { logger: quiet,
@@ -274,7 +264,11 @@ async function processExamples(root: string, base: string): Promise<Record<strin
   } finally { await new Promise<void>((resolve) => occupied.close(() => resolve())); }
   const pending = request(app).post('/api/v1/processes/start').set('Authorization', `Bearer ${KEYS.admin.key}`).send({ ...start, script: 'scripts/slow.sh' });
   const first = pending.then((response) => response);
-  await new Promise((resolve) => setTimeout(resolve, 150));
+  const readyDeadline = Date.now() + 5000;
+  while (!fs.existsSync(slowReady)) {
+    if (Date.now() >= readyDeadline) throw new Error('slow start did not reach the in-flight state');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
   try {
     await add('start/already_running_starting', app, 'POST', '/api/v1/processes/start', 'ProcessesError', start);
     await first;

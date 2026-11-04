@@ -37,6 +37,15 @@ const validate = (name: string, value: unknown): string[] => {
 
 const fixtures = committedFixtures();
 
+/** `du` depends on the host filesystem and Git version; keep other fields exact. */
+function withoutHostSizes(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(withoutHostSizes);
+  if (!value || typeof value !== 'object') return value;
+  const fields = value as Record<string, unknown>;
+  return Object.fromEntries(Object.entries(fields).map(([key, item]) => [key,
+    key === 'size' && fields.type === 'dir' && typeof item === 'number' ? '<host size>' : withoutHostSizes(item)]));
+}
+
 describe('files and git contracts', () => {
   it.each(Object.entries(fixtures))('%s matches its schema', (_name, fixture) => {
     expect(validate(SCHEMA_FILES[fixture.schema], fixture.body)).toEqual([]);
@@ -45,7 +54,9 @@ describe('files and git contracts', () => {
   });
 
   it('records the committed fixtures from the routers as they are now (rerun npm run contracts:fixtures on a change)', async () => {
-    expect(await recordFixtures()).toEqual(fixtures);
+    expect(withoutHostSizes(await recordFixtures())).toEqual(withoutHostSizes(fixtures));
+    const rootEntries = (fixtures['files-list/root.json']!.body as { entries: Array<{ name: string; size: number }> }).entries;
+    expect(rootEntries.find((entry) => entry.name === 'app')!.size).toBeGreaterThan(4096);
   }, 60_000);
 
   it('records an error fixture for the success and the failure side of every route', () => {

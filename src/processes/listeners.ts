@@ -33,6 +33,7 @@ export interface OwnedListener extends ListenSocket {
 
 const TCP_LISTEN = '0A';
 export const MAX_COMMAND_CHARS = 200;
+const SECRET_OPTION = /^(?:--|—)(?:password|token|secret|api-key)$/i;
 
 /** /proc/net/tcp stores an IPv4 address as one little-endian 32-bit word. */
 function ipv4(hex: string): string {
@@ -82,7 +83,9 @@ export async function listeningPorts(): Promise<Set<number>> {
 
 /** argv joined by spaces, with secret-looking values masked and the result cut to {@link MAX_COMMAND_CHARS}. */
 export function displayCommand(argv: string[]): string {
-  const text = redactLine(argv.map(redactUntrustedItem).join(' '));
+  const text = redactLine(argv.map((item, index) =>
+    index > 0 && SECRET_OPTION.test(argv[index - 1]) && !SECRET_OPTION.test(item)
+      ? '«redacted»' : redactUntrustedItem(item)).join(' '));
   return text.length > MAX_COMMAND_CHARS ? `${text.slice(0, MAX_COMMAND_CHARS - 1)}…` : text;
 }
 
