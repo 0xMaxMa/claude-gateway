@@ -105,7 +105,8 @@ export function scanSource(file: string, text: string): Finding[] {
 const ALLOWED: Array<{ file: string; kind: Kind; count: number; category: 'structural' | 'debt'; reason: string }> = [
   // ── structural ────────────────────────────────────────────────────────────
   { file: 'src/agent/dreaming/migrate.ts', kind: 'english-words', count: 1, category: 'structural', reason: 'Fixed MEMORY.md h2 section names that memory files use.' },
-  { file: 'src/cli/redact.ts', kind: 'english-words', count: 2, category: 'structural', reason: 'Secret redaction: credential key names and API key prefixes.' },
+  { file: 'src/cli/redact.ts', kind: 'english-words', count: 3, category: 'structural', reason: 'Secret redaction: credential key names, CLI option names and API key prefixes.' },
+  { file: 'src/processes/listeners.ts', kind: 'english-words', count: 1, category: 'structural', reason: 'Secret redaction: CLI option names in process arguments.' },
   { file: 'src/orchestration/tool-activity.ts', kind: 'english-words', count: 1, category: 'structural', reason: 'Secret redaction: credential key names.' },
   { file: 'src/orchestration/provider-message.ts', kind: 'english-words', count: 1, category: 'structural', reason: 'Secret redaction: credential key names.' },
   { file: 'src/safemode/context.ts', kind: 'english-words', count: 2, category: 'structural', reason: 'Secret redaction: credential key names.' },
