@@ -8,7 +8,8 @@ import { FilesErrorCode, parseRelPath, RelPath } from '../files/paths';
 import { err, ok, Result } from '../utils/result';
 import { collectListeners, listenersIn, listeningPorts } from './listeners';
 
-export type StartErrorCode = FilesErrorCode | 'invalid_port' | 'no_start_command' | 'already_running' | 'port_in_use' | 'no_free_port' | 'start_failed';
+export type StartErrorCode = FilesErrorCode | 'invalid_port' | 'invalid_script' | 'invalid_executable' | 'no_start_command' | 'already_running' | 'port_in_use' | 'no_free_port' | 'start_failed';
+export type StartExecutable = 'sh' | 'bash';
 
 export interface StartFailure {
   code: StartErrorCode;
@@ -35,8 +36,6 @@ export interface StartOptions {
   /** How long the started server has to listen. */
   timeoutMs: number;
   pollMs?: number;
-  /** Relative script inside the selected folder, configured by the operator. */
-  scriptPath: string;
 }
 
 export const DEFAULT_PORT_RANGE = [1024, 65535] as const;
@@ -109,8 +108,8 @@ async function pickPort(wanted: number | undefined, range: readonly [number, num
   return err({ code: 'no_free_port' });
 }
 
-async function run(realDir: string, rel: RelPath, wanted: number | undefined, opts: StartOptions): Promise<Result<Started, StartFailure>> {
-  if (!(await hasStartScript(realDir, opts.scriptPath))) return err({ code: 'no_start_command' });
+async function run(realDir: string, rel: RelPath, script: RelPath, executable: StartExecutable, wanted: number | undefined, opts: StartOptions): Promise<Result<Started, StartFailure>> {
+  if (!(await hasStartScript(realDir, script))) return err({ code: 'no_start_command' });
   const existing = listenersIn(await collectListeners(), realDir)[0];
   if (existing) return err({ code: 'already_running', port: existing.port });
   const port = await pickPort(wanted, opts.portRange);
@@ -120,8 +119,8 @@ async function run(realDir: string, rel: RelPath, wanted: number | undefined, op
   let exited = false;
   let child;
   try {
-    // argv only: the command is fixed and the body never reaches it. `detached` gives the child its own session.
-    child = spawn('sh', [opts.scriptPath], {
+    // The executable is an allowlisted interpreter; the script is one argv item, never shell text.
+    child = spawn(executable, [script], {
       cwd: realDir,
       env: {
         PATH: process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin',
@@ -153,18 +152,20 @@ async function run(realDir: string, rel: RelPath, wanted: number | undefined, op
 }
 
 /**
- * Run the configured script in the folder `rel` names with PORT set, and wait until a process of its session listens
+ * Run the requested script in the folder `rel` names with PORT set, and wait until a process of its session listens
  * there. The folder must sit under `root` with no symlink on the way. One start per folder runs at a time; a second
  * one meanwhile is refused with `already_running` and `starting: true`.
  */
-export async function startFolder(root: string, rel: RelPath, wanted: number | undefined, opts: StartOptions): Promise<Result<Started, StartFailure>> {
-  if (!opts.scriptPath || !parseRelPath(opts.scriptPath, true).ok) return err({ code: 'no_start_command' });
+export async function startFolder(root: string, rel: RelPath, script: unknown, executable: unknown, wanted: number | undefined, opts: StartOptions): Promise<Result<Started, StartFailure>> {
+  const parsed = parseRelPath(script, true);
+  if (!parsed.ok || parsed.value === '') return err({ code: 'invalid_script' });
+  if (executable !== 'sh' && executable !== 'bash') return err({ code: 'invalid_executable' });
   const dir = await resolveRealDir(root, rel);
   if (!dir.ok) return err({ code: dir.error });
   if (starting.has(dir.value)) return err({ code: 'already_running', starting: true });
   starting.add(dir.value);
   try {
-    return await run(dir.value, rel, wanted, opts);
+    return await run(dir.value, rel, parsed.value, executable, wanted, opts);
   } finally {
     starting.delete(dir.value);
   }

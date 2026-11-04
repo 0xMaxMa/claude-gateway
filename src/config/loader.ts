@@ -466,15 +466,9 @@ export function loadConfig(configPath: string, options?: LoadConfigOptions): Gat
     interpolatedGateway.publicUrl = normalizedPublicUrl;
   }
 
-  const processes = interpolatedGateway.processes;
-  if (processes !== undefined) {
-    if (typeof processes !== 'object' || processes === null || Array.isArray(processes)) {
-      throw new ConfigValidationError('gateway.processes must be an object');
-    }
-    const script = (processes as Record<string, unknown>).startScript;
-    if (script !== undefined && (typeof script !== 'string' || script === '' || !parseRelPath(script, true).ok)) {
-      throw new ConfigValidationError('gateway.processes.startScript must be a relative script path inside a folder');
-    }
+  if ('processes' in interpolatedGateway) {
+    warnFiles('[gateway] Ignoring gateway.processes; pass script in POST /v1/processes/start instead.');
+    delete interpolatedGateway.processes;
   }
   const files = interpolatedGateway.files;
   if (files !== undefined) {

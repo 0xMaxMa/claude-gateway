@@ -21,6 +21,8 @@ export const PROCESSES_ERRORS: Record<StartErrorCode, { status: number; message:
   invalid_name: FILES_ERRORS.invalid_name,
   not_a_directory: FILES_ERRORS.not_a_directory,
   invalid_port: { status: 400, message: 'port must be an integer from 1024 to 65535' },
+  invalid_script: { status: 400, message: 'script must be a relative path to a regular file in the working folder' },
+  invalid_executable: { status: 400, message: 'executable must be sh or bash' },
   path_escape: FILES_ERRORS.path_escape,
   permission_denied: FILES_ERRORS.permission_denied,
   forbidden_key: FILES_ERRORS.forbidden_key,
@@ -31,7 +33,7 @@ export const PROCESSES_ERRORS: Record<StartErrorCode, { status: number; message:
   already_running: { status: 409, message: 'A process working in this folder already listens, or a start of it is running' },
   port_in_use: { status: 409, message: 'Something already listens on this port' },
   no_free_port: { status: 409, message: `Every port from ${DEFAULT_PORT_RANGE[0]} to ${DEFAULT_PORT_RANGE[1]} is in use` },
-  no_start_command: { status: 422, message: 'The configured start script is missing or not a regular file' },
+  no_start_command: { status: 422, message: 'The requested script is missing or not a regular file' },
   internal: FILES_ERRORS.internal,
   start_failed: { status: 502, message: 'The start script exited or did not listen in time' },
 };
@@ -68,7 +70,7 @@ export interface ProcessesRouterDeps {
 }
 
 /**
- * Which servers folders under the files root run, starting one with the configured script, and
+ * Which servers folders under the files root run, starting one with a requested script, and
  * stopping them. All routes need an admin key.
  */
 export function createProcessesRouter(apiKeys: ApiKey[], root: string, deps: ProcessesRouterDeps): Router {
@@ -78,7 +80,6 @@ export function createProcessesRouter(apiKeys: ApiKey[], root: string, deps: Pro
     portRange: DEFAULT_PORT_RANGE,
     timeoutMs: START_TIMEOUT_MS,
     ...deps.start,
-    scriptPath: deps.start?.scriptPath ?? '',
   };
   const stopOptions: StopOptions = { termWaitMs: STOP_TERM_WAIT_MS, ...deps.stop };
   const router = guardAsyncRoutes(Router(), (req, res, e) => {
@@ -126,17 +127,16 @@ export function createProcessesRouter(apiKeys: ApiKey[], root: string, deps: Pro
 
   defineRoute(
     router,
-    { method: 'POST', path: '/v1/processes/start', auth: 'admin', summary: 'Start a folder with the configured script', cli: null },
+    { method: 'POST', path: '/v1/processes/start', auth: 'admin', summary: 'Start a script in a folder under the files root', cli: null },
     auth,
     requireAdmin,
     async (req: Request, res: Response) => {
-      const body = (req.body ?? {}) as { path?: unknown; port?: unknown };
-      if (!startOptions.scriptPath) return fail(res, 'no_start_command');
+      const body = (req.body ?? {}) as { path?: unknown; script?: unknown; executable?: unknown; port?: unknown };
       const rel = folderPath(body.path);
       if (!rel.ok) return fail(res, rel.error);
       const port = parsePort(body.port);
       if (!port.ok) return fail(res, port.error);
-      const started = await startFolder(root, rel.value, port.value, startOptions);
+      const started = await startFolder(root, rel.value, body.script, body.executable, port.value, startOptions);
       if (!started.ok) {
         if (started.error.code === 'start_failed') logger.warn(`processes: start of ${rel.value} failed`);
         return fail(res, started.error);

@@ -768,7 +768,7 @@ export class GatewayRouter {
         },
       }));
       this.app.use('/api', createGitRouter(this.gatewayConfig.gateway.api.keys, root, this.logger));
-      this.app.use('/api', createProcessesRouter(this.gatewayConfig.gateway.api.keys, root, { logger: this.logger, start: { scriptPath: this.gatewayConfig.gateway.processes?.startScript } }));
+      this.app.use('/api', createProcessesRouter(this.gatewayConfig.gateway.api.keys, root, { logger: this.logger }));
     }
 
     // Mount skills routes

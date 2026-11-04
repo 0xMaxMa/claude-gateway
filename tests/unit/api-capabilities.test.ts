@@ -102,8 +102,7 @@ describe('GET /api/v1/capabilities', () => {
 
   it('advertises processes, start and stop only to an admin key, and nothing when files are off', () => {
     const on = { gateway: { orchestration: true }, agents: [] } as never;
-    expect(buildCapabilitiesResponse('1', on, apiKeys[0]).capabilities.processes).toEqual(['list', 'stop']);
-    expect(buildCapabilitiesResponse('1', { gateway: { processes: { startScript: '.pod/start.sh' } }, agents: [] } as never, apiKeys[0]).capabilities.processes).toEqual(['list', 'start', 'stop']);
+    expect(buildCapabilitiesResponse('1', on, apiKeys[0]).capabilities.processes).toEqual(['list', 'start', 'stop']);
     expect(buildCapabilitiesResponse('1', on, apiKeys[2]).capabilities.processes).toEqual([]);
     const off = { gateway: { files: { enabled: false } }, agents: [] } as never;
     expect(buildCapabilitiesResponse('1', off, apiKeys[0]).capabilities.processes).toEqual([]);

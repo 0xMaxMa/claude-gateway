@@ -31,7 +31,7 @@ function makeApp(portRange: [number, number] = [41000, 41010], timeoutMs = 8000)
   app = express();
   app.use(express.json());
   app.use('/api', createProcessesRouter(apiKeys, root, {
-    logger: silentLogger, start: { logDir, portRange, timeoutMs, pollMs: 50, scriptPath: '.pod/start.sh' }, stop: { termWaitMs: 300, pollMs: 50 },
+    logger: silentLogger, start: { logDir, portRange, timeoutMs, pollMs: 50 }, stop: { termWaitMs: 300, pollMs: 50 },
   }));
 }
 
@@ -83,7 +83,7 @@ async function freePort(): Promise<number> {
 
 const get = (rel: unknown, key = 'k-admin') => request(app).get('/api/v1/processes').query(rel === undefined ? {} : { path: rel }).set(as(key));
 const start = async (body: object, key = 'k-admin') => {
-  const res = await request(app).post('/api/v1/processes/start').set(as(key)).send(body);
+  const res = await request(app).post('/api/v1/processes/start').set(as(key)).send({ script: '.pod/start.sh', executable: 'sh', ...body });
   if (res.status === 202) startedPids.push(res.body.pid);
   return res;
 };
@@ -187,18 +187,30 @@ describe('GET /v1/processes', () => {
 });
 
 describe('POST /v1/processes/start', () => {
-  it('uses the configured script path and refuses an unset script', async () => {
+  it('uses the script and executable selected per request', async () => {
     const dir = project('app');
     fs.mkdirSync(path.join(dir, 'scripts'));
     fs.writeFileSync(path.join(dir, 'scripts', 'serve.sh'), LISTEN_SCRIPT);
     app = express();
     app.use(express.json());
-    app.use('/api', createProcessesRouter(apiKeys, root, { logger: silentLogger, start: { scriptPath: 'scripts/serve.sh', logDir, timeoutMs: 8000, pollMs: 50 } }));
-    expect((await start({ path: 'app', port: await freePort() })).status).toBe(202);
-    app = express();
-    app.use(express.json());
-    app.use('/api', createProcessesRouter(apiKeys, root, { logger: silentLogger }));
-    expect((await start({ path: 'app' })).body.code).toBe('no_start_command');
+    app.use('/api', createProcessesRouter(apiKeys, root, { logger: silentLogger, start: { logDir, timeoutMs: 8000, pollMs: 50 } }));
+    expect((await start({ path: 'app', script: 'scripts/serve.sh', executable: 'sh', port: await freePort() })).status).toBe(202);
+  });
+
+  it('runs a Bash script selected by the client', async () => {
+    project('app', LISTEN_SCRIPT);
+    const res = await start({ path: 'app', executable: 'bash', port: await freePort() });
+    expect(res.status).toBe(202);
+  });
+
+  it('requires a valid script and a constrained executable', async () => {
+    project('app', LISTEN_SCRIPT);
+    for (const script of [undefined, '', '../outside.sh', '/tmp/run.sh', 'app/../../run.sh', 'scripts/run.sh;id', 4]) {
+      expect((await start({ path: 'app', script, executable: 'sh' })).body.code).toBe('invalid_script');
+    }
+    for (const executable of [undefined, 'bash -c', '/bin/sh', 'node', 4]) {
+      expect((await start({ path: 'app', script: '.pod/start.sh', executable })).body.code).toBe('invalid_executable');
+    }
   });
 
   it('needs an admin key', async () => {

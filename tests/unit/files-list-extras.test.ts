@@ -33,6 +33,19 @@ afterEach(() => {
 const list = (rel = '') => request(app).get('/api/v1/files').query({ path: rel }).set(H);
 
 describe('GET /api/v1/files skipped', () => {
+  it('includes safe hidden folders only when requested', async () => {
+    fs.mkdirSync(path.join(root, 'good', '.venv'));
+    fs.mkdirSync(path.join(root, 'good', '.deleting-old'));
+    const ordinary = await list('good');
+    expect(ordinary.body.entries).toEqual([]);
+    const hidden = await request(app).get('/api/v1/files').query({ path: 'good', include_hidden: 'true' }).set(H);
+    expect(hidden.status).toBe(200);
+    expect(hidden.body.entries.map((entry: { name: string }) => entry.name)).toEqual(['.venv']);
+    expect(hidden.body.leftovers).toEqual(['.deleting-old']);
+    expect((await request(app).get('/api/v1/files').query({ path: 'good/.venv', include_hidden: 'true' }).set(H)).status).toBe(200);
+    expect((await request(app).get('/api/v1/files').query({ path: 'good/.venv' }).set(H)).body.code).toBe('invalid_name');
+    expect((await request(app).get('/api/v1/files').query({ path: 'good', include_hidden: 'yes' }).set(H)).status).toBe(400);
+  });
   it('is absent when every folder is listed, so old responses keep their shape', async () => {
     const res = await list();
     expect(Object.keys(res.body).sort()).toEqual(['abs', 'entries', 'exists', 'path', 'root']);

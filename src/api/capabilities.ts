@@ -104,7 +104,7 @@ export function filesAvailability(config?: GatewayConfig, apiKey?: ApiKey): File
     files: FILES_CAPABILITIES.filter((c) => admin || !FILES_ADMIN_CAPABILITIES.has(c)),
     git: [...GIT_CAPABILITIES],
     sessions: orchestrated ? [...SESSIONS_CAPABILITIES] : [],
-    processes: admin ? PROCESSES_CAPABILITIES.filter((c) => c !== 'start' || Boolean(config?.gateway.processes?.startScript)) : [],
+    processes: admin ? [...PROCESSES_CAPABILITIES] : [],
   };
 }
 

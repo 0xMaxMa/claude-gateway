@@ -639,10 +639,14 @@ describe('config-loader', () => {
     };
     const loadRoot = (root: unknown) => load({ files: { root } });
 
-    it('accepts a relative start script and refuses unsafe script paths', () => {
-      expect(load({ processes: { startScript: '.pod/start.sh' } }).gateway.processes?.startScript).toBe('.pod/start.sh');
-      for (const script of ['/tmp/run.sh', '../run.sh', 'app/../../run.sh', '', 42, null]) {
-        expect(() => load({ processes: { startScript: script } })).toThrow('gateway.processes.startScript must be a relative script path');
+    it('ignores obsolete process-wide start configuration without blocking startup', () => {
+      const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+      try {
+        const config = load({ processes: { startScript: '.pod/start.sh' } });
+        expect(config.gateway).not.toHaveProperty('processes');
+        expect(warn).toHaveBeenCalledWith(expect.stringContaining('Ignoring gateway.processes'));
+      } finally {
+        warn.mockRestore();
       }
     });
 

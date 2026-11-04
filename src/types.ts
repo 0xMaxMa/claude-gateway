@@ -522,11 +522,6 @@ export interface GatewayConfig {
        */
       trusted?: string[];
     };
-    /** Optional generic process start command. No script is assumed when unset. */
-    processes?: {
-      /** Relative script path within the folder supplied to POST /v1/processes/start. */
-      startScript?: string;
-    };
     /**
      * true (default) = headless backend (claude --print + stream-json).
      * false = interactive backend: claude TUI under the claude-pty-shell PTY wrapper.

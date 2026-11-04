@@ -159,7 +159,7 @@ export async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) =>
 }
 
 /** The directories directly under `rel`: real folders and links to folders that stay inside the root. Files are left out. */
-export async function listDir(root: string, rel: RelPath): Promise<FsResult<DirListing>> {
+export async function listDir(root: string, rel: RelPath, includeHidden = false): Promise<FsResult<DirListing>> {
   const realRoot = await realRootOf(root);
   if (!realRoot.ok) {
     return realRoot.error === 'not_found' && rel === ''
@@ -181,8 +181,8 @@ export async function listDir(root: string, rel: RelPath): Promise<FsResult<DirL
     async (d): Promise<{ entry: Entry } | { skipped: SkippedEntry } | { leftover: string } | null> => {
       if (!(d.isDirectory() || d.isSymbolicLink())) return null;
       if (d.isDirectory() && DELETING_LEFTOVER_RE.test(d.name)) return { leftover: d.name };
-      // Names the other routes would reject are hidden so every listed entry can be opened.
-      const name = parseEntryName(d.name);
+      // Hidden entries are opt-in; delete trash remains excluded in either mode.
+      const name = parseEntryName(d.name, includeHidden);
       if (!name.ok) return { skipped: { name: d.name, reason: 'invalid_name' } };
       const child = await resolveDir(root, joinRel(rel, name.value));
       if (!child.ok) {

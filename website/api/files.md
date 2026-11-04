@@ -8,7 +8,7 @@ The gateway lists, creates, and deletes folders under `gateway.files.root` (defa
 
 ## Paths {#paths}
 
-Paths are relative to the files root and have at most 32 segments. Ordinary names match `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`. `DELETE /files` also accepts dot-prefixed names such as `.venv`, so clients can remove hidden folders. `.` and `..` and every `.deleting-*` trash folder are refused. The gateway resolves paths against the real root and refuses escapes or symlinked parent folders for mutations.
+Paths are relative to the files root and have at most 32 segments. Ordinary names match `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`. `DELETE /files` also accepts dot-prefixed names such as `.venv`, so clients can remove hidden folders. `GET /files?include_hidden=true` includes those folders in a listing and permits them in the `path` query. `.` and `..` and every `.deleting-*` trash folder are refused. The gateway resolves paths against the real root and refuses escapes or symlinked parent folders for mutations.
 
 ## Errors {#errors}
 
@@ -39,7 +39,7 @@ Errors have `{ "error": string, "code": string }`. Git errors may include additi
 
 ## GET /api/v1/files {#get-files}
 
-List direct child folders. `?path=<relative-folder>` chooses a parent; no path lists the root. The response contains `root`, `exists`, `path`, `abs`, and `entries`. Each entry includes `name`, `path`, `abs`, `type`, `modified_at`, `is_git`, and `size` in bytes or `null` if size measurement times out. Invalid or unsafe entries appear in `skipped`; hidden trash appears in `leftovers`.
+List direct child folders. `?path=<relative-folder>` chooses a parent; no path lists the root. `?include_hidden=true` also lists valid dot-prefixed folders, except delete trash; it defaults to `false`. The response contains `root`, `exists`, `path`, `abs`, and `entries`. Each entry includes `name`, `path`, `abs`, `type`, `modified_at`, `is_git`, and `size` in bytes or `null` if size measurement times out. Invalid or unsafe entries appear in `skipped`; hidden trash appears in `leftovers`.
 
 ## POST /api/v1/files/mkdir {#post-files-mkdir}
 

@@ -56,8 +56,8 @@ function requireAdmin(req: Request, res: Response, next: NextFunction): void {
 }
 
 /** `?path=`, absent meaning the root. Repeated or nested query values are not strings and are refused. */
-function queryPath(req: Request): Result<RelPath, 'invalid_path' | 'invalid_name'> {
-  return parseRelPath(req.query.path ?? '');
+function queryPath(req: Request, includeHidden = false): Result<RelPath, 'invalid_path' | 'invalid_name'> {
+  return parseRelPath(req.query.path ?? '', includeHidden);
 }
 
 export interface FilesRouterDeps {
@@ -87,9 +87,11 @@ export function createFilesRouter(apiKeys: ApiKey[], root: string, deps: FilesRo
     { method: 'GET', path: '/v1/files', auth: 'key', summary: 'List the folders directly under a path of the files root', cli: null },
     auth,
     async (req: Request, res: Response) => {
-      const rel = queryPath(req);
+      const hidden = req.query.include_hidden;
+      if (hidden !== undefined && hidden !== 'true' && hidden !== 'false') return fail(res, 'invalid_path');
+      const rel = queryPath(req, hidden === 'true');
       if (!rel.ok) return fail(res, rel.error);
-      respond(res, await listDir(root, rel.value));
+      respond(res, await listDir(root, rel.value, hidden === 'true'));
     },
   );
 
