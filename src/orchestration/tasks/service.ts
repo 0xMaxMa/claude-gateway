@@ -528,14 +528,14 @@ export class TaskService {
    * was refused with USER_CONTROLS_AUTOMATION and the run dead-ended.
    */
   private parkedGoalRunCommand(context:CommandContext,task:TaskSnapshot,expectedRevision:number,mode:ChangeMode,browserFields:unknown,computerInputs:unknown,startUrl:unknown):boolean {
-    const notice=this.store.get(`SELECT n.task_state_version FROM conversation_inputs i JOIN notifications n ON n.conversation_id=i.conversation_id AND n.task_id=?
+    const notice=this.store.get(`SELECT n.id FROM conversation_inputs i JOIN notifications n ON n.conversation_id=i.conversation_id AND n.task_id=?
       AND (json_extract(i.ingress_json,'$.ingressKey')='notification:'||n.id OR json_extract(i.ingress_json,'$.ingressKey') LIKE 'notification:'||n.id||':retry:%')
       WHERE i.id=? AND i.conversation_id=? LIMIT 1`,task.taskId,context.inputId,context.conversationId);
     if(!notice)return false;
     if(!task.capabilities.execute||task.ownerPrincipalId!==context.principalId)throw new OrchestrationError('EXECUTION_DENIED');
     if(this.store.get("SELECT 1 FROM task_revisions WHERE task_id=? AND json_extract(payload_json,'$.agentHandoffInputId')=?",task.taskId,context.inputId))
       throw new OrchestrationError('AGENT_HANDOFF_USED','The one command for this parked run was already sent. Report its outcome; do not send another.');
-    if(Number(notice.task_state_version)!==task.stateVersion||!agentGoalRunParked(task))
+    if(!agentGoalRunParked(task)||!this.parkedRoundNotice(context,task,String(notice.id)))
       throw new OrchestrationError('STATE_CONFLICT','The run changed since this notice (a newer command, question or pause). Read task_status; do not act on this notice.');
     if(mode!=='when_ready'||browserFields!==undefined||computerInputs!==undefined||startUrl!==undefined)throw new OrchestrationError('INVALID_INPUT','The command for a parked run is one plain next command: mode=when_ready, no fields, inputs or start_url.');
     if(expectedRevision!==task.revision)throw new OrchestrationError('REVISION_CONFLICT');
@@ -1309,13 +1309,14 @@ export class TaskService {
   }
   /** The notification of this parked goal run assigned to this agent turn. Connection and idle-release
    * saves advance state_version after the round settles; the notice still describes this round. */
-  private parkedRoundNotice(context:CommandContext,task:TaskSnapshot):boolean {
+  private parkedRoundNotice(context:CommandContext,task:TaskSnapshot,noticeId?:string):boolean {
     return Boolean(this.store.get(`SELECT n.id FROM notifications n WHERE n.task_id=? AND n.decision_id=? AND n.status='assigned'
+      AND (? IS NULL OR n.id=?)
       AND EXISTS (SELECT 1 FROM conversation_events e WHERE e.conversation_id=n.conversation_id AND e.type='task.state_changed'
         AND json_extract(e.payload_json,'$.payload.taskId')=n.task_id AND json_extract(e.payload_json,'$.payload.stateVersion')=n.task_state_version
         AND json_extract(e.payload_json,'$.payload.state')='waiting_input' AND json_extract(e.payload_json,'$.payload.revision')=?
         AND COALESCE(json_extract(e.payload_json,'$.payload.gatewayDispatch.requestId'),'')=?) LIMIT 1`,
-      task.taskId,context.decisionId,task.revision,task.gatewayDispatch?.requestId??''));
+      task.taskId,context.decisionId,noticeId??null,noticeId??null,task.revision,task.gatewayDispatch?.requestId??''));
   }
   /** A verified parked goal run is done: its automation session closes, and a computer session's
    * device access is revoked now rather than after the idle release (the controller ends it). */

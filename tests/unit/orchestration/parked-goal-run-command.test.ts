@@ -72,11 +72,38 @@ test('any other input, including the user\'s own executing turn, is still refuse
  }finally{f.close();}
 });
 
-test('a notice for an older state_version is refused: the run changed since',()=>{
+test('the parked notice still authorizes one next command after idle device release',()=>{
  const f=fixture();try{
   f.finish(parked());
   const [notice]=f.notices(),t=f.turn('report',{notice});
-  const current=f.store.task(f.task.taskId)!;f.store.transaction(()=>f.store.saveTask(current,current.stateVersion));
+  const current=f.store.task(f.task.taskId)!,before=current.stateVersion,requestId=current.gatewayDispatch!.requestId;
+  f.tasks.recordIdleComputerRelease(f.task.taskId,requestId);
+  expect(f.store.task(f.task.taskId)).toMatchObject({state:'waiting_input',revision:1,stateVersion:before+1,computerAccessReleased:{requestId}});
+  expect(f.code(()=>f.tasks.update(t.context(),f.task.taskId,1,'key enter','when_ready'))).toBe('ok');
+  expect(f.store.task(f.task.taskId)!.revision).toBe(2);
+ }finally{f.close();}
+});
+test.each(['release then pause','pause then release'])('%s: user control wins over the parked notice',order=>{
+ const f=fixture();try{
+  f.finish(parked());const [notice]=f.notices(),t=f.turn('report',{notice});
+  const requestId=f.store.task(f.task.taskId)!.gatewayDispatch!.requestId;
+  const release=()=>f.tasks.recordIdleComputerRelease(f.task.taskId,requestId);
+  const pause=()=>f.tasks.controlByUser(f.task.conversationId,'u',f.task.taskId,{id:randomUUID(),action:'pause',expectedRevision:1});
+  if(order==='release then pause'){release();pause();}else{pause();release();}
+  expect(f.code(()=>f.tasks.update(t.context(),f.task.taskId,2,'key enter','when_ready'))).toBe('STATE_CONFLICT');
+  expect(f.store.task(f.task.taskId)).toMatchObject({revision:2,executionControl:{action:'pause',phase:'paused'}});
+ }finally{f.close();}
+});
+test('a changed dispatch or unassigned notice cannot authorize the parked command after release',()=>{
+ const f=fixture();try{
+  f.finish(parked());const [notice]=f.notices(),t=f.turn('report',{notice});
+  const current=f.store.task(f.task.taskId)!;
+  f.tasks.recordIdleComputerRelease(f.task.taskId,current.gatewayDispatch!.requestId);
+  f.store.run("UPDATE notifications SET status='handled' WHERE id=?",notice);
+  expect(f.code(()=>f.tasks.update(t.context(),f.task.taskId,1,'key enter','when_ready'))).toBe('STATE_CONFLICT');
+  f.store.run("UPDATE notifications SET status='assigned' WHERE id=?",notice);
+  const changed=f.store.task(f.task.taskId)!;changed.gatewayDispatch={...changed.gatewayDispatch!,requestId:randomUUID()};
+  f.store.transaction(()=>f.store.saveTask(changed,changed.stateVersion));
   expect(f.code(()=>f.tasks.update(t.context(),f.task.taskId,1,'key enter','when_ready'))).toBe('STATE_CONFLICT');
   expect(f.store.task(f.task.taskId)!.revision).toBe(1);
  }finally{f.close();}
