@@ -311,14 +311,19 @@ export class ComputerTaskAdapter implements GatewayTaskAdapter {
    // holds. Nothing that ran is replayed; the vision run is told what this round already did. Without raw input (or a
    // capture) the round stops as before, saying why.
    // Pod-jinawong r8, task b0ba459d: "play bodyslam on Spotify" opened Spotify and stopped at NO_SUPPORTED_ACTION.
+   // The same goes for a button the helper could not reach even after hovering it (TARGET_NOT_REACHED, GetPod Desktop
+   // 0.1.1+): pod-jinawong task 56f64e16, Spotify web's row Play only shows under the pointer. TARGET_OCCLUDED (another
+   // window covers the point) is no reason to click from the screenshot, so it stops as before.
    // Only in an approved window it could read: never on a withheld screen or an unapproved front application, whose
    // BLOCKED is not a missing control; consent, a refusal and the impact gate end the round on their own reasons.
    const observed=receipt.snapshot?.state;
    const approvedWindow=!!observed&&observed.frontmostProtected!==true&&observed.application!=='unapproved';
-   const fallback=!vision&&goalRun&&!steps&&approvedWindow&&result.status==='needs_input'&&!receipt.operationId&&lastWait(result)==='NO_SUPPORTED_ACTION'?this.options.vision?.('fallback'):undefined;
+   const stoppedOn=lastWait(result);
+   const fallback=!vision&&goalRun&&!steps&&approvedWindow&&result.status==='needs_input'&&!receipt.operationId&&(stoppedOn==='NO_SUPPORTED_ACTION'||stoppedOn==='TARGET_NOT_REACHED')?this.options.vision?.('fallback'):undefined;
    if(fallback&&'goal' in input){
     const done=result.lastAction&&!result.lastAction.blocked?` Its last: ${computerActionText(result.lastAction)}.`:'';
-    const note=`Accessibility already took ${result.steps} action${result.steps===1?'':'s'} toward this goal in this round and then found no control it could use.${done} Continue from the current screen; do not repeat what is done.`;
+    const why=stoppedOn==='TARGET_NOT_REACHED'?'then could not reach a button that only appears while the pointer is over it (nothing was clicked)':'then found no control it could use';
+    const note=`Accessibility already took ${result.steps} action${result.steps===1?'':'s'} toward this goal in this round and ${why}.${done} Continue from the current screen; do not repeat what is done.`;
     const outcome=await visionRun(fallback,{goal:input.goal,revision:t.revision,interactionContext:[contextNote,note].filter(Boolean).join('\n\n').slice(-8000),
      impact:t.automationController!=='agent',yieldAfterAction:false,literalText:true,approvedOnly:true},result);
     if('fallback' in outcome){

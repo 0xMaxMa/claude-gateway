@@ -115,6 +115,31 @@ test('no fallback without visionFallback, for a user one-shot command, or for an
  }
 });
 
+// Pod-jinawong task 56f64e16 rev 8: Spotify web's row Play only shows under the pointer. GetPod Desktop 0.1.1 answers
+// TARGET_NOT_REACHED when it cannot reach such a button even after hovering; the goal round goes on from the screenshot.
+// TARGET_OCCLUDED (another window covers the point) stops as before.
+const CHROME_PAGE={generation:'g1',application:'chrome.exe',windowTitle:'Search for sillyfools | Spotify - Google Chrome',apps:[],truncated:true,controls:[{ref:'c5',role:'AXButton',label:'Play',actions:['press']}]};
+const refusedClick=(code:string)=>({...STUCK,steps:0,lastAction:undefined,trace:{events:[ev(1,'acted',{action:'press',outcome:'not_executed',reason:code,nativePhase:'pointer_hit_ancestor',steps:0}),ev(2,'waiting',{reason:code,steps:0}),ev(3,'terminal',{status:'needs_input',reason:'COMMAND_WAITING_INPUT',steps:0})],truncated:false}});
+test('a button the helper could not reach under the pointer: the goal goes on from the screenshot',async()=>{
+ const f=fixture(fallbackOnly);try{
+  runComputerUse.mockImplementationOnce(stuckOn(CHROME_PAGE,refusedClick('TARGET_NOT_REACHED')));
+  runVisionComputerUse.mockImplementationOnce(async(input:any)=>{
+   expect(input).toMatchObject({impact:true,yieldAfterAction:false,literalText:true,approvedOnly:true});
+   expect(input.interactionContext).toContain('Accessibility already took 0 actions toward this goal in this round and then could not reach a button that only appears while the pointer is over it (nothing was clicked).');
+   return REACHED;
+  });
+  const outcome=await f.run('click Play on the song in Chrome');
+  expect(runVisionComputerUse).toHaveBeenCalledTimes(1);expect(outcome.type).toBe('completed');
+ }finally{await f.close();}
+});
+test('a click another window covered is no reason to click from the screenshot: no fallback',async()=>{
+ const f=fixture(fallbackOnly);try{
+  runComputerUse.mockImplementationOnce(stuckOn(CHROME_PAGE,refusedClick('TARGET_OCCLUDED')));
+  const outcome=await f.run('click Play on the song in Chrome');
+  expect(runVisionComputerUse).not.toHaveBeenCalled();expect(outcome.type).toBe('paused');
+ }finally{await f.close();}
+});
+
 /** A Jev choice: `choice` at `confidence`, the rest spread evenly. */
 const choose=(criteria:Record<string,string>,choice:string,confidence:number)=>{const keys=Object.keys(criteria);const rest=(1-confidence)/(keys.length-1);return {choice,confidence,probabilities:Object.fromEntries(keys.map(k=>[k,k===choice?confidence:rest]))};};
 const RAW_CAPS={pointer:['click','double_click','right_click','move','drag'],pointerModifiers:['alt','cmd','ctrl','shift'],scrollAt:true,keyChord:true,typeFocused:true,screenshotGeometry:true};
