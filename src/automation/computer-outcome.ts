@@ -12,6 +12,7 @@ const HINTS:Record<string,string>={
  FOCUS_REQUIRED:'the target needs keyboard focus first. Click the field, then send the command again.',
  FOCUS_UNSUPPORTED:'this control cannot take keyboard focus. Click it instead.',
  TARGET_OCCLUDED:'the target is covered by another window or popup. Close it, then try again.',
+ TARGET_NOT_REACHED:'the button only appears when the pointer is over it, so it couldn\'t be clicked.',
  UI_NOT_READY:'the screen kept changing while it waited. Send the command again.',
  STALE_OBSERVATION:'the screen changed before the action ran. Send the command again.',
  ACTION_CONTEXT_CHANGED:'the screen changed before the action ran. Send the command again.',
@@ -39,6 +40,8 @@ const REASONS:Record<string,string>={
  APPLICATION_NOT_APPROVED:'The app in front is not approved for Computer Use.',
  APPLICATION_PROTECTED:'The screen was hidden because a protected app such as GetPod was in front.',
  NO_SUPPORTED_ACTION:'No control on the screen matched the request.',
+ TARGET_OCCLUDED:'The button was covered by another window or popup.',
+ TARGET_NOT_REACHED:'Couldn\'t click that button: it only appears when the pointer is over it.',
  STEP_LIMIT:'It reached the action limit it was given.',
  NO_PROGRESS:'Its last actions did not change the screen.',
  ROUND_TIME_LIMIT:'It used up its time for one round.',
@@ -83,6 +86,33 @@ const REASONS:Record<string,string>={
  JEV_PROVIDER_UNAVAILABLE:'The decision model could not be reached.',
  JEV_INVALID_RESPONSE:'The decision model gave an answer that could not be used.',
 };
+/** Native phases at which the click point belonged to another window or process: a real cover. */
+const COVERED_PHASES=new Set(['pointer_hit_other_window','pointer_check_hit','raw_pointer_occluded']);
+type PointerRefusal='covered'|'hover'|'nested_scroll';
+const REFUSAL_HINTS:Record<PointerRefusal,string>={covered:HINTS.TARGET_OCCLUDED,hover:HINTS.TARGET_NOT_REACHED,nested_scroll:'the pointer was over a smaller scrolling area inside it, so it did not scroll.'};
+const REFUSAL_REASONS:Record<PointerRefusal,string>={covered:REASONS.TARGET_OCCLUDED,hover:REASONS.TARGET_NOT_REACHED,nested_scroll:'It did not scroll: the pointer was over a smaller scrolling area inside it.'};
+/** What the helper's refusal to click means, from its native phase. GetPod Desktop 0.1.0 also answered TARGET_OCCLUDED
+ * when the point hit another part of the same window (pointer_hit_ancestor, _group, ...), mostly a button that only shows
+ * under the pointer; "covered by another window" then had the agent blame GetPod (pod-jinawong task 56f64e16). 0.1.1
+ * sends those as TARGET_NOT_REACHED. A TARGET_OCCLUDED without a phase keeps its old meaning. */
+export function pointerRefusal(code:string|undefined,phase?:string):PointerRefusal|undefined{
+ if(code!=='TARGET_OCCLUDED'&&code!=='TARGET_NOT_REACHED')return;
+ if(phase==='scroll_nested_pane')return 'nested_scroll';
+ return code==='TARGET_OCCLUDED'&&(phase===undefined||COVERED_PHASES.has(phase))?'covered':'hover';
+}
+/** The native phase of the round's last action the computer refused with `code`. */
+const refusedPhase=(report:ComputerTaskReport,code:string)=>[...(report.trace??[])].reverse().find(e=>e.phase==='acted'&&e.outcome==='not_executed'&&e.reason===code)?.nativePhase;
+const lastWaitReason=(report:ComputerTaskReport)=>[...(report.trace??[])].reverse().find(e=>e.phase==='waiting')?.reason;
+/** For the agent, after a round stopped on a click the helper refused: what it means, and that the screen was visible,
+ * so it does not tell the user GetPod was in the way (task 56f64e16). Empty for any other stop. */
+export function computerRefusalNote(report:ComputerTaskReport):string{
+ const code=lastWaitReason(report),phase=code?refusedPhase(report,code):undefined,kind=pointerRefusal(code,phase);
+ if(!kind)return '';
+ const meaning=kind==='covered'?'another window or popup covered the click point':kind==='nested_scroll'?'the point was over a smaller scrolling area inside the target':'the click point hit another part of the same window, usually a button that only appears while the pointer is over it';
+ const front=report.targetApp?.name.slice(0,80);
+ const screen=report.screenWithheld?'':` The screen was NOT withheld${front?` and ${front} was the frontmost app`:''}: no protected app such as GetPod was in front, so do not tell the user that GetPod was in the way.`;
+ return `The computer refused the last action before sending it (${code}${phase?`, native phase ${phase}`:''}): ${meaning}. Nothing was clicked.${screen}`;
+}
 /** The owner's sentence for a stop code; `undefined` only for an empty code. */
 export function computerReasonText(code:string|undefined):string|undefined{
  if(!code)return;
@@ -112,8 +142,9 @@ export function computerProgressText(report:ComputerTaskReport):string{
  const paused=pausedText(report);if(paused)return paused;
  const stop=computerReasonText(report.reason)!;
  // The last action the computer refused names the cause when the stop itself is generic (the model gave up after it).
- const refused=[...(report.trace??[])].reverse().find(e=>e.phase==='acted'&&e.outcome==='not_executed'&&e.reason)?.reason;
- const before=refused&&REASONS[refused]&&REASONS[refused]!==stop?` Before that, ${REASONS[refused][0].toLowerCase()}${REASONS[refused].slice(1)}`:'';
+ const refused=[...(report.trace??[])].reverse().find(e=>e.phase==='acted'&&e.outcome==='not_executed'&&e.reason);
+ const kind=pointerRefusal(refused?.reason,refused?.nativePhase),said=kind?REFUSAL_REASONS[kind]:refused?.reason&&REASONS[refused.reason];
+ const before=said&&said!==stop?` Before that, ${said[0].toLowerCase()}${said.slice(1)}`:'';
  return `Stopped after ${actions}. ${stop}${before}`;
 }
 /** A goal round that paused on its own (ROUND_PAUSES): the user's reply resumes it. */
@@ -182,6 +213,11 @@ const WITHHELD_HINT='The screen was hidden because a protected app such as GetPo
 const withheldHint=(report:ComputerTaskReport)=>report.targetApp?`${WITHHELD_HINT} The next command switches back to ${report.targetApp.name.slice(0,80)} first.`:WITHHELD_HINT;
 export function computerOutcomeText(report:ComputerTaskReport,context:{handedOff?:boolean}={}):string{
  const text=outcomeText(report,context);
+ if(!report.screenWithheld&&report.targetApp&&pointerRefusal(lastWaitReason(report))&&!text.startsWith('Done')){
+  // A refused click on a visible screen: say whose window it was, so nobody reads it as GetPod in the way.
+  const visible=`The screen was not hidden: ${report.targetApp.name.slice(0,80)} was in front.`,details=text.lastIndexOf('\nDetails:');
+  return details<0?`${text} ${visible}`:`${text.slice(0,details)} ${visible}${text.slice(details)}`;
+ }
  if(!report.screenWithheld||text.startsWith('Done')||report.stepRun?.stopReason==='ALL_STEPS_DONE')return text;
  // A step run's raw codes stay on its last "Details:" line.
  const details=text.lastIndexOf('\nDetails:');
@@ -227,5 +263,6 @@ function outcomeText(report:ComputerTaskReport,context:{handedOff?:boolean}):str
  return `Not done: ${reason[0].toLowerCase()}${reason.slice(1)} Send the next command.`;
 }
 function hint(reason:string,report:ComputerTaskReport){
- return HINTS[reason].replace('{target}',quoted(report.lastAction?.label));
+ const refusal=pointerRefusal(reason,refusedPhase(report,reason));
+ return (refusal?REFUSAL_HINTS[refusal]:HINTS[reason]).replace('{target}',quoted(report.lastAction?.label));
 }

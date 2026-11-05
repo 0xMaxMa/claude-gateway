@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { ComputerObservation, confirmationTarget, reconnecting, type ComputerLastAction, type ComputerProgress, type ComputerState, type ComputerUseDependencies, type ComputerUseResult } from './computer-use';
+import { ComputerObservation, confirmationTarget, reconnecting, NATIVE_PHASE, type ComputerLastAction, type ComputerProgress, type ComputerState, type ComputerUseDependencies, type ComputerUseResult } from './computer-use';
 import { IMPACT_CRITERIA, IMPACT_QUESTION } from './computer-command';
 import { decisionState, readChoice } from './computer-policy';
 import { checkInterruption, interruptible } from './interrupt';
@@ -34,7 +34,7 @@ const MIN_TURN_MS = 1000;
 const NO_PROGRESS_ACTIONS = 3;
 const PRE_DISPATCH_REJECTIONS = new Set(['DEVICE_OFFLINE', 'CONSENT_REQUIRED', 'OBSERVATION_DENIED', 'CONTROL_DENIED', 'APPLICATION_NOT_ALLOWED', 'COMPUTER_BUSY']);
 /** Helper refusals that leave the desktop unchanged: look again and let the model decide on the new screenshot. */
-const REOBSERVE_REFUSALS = new Set(['STALE_OBSERVATION', 'TARGET_OCCLUDED', 'SCREENSHOT_REQUIRED', 'POINT_OUTSIDE_WINDOW', 'FOCUS_CHANGED', 'FOCUS_REQUIRED', 'CHORD_NOT_ALLOWED', 'INVALID_CHORD', 'SECURE_FIELD', 'INVALID_REQUEST']);
+const REOBSERVE_REFUSALS = new Set(['STALE_OBSERVATION', 'TARGET_OCCLUDED', 'TARGET_NOT_REACHED', 'SCREENSHOT_REQUIRED', 'POINT_OUTSIDE_WINDOW', 'FOCUS_CHANGED', 'FOCUS_REQUIRED', 'CHORD_NOT_ALLOWED', 'INVALID_CHORD', 'SECURE_FIELD', 'INVALID_REQUEST']);
 /** The helper (or getpod-app with its raw-input switch off) cannot take raw input at all. */
 export const RAW_UNAVAILABLE = new Set(['RAW_INPUT_DISABLED', 'UNSUPPORTED_ACTION']);
 const code = (value: unknown, fallback: string) => typeof value === 'string' && /^[A-Z][A-Z_0-9]{0,79}$/.test(value) ? value : fallback;
@@ -303,7 +303,7 @@ const VisionInput = z.object({ goal: z.string().min(1).max(16000), revision: z.n
   /** Raw input only into the window it observed of an approved, unprotected application: an action on a withheld
    *  screen or an unapproved front application is refused before dispatch (APPLICATION_NOT_APPROVED). */
   approvedOnly: z.boolean().default(false) });
-const Receipt = z.object({ state: z.enum(['completed', 'not_executed', 'unknown']), error: z.string().optional() });
+const Receipt = z.object({ state: z.enum(['completed', 'not_executed', 'unknown']), error: z.string().optional(), phase: z.string().regex(NATIVE_PHASE).optional().catch(undefined) });
 /** The Accessibility control under a screenshot point (the smallest box wins), in the window-relative normalized bounds. */
 export function controlAt(state: ComputerState, shot: VisionScreenshot, x: number, y: number) {
   const px = x / shot.width, py = y / shot.height;
@@ -540,7 +540,7 @@ export async function runVisionComputerUse(raw: unknown, deps: VisionDependencie
           pending = undefined;
           if (receipt.state === 'not_executed') {
             const refusal = code(receipt.error, 'ACTION_REJECTED');
-            emit('acted', { ...summary, operationId, outcome: 'not_executed', reason: refusal, elapsedMs: Date.now() - started });
+            emit('acted', { ...summary, operationId, outcome: 'not_executed', reason: refusal, ...(receipt.phase ? { nativePhase: receipt.phase } : {}), elapsedMs: Date.now() - started });
             if (RAW_UNAVAILABLE.has(refusal)) return steps === 0 ? fallback(refusal) : result('blocked', refusal);
             if (!REOBSERVE_REFUSALS.has(refusal)) return result('blocked', refusal);
             if (++refusals >= MAX_CONSECUTIVE_REFUSALS) return result('blocked', refusal);
