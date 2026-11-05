@@ -4,6 +4,7 @@ import { join } from 'path';
 import { tmpdir } from 'os';
 import { randomUUID } from 'crypto';
 import { AgentRunner } from '../../../src/agent/runner';
+import { NO_CWD_RESOLVER } from '../../../src/session/cwd';
 import { AgentOrchestrationRuntime } from '../../../src/orchestration/runtime';
 import { SessionProcess } from '../../../src/session/process';
 import { SessionStore } from '../../../src/session/store';
@@ -36,7 +37,7 @@ async function fixture() {
   void foreground.catch(() => {});
   await started;
   const facade = Object.assign(Object.create(AgentRunner.prototype), {
-    agentConfig: agent, sessionStore: sessions, agentsBaseDir: root, apiChatIds: new Map(),
+    agentConfig: agent, sessionStore: sessions, agentsBaseDir: root, apiChatIds: new Map(), cwdResolver: NO_CWD_RESOLVER,
     pendingApiSessions: new Set([sid]), logger: { warn: jest.fn() }, getOrchestration: async () => runtime,
   }) as AgentRunner;
   const upload = 'media/ui-upload/fixture.txt';

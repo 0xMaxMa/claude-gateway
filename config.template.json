@@ -57,6 +57,10 @@
         }
       ]
     },
+    "files": {
+      "root": "~/projects",
+      "trusted": []
+    },
     "history": {
       "retentionDays": 60,
       "cleanupHour": 0,

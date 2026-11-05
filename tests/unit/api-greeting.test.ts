@@ -34,6 +34,8 @@ class MockGreetingRunner extends EventEmitter {
     return this.sessionExists;
   }
 
+  async assertApiCwdAvailable(_sessionId: string): Promise<void> {}
+
   constructor(workspacePath: string) {
     super();
     this._workspacePath = workspacePath;

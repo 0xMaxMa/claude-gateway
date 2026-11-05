@@ -616,6 +616,246 @@ describe('config-loader', () => {
     expect(skipped.map(agent => agent.reason)).toEqual([expect.stringMatching(/Computer Use/)]);
   });
 
+  describe('gateway.files.root', () => {
+    let home: string;
+    let configDir: string;
+
+    beforeEach(() => {
+      home = path.join(tmpDir, 'users', 'pod');
+      configDir = path.join(tmpDir, 'etc');
+      fs.mkdirSync(path.join(home, '.claude-gateway'), { recursive: true });
+      fs.mkdirSync(configDir);
+      mockHomeDir = home;
+    });
+
+    afterEach(() => {
+      mockHomeDir = undefined;
+    });
+
+    const load = (gateway: Record<string, unknown>) => {
+      const configPath = path.join(configDir, 'config.json');
+      fs.writeFileSync(configPath, JSON.stringify({ gateway: { logDir: '/tmp', ...gateway }, agents: [] }));
+      return loadConfig(configPath);
+    };
+    const loadRoot = (root: unknown) => load({ files: { root } });
+
+    it('ignores obsolete process-wide start configuration without blocking startup', () => {
+      const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+      try {
+        const config = load({ processes: { startScript: '.pod/start.sh' } });
+        expect(config.gateway).not.toHaveProperty('processes');
+        expect(warn).toHaveBeenCalledWith(expect.stringContaining('Ignoring gateway.processes'));
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('loads a config with no files key', () => {
+      expect(load({}).gateway.files).toBeUndefined();
+    });
+
+    it('accepts a ~/ path and an absolute path outside HOME', () => {
+      expect(loadRoot('~/x').gateway.files?.root).toBe('~/x');
+      const outside = path.join(tmpDir, 'srv', 'projects');
+      expect(loadRoot(outside).gateway.files?.root).toBe(outside);
+    });
+
+    it('rejects a relative path', () => {
+      expect(() => loadRoot('projects')).toThrow(/gateway\.files\.root must be an absolute path/);
+    });
+
+    it('rejects a non-string or blank root', () => {
+      expect(() => loadRoot(42)).toThrow(/gateway\.files\.root must be a non-empty string/);
+      expect(() => loadRoot('  ')).toThrow(/gateway\.files\.root must be a non-empty string/);
+    });
+
+    it('rejects /', () => {
+      expect(() => loadRoot('/')).toThrow(/gateway\.files\.root "\/" must not be or contain/);
+    });
+
+    it('rejects HOME, as ~ or as an absolute path', () => {
+      expect(() => loadRoot('~')).toThrow(/gateway\.files\.root "~" must not be or contain/);
+      expect(() => loadRoot(home)).toThrow(/gateway\.files\.root .* must not be or contain/);
+    });
+
+    it('rejects an ancestor of HOME', () => {
+      expect(() => loadRoot(path.join(tmpDir, 'users'))).toThrow(/gateway\.files\.root .* must not be or contain/);
+    });
+
+    it('rejects HOME when ~/.claude-gateway is a symlink out of HOME', () => {
+      const gatewayData = path.join(tmpDir, 'gateway-data');
+      fs.renameSync(path.join(home, '.claude-gateway'), gatewayData);
+      fs.symlinkSync(gatewayData, path.join(home, '.claude-gateway'));
+      expect(() => loadRoot('~')).toThrow(/gateway\.files\.root "~" must not be or contain/);
+    });
+
+    it('rejects a symlink that resolves to HOME', () => {
+      const link = path.join(tmpDir, 'home-link');
+      fs.symlinkSync(home, link);
+      expect(() => loadRoot(link)).toThrow(/gateway\.files\.root .* must not be or contain/);
+    });
+
+    it('rejects the gateway config dir and the directory holding the loaded config', () => {
+      expect(() => loadRoot('~/.claude-gateway')).toThrow(/gateway\.files\.root .* must not be or contain/);
+      expect(() => loadRoot(configDir)).toThrow(/gateway\.files\.root .* must not be or contain/);
+    });
+
+    describe('default root ~/projects', () => {
+      let warn: jest.SpyInstance;
+      beforeEach(() => { warn = jest.spyOn(console, 'warn').mockImplementation(() => {}); });
+      afterEach(() => warn.mockRestore());
+      const defaultRootWarnings = () => warn.mock.calls.filter(([m]) => String(m).includes('~/projects'));
+
+      it('disables the files API with a warning when the loaded config lives under it', () => {
+        const nested = path.join(home, 'projects', 'gw');
+        fs.mkdirSync(nested, { recursive: true });
+        const configPath = path.join(nested, 'config.json');
+        fs.writeFileSync(configPath, JSON.stringify({ gateway: { logDir: '/tmp', files: { trusted: ['a'] } }, agents: [] }));
+        expect(loadConfig(configPath).gateway.files).toEqual({ trusted: ['a'], enabled: false });
+        expect(defaultRootWarnings()).toHaveLength(1);
+      });
+
+      it('disables the files API with a warning when ~/projects is a symlink to HOME', () => {
+        fs.symlinkSync(home, path.join(home, 'projects'));
+        expect(load({}).gateway.files).toEqual({ enabled: false });
+        expect(defaultRootWarnings()).toHaveLength(1);
+      });
+
+      it('leaves the files API enabled and silent when ~/projects is safe', () => {
+        expect(load({}).gateway.files).toBeUndefined();
+        expect(defaultRootWarnings()).toHaveLength(0);
+      });
+
+      it('treats an explicit root equal to the default like an unset one: warns and disables when ~/projects is a symlink to HOME', () => {
+        fs.symlinkSync(home, path.join(home, 'projects'));
+        expect(loadRoot('~/projects').gateway.files).toEqual({ root: '~/projects', enabled: false });
+        expect(defaultRootWarnings()).toHaveLength(1);
+      });
+
+      it('treats the default spelled as an absolute path the same way, and keeps the config under ~/projects loadable on every start', () => {
+        const nested = path.join(home, 'projects', 'gw');
+        fs.mkdirSync(nested, { recursive: true });
+        const configPath = path.join(nested, 'config.json');
+        fs.writeFileSync(configPath, JSON.stringify({ gateway: { logDir: '/tmp', files: { root: path.join(home, 'projects'), trusted: [] } }, agents: [] }));
+        for (let start = 0; start < 2; start++) {
+          expect(loadConfig(configPath).gateway.files).toMatchObject({ enabled: false });
+        }
+        expect(defaultRootWarnings()).toHaveLength(2);
+      });
+
+      it('leaves an explicit default root enabled when ~/projects is safe', () => {
+        expect(loadRoot('~/projects').gateway.files).toEqual({ root: '~/projects' });
+        expect(defaultRootWarnings()).toHaveLength(0);
+      });
+
+      it('still throws for an explicit unsafe root other than the default', () => {
+        fs.symlinkSync(home, path.join(home, 'projects'));
+        expect(() => loadRoot('~')).toThrow(/gateway\.files\.root .* must not be or contain/);
+        expect(() => loadRoot(configDir)).toThrow(/gateway\.files\.root .* must not be or contain/);
+      });
+
+      it.each([' ~/projects ', '~/projects/', '~/projects//', ' /users/pod/projects/ '.replace('/users/pod', '__HOME__')])(
+        'reads the default spelled %j as the default, warns and disables when ~/projects is a symlink to HOME',
+        (spelled) => {
+          fs.symlinkSync(home, path.join(home, 'projects'));
+          const root = spelled.replace('__HOME__', home);
+          expect(loadRoot(root).gateway.files).toEqual({ root: root.trim().replace(/\/+$/, ''), enabled: false });
+          expect(defaultRootWarnings()).toHaveLength(1);
+        },
+      );
+
+      it('validates a root spelled with spaces or a trailing slash like the clean spelling, and stores the clean one', () => {
+        expect(() => loadRoot(` ${home} `)).toThrow(/must not be or contain/);
+        expect(() => loadRoot(`${configDir}/`)).toThrow(/must not be or contain/);
+        expect(loadRoot(' ~/x/ ').gateway.files?.root).toBe('~/x');
+      });
+
+      it('warns and keeps the default when enabled is not a boolean, and never fails the start', () => {
+        const enabledWarnings = () => warn.mock.calls.filter(([m]) => String(m).includes('gateway.files.enabled'));
+        for (const enabled of ['false', 0, null]) {
+          warn.mockClear();
+          expect(load({ files: { enabled } }).gateway.files).toEqual({});
+          expect(enabledWarnings()).toHaveLength(1);
+        }
+        warn.mockClear();
+        expect(load({ files: { enabled: false } }).gateway.files).toEqual({ enabled: false });
+        expect(enabledWarnings()).toHaveLength(0);
+      });
+
+      it('disables the files API with a warning for a root holding ":", which would break the git discovery fence', () => {
+        const colon = path.join(tmpDir, 'srv', 'a:b');
+        expect(loadRoot(colon).gateway.files).toEqual({ root: colon, enabled: false });
+        expect(warn.mock.calls.filter(([m]) => String(m).includes('":"'))).toHaveLength(1);
+      });
+
+      it('reports every files API warning to onWarning, so it can reach gateway.log', () => {
+        const seen: string[] = [];
+        const configPath = path.join(configDir, 'config.json');
+        const loadWith = (files: unknown) => {
+          fs.writeFileSync(configPath, JSON.stringify({ gateway: { logDir: '/tmp', files }, agents: [] }));
+          return loadConfig(configPath, { onWarning: (m) => seen.push(m) });
+        };
+        loadWith({ root: path.join(tmpDir, 'srv', 'a:b') });
+        loadWith({ enabled: 'false' });
+        loadWith({ rooot: '/x' });
+        fs.symlinkSync(home, path.join(home, 'projects'));
+        loadWith({});
+        expect(seen.map((m) => m.match(/":"|gateway\.files\.enabled|unknown gateway\.files keys|default files root/)?.[0])).toEqual([
+          '":"', 'gateway.files.enabled', 'unknown gateway.files keys', 'default files root',
+        ]);
+      });
+
+      it('disables the files API for a root that is a symlink to a folder holding ":", like a root holding it', () => {
+        const target = path.join(tmpDir, 'srv', 'a:b');
+        fs.mkdirSync(target, { recursive: true });
+        const link = path.join(tmpDir, 'srv', 'lnk');
+        fs.symlinkSync(target, link);
+        expect(loadRoot(link).gateway.files).toEqual({ root: link, enabled: false });
+        expect(warn.mock.calls.filter(([m]) => String(m).includes('":"'))).toHaveLength(1);
+      });
+
+      it('disables the files API when the default root is a symlink to a folder holding ":"', () => {
+        const target = path.join(tmpDir, 'srv', 'c:d');
+        fs.mkdirSync(target, { recursive: true });
+        fs.symlinkSync(target, path.join(home, 'projects'));
+        expect(load({ files: { trusted: [] } }).gateway.files).toEqual({ trusted: [], enabled: false });
+        expect(warn.mock.calls.filter(([m]) => String(m).includes('":"'))).toHaveLength(1);
+      });
+
+      it('warns about unknown keys inside gateway.files and still loads', () => {
+        const unknownWarnings = () => warn.mock.calls.filter(([m]) => String(m).includes('unknown gateway.files keys'));
+        expect(load({ files: { rooot: '/srv/p', enabled: true } }).gateway.files).toMatchObject({ enabled: true });
+        expect(unknownWarnings()).toHaveLength(1);
+        expect(String(unknownWarnings()[0]![0])).toContain('rooot');
+        warn.mockClear();
+        load({ files: { root: '~/x', trusted: [], enabled: true } });
+        expect(unknownWarnings()).toHaveLength(0);
+      });
+    });
+  });
+
+  describe('gateway.files.trusted', () => {
+    const loadTrusted = (trusted: unknown) => {
+      const configPath = path.join(tmpDir, 'config.json');
+      fs.writeFileSync(configPath, JSON.stringify({ gateway: { logDir: '/tmp', files: { trusted } }, agents: [] }));
+      return loadConfig(configPath);
+    };
+
+    it('accepts a list of root-relative folder paths, nested ones included', () => {
+      expect(loadTrusted(['site', 'api.v2', 'site/web', 'a/b/c']).gateway.files?.trusted).toEqual(['site', 'api.v2', 'site/web', 'a/b/c']);
+      expect(loadTrusted([]).gateway.files?.trusted).toEqual([]);
+    });
+
+    it('rejects anything but an array of strings', () => {
+      expect(() => loadTrusted('site')).toThrow(/gateway\.files\.trusted must be an array of folder paths relative to gateway\.files\.root/);
+      expect(() => loadTrusted([1])).toThrow(/gateway\.files\.trusted must be an array of folder paths relative to gateway\.files\.root/);
+    });
+
+    it.each(['../etc', '../x', '', '/srv/site', '/abs', 'site/', 'a//b', '.hidden', 'site/../x', 'site/./web'])('rejects the entry %j, which no folder under the root can match', (bad) => {
+      expect(() => loadTrusted(['ok', bad])).toThrow(`gateway.files.trusted contains an invalid folder path "${bad}"`);
+    });
+  });
+
   it('accepts agents[].isolateMemory on host and app agents and skips malformed use (#601)', () => {
     const configPath = path.join(tmpDir, 'config.json');
     const base = JSON.parse(fs.readFileSync(path.join(FIXTURES, 'valid-2-agents.json'), 'utf8'));

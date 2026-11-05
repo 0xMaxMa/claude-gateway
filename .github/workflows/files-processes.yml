@@ -1,0 +1,77 @@
+name: Files and processes API
+
+on:
+  pull_request:
+    paths:
+      - 'src/api/files-router.ts'
+      - 'src/api/processes-router.ts'
+      - 'src/api/git-router.ts'
+      - 'src/api/capabilities.ts'
+      - 'src/api/router.ts'
+      - 'src/api/gateway-router.ts'
+      - 'src/files/**'
+      - 'src/git/**'
+      - 'src/session/**'
+      - 'src/agent/runner.ts'
+      - 'src/processes/**'
+      - 'src/cli/redact.ts'
+      - 'tests/unit/files-*.test.ts'
+      - 'tests/unit/cli-redact.test.ts'
+      - 'tests/unit/processes-router.test.ts'
+      - 'tests/unit/api-capabilities.test.ts'
+      - 'tests/unit/api-router*.test.ts'
+      - 'tests/unit/git-*.test.ts'
+      - 'tests/integration/session-cwd.test.ts'
+      - '.github/workflows/files-processes.yml'
+      - 'package.json'
+      - 'package-lock.json'
+  push:
+    branches: [main]
+    paths:
+      - 'src/api/files-router.ts'
+      - 'src/api/processes-router.ts'
+      - 'src/api/git-router.ts'
+      - 'src/api/capabilities.ts'
+      - 'src/api/router.ts'
+      - 'src/api/gateway-router.ts'
+      - 'src/files/**'
+      - 'src/git/**'
+      - 'src/session/**'
+      - 'src/agent/runner.ts'
+      - 'src/processes/**'
+      - 'src/cli/redact.ts'
+      - 'tests/unit/files-*.test.ts'
+      - 'tests/unit/cli-redact.test.ts'
+      - 'tests/unit/processes-router.test.ts'
+      - 'tests/unit/api-capabilities.test.ts'
+      - 'tests/unit/api-router*.test.ts'
+      - 'tests/unit/git-*.test.ts'
+      - 'tests/integration/session-cwd.test.ts'
+      - '.github/workflows/files-processes.yml'
+      - 'package.json'
+      - 'package-lock.json'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: files-processes-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  api-route-regressions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+          cache: npm
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: bun install --cwd mcp --frozen-lockfile --ignore-scripts
+      - run: npm run build
+      - run: npm run typecheck:tests
+      - run: NODE_OPTIONS=--max-old-space-size=1536 npx jest --ci --runInBand tests/unit/files-router.test.ts tests/unit/files-list-extras.test.ts tests/unit/files-delete.test.ts tests/unit/files-fs.test.ts tests/unit/files-permissions.test.ts tests/unit/git-router.test.ts tests/unit/api-capabilities.test.ts tests/unit/api-sessions-create.test.ts tests/unit/processes-router.test.ts tests/unit/cli-redact.test.ts tests/integration/session-cwd.test.ts

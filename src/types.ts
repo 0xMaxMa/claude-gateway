@@ -507,6 +507,22 @@ export interface GatewayConfig {
       keys: ApiKey[];
     };
     /**
+     * The one pod-wide root the files and git API serves (default `~/projects`). Distinct
+     * from an agent's `orchestration.tasks.projectRoot`, which is one repo per agent.
+     */
+    files?: {
+      root?: string;
+      /** false leaves the files and git API unmounted; loadConfig sets it when the default root would expose HOME or the config dir. */
+      enabled?: boolean;
+      /**
+       * Root-relative paths of folders whose own `.claude/` settings, hooks,
+       * `.mcp.json` and CLAUDE.md load in chats whose cwd is exactly that
+       * folder. Subfolders do not inherit it, and a symlink alias is never
+       * trusted. Every other folder runs with `--setting-sources user`.
+       */
+      trusted?: string[];
+    };
+    /**
      * true (default) = headless backend (claude --print + stream-json).
      * false = interactive backend: claude TUI under the claude-pty-shell PTY wrapper.
      */
@@ -820,6 +836,9 @@ export interface SessionMeta {
   videoConfig?: VideoParams;
   /** Real model from Claude stream, updated per turn (e.g. "claude-opus-4-8"). */
   model?: string;
+  /** Absolute working folder under gateway.files.root this API session is bound to, fixed at creation. It is
+   *  re-resolved at every spawn and turn. */
+  cwd?: string;
 }
 
 export interface SessionIndex {

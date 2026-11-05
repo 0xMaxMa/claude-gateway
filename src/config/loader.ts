@@ -6,6 +6,8 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { GatewayConfig, Logger } from '../types';
+import { expandHome, pathWithin } from '../utils/paths';
+import { DEFAULT_FILES_ROOT, parseRelPath } from '../files/paths';
 import { resolveGatewayPublicUrl } from './public-url';
 import { upgradeAgentWhatsAppAccounts } from './whatsapp-accounts';
 import { resolveOrchestrationConfig, OrchestrationConfig } from '../orchestration/config';
@@ -164,6 +166,11 @@ export interface LoadConfigOptions {
    * diagnosable there too — see issue #472.
    */
   onPublicUrlUnset?: () => void;
+  /**
+   * Called with the text of each files API warning (an unusable root, a malformed `enabled`, unknown keys). Same
+   * rationale as the callbacks above: the `console.warn` alone never reaches `logs/gateway.log`.
+   */
+  onWarning?: (message: string) => void;
 }
 
 /**
@@ -186,6 +193,77 @@ export function logSkippedAgents(
   }
 }
 
+const FILES_KEYS = ['root', 'trusted', 'enabled'];
+
+/** The spelling every check and the runtime agree on: no surrounding spaces, no trailing slashes (`/` stays). */
+function cleanFilesRoot(raw: string): string {
+  const trimmed = raw.trim();
+  return trimmed.replace(/\/+$/, '') || (trimmed.startsWith('/') ? '/' : trimmed);
+}
+
+/** Unset, or spelled like the default in any clean or unclean way (config.template.json ships it): both mean "the operator chose nothing". */
+function isDefaultFilesRoot(raw: unknown): boolean {
+  return raw === undefined || (typeof raw === 'string' && expandHome(cleanFilesRoot(raw)) === expandHome(DEFAULT_FILES_ROOT));
+}
+
+/** The folder a root resolves to when that path (not the spelling) holds ":", else null. A link into `a:b` breaks the fence like a typed `a:b`. */
+function colonRealRoot(root: unknown): string | null {
+  if (typeof root !== 'string') return null;
+  try {
+    const real = fs.realpathSync(expandHome(root));
+    return real.includes(':') ? real : null;
+  } catch {
+    return null;
+  }
+}
+
+function validateFilesRoot(raw: unknown, configPath: string): void {
+  if (typeof raw !== 'string' || !raw.trim()) {
+    throw new ConfigValidationError('gateway.files.root must be a non-empty string');
+  }
+  const root = expandHome(raw);
+  if (!path.isAbsolute(root)) {
+    throw new ConfigValidationError(`gateway.files.root must be an absolute path or start with ~/ (got "${raw}")`);
+  }
+  const exposed = exposedByFilesRoot(root, configPath);
+  if (exposed !== null) {
+    throw new ConfigValidationError(
+      `gateway.files.root "${raw}" must not be or contain ${exposed}; the files API would expose it`,
+    );
+  }
+}
+
+/**
+ * The files API serves every folder under its root with no denylist, so a root
+ * at or above HOME or the config dir would expose ~/.ssh and config.json.
+ * Returns the guarded directory the root contains, or null.
+ */
+function exposedByFilesRoot(root: string, configPath: string): string | null {
+  // realpath when the path exists, so a symlink to HOME is caught too.
+  const real = (p: string) => {
+    try {
+      return fs.realpathSync(p);
+    } catch {
+      return path.resolve(p);
+    }
+  };
+  const resolved = real(root);
+  const home = os.homedir();
+  const guards = [home, path.join(home, '.claude-gateway'), path.dirname(path.resolve(configPath))];
+  return guards.find((guarded) => pathWithin(resolved, real(guarded))) ?? null;
+}
+
+/** Trust is operator config only, so a path the API could never resolve is a typo worth failing on. */
+function validateTrustedPaths(raw: unknown): void {
+  if (!Array.isArray(raw) || raw.some((n) => typeof n !== 'string')) {
+    throw new ConfigValidationError('gateway.files.trusted must be an array of folder paths relative to gateway.files.root');
+  }
+  const bad = raw.find((n) => n === '' || !parseRelPath(n).ok);
+  if (bad !== undefined) {
+    throw new ConfigValidationError(`gateway.files.trusted contains an invalid folder path "${bad}"`);
+  }
+}
+
 /**
  * Load and validate config.json from the given path.
  * Interpolates ${VAR} env vars throughout the config.
@@ -203,6 +281,11 @@ export function loadConfig(configPath: string, options?: LoadConfigOptions): Gat
     console.warn(`[gateway] Skipping agent "${id}": ${reason}`);
     skippedAgents.push(id);
     options?.onSkippedAgent?.({ id, reason, ...(missingVar ? { missingVar } : {}) });
+  };
+
+  const warnFiles = (message: string): void => {
+    console.warn(message);
+    options?.onWarning?.(message);
   };
 
   let raw: string;
@@ -381,6 +464,59 @@ export function loadConfig(configPath: string, options?: LoadConfigOptions): Gat
       );
     }
     interpolatedGateway.publicUrl = normalizedPublicUrl;
+  }
+
+  if ('processes' in interpolatedGateway) {
+    warnFiles('[gateway] Ignoring gateway.processes; pass script in POST /v1/processes/start instead.');
+    delete interpolatedGateway.processes;
+  }
+  const files = interpolatedGateway.files;
+  if (files !== undefined) {
+    if (typeof files !== 'object' || files === null || Array.isArray(files)) {
+      throw new ConfigValidationError('gateway.files must be an object');
+    }
+    const filesConfig = files as Record<string, unknown>;
+    if (typeof filesConfig.root === 'string' && filesConfig.root.trim()) filesConfig.root = cleanFilesRoot(filesConfig.root);
+    const root = filesConfig.root;
+    if (root !== undefined && !isDefaultFilesRoot(root)) validateFilesRoot(root, configPath);
+    const colonRoot = typeof root === 'string' && root.includes(':') ? root : colonRealRoot(root ?? DEFAULT_FILES_ROOT);
+    if (colonRoot !== null && filesConfig.enabled !== false) {
+      warnFiles(
+        `[gateway] gateway.files.root "${colonRoot}" holds ":", which git's discovery fence (GIT_CEILING_DIRECTORIES) cannot express, so the files API is disabled.\n` +
+        '          Set gateway.files.root to a path without ":".',
+      );
+      filesConfig.enabled = false;
+    }
+    if ('enabled' in filesConfig && typeof filesConfig.enabled !== 'boolean') {
+      warnFiles(`[gateway] gateway.files.enabled must be true or false (got ${JSON.stringify(filesConfig.enabled)}); ignoring it, so the files API keeps its default, which is on.`);
+      delete filesConfig.enabled;
+    }
+    const trusted = (files as Record<string, unknown>).trusted;
+    if (trusted !== undefined) validateTrustedPaths(trusted);
+    const unknown = Object.keys(files).filter((key) => !FILES_KEYS.includes(key));
+    if (unknown.length > 0) {
+      warnFiles(`[gateway] Ignoring unknown gateway.files keys: ${unknown.join(', ')}. Known keys: ${FILES_KEYS.join(', ')}.`);
+    }
+  }
+  // An operator who never chose a root, or whose config.json only carries the template's default, gets a warning, not a gateway that refuses to start.
+  if (isDefaultFilesRoot((files as { root?: unknown } | undefined)?.root)) {
+    const exposed = exposedByFilesRoot(expandHome(DEFAULT_FILES_ROOT), configPath);
+    if (exposed !== null) {
+      warnFiles(
+        `[gateway] The default files root ${DEFAULT_FILES_ROOT} is or contains ${exposed}, so the files API is disabled.\n` +
+        '          Set gateway.files.root to a folder that holds nothing else.',
+      );
+      interpolatedGateway.files = { ...(files as object | undefined), enabled: false };
+    } else if (files === undefined) {
+      const colonRoot = colonRealRoot(DEFAULT_FILES_ROOT);
+      if (colonRoot !== null) {
+        warnFiles(
+          `[gateway] The default files root ${DEFAULT_FILES_ROOT} resolves to "${colonRoot}", which holds ":", so the files API is disabled.\n` +
+          '          Set gateway.files.root to a path without ":".',
+        );
+        interpolatedGateway.files = { enabled: false };
+      }
+    }
   }
 
   // Interpolate each agent individually — skip agents with missing env vars

@@ -31,6 +31,8 @@ import { TaskBridge } from '../bridge';
 import { TaskService } from './service';
 import { TaskWorkspaces } from './workspace';
 import { TaskAttempt, TaskSnapshot, OrchestrationError } from '../types';
+import type { SessionCwd } from '../../session/cwd';
+import { realpathWithin } from '../../utils/paths';
 import { WorkerDriver, WorkerHandle } from './scheduler';
 import { startProcessTurn } from '../process-turn';
 import { randomUUID } from 'crypto';
@@ -58,6 +60,17 @@ function boundedDiffText(text: string): string {
   return result.replace(/[\uD800-\uDBFF]$/, '');
 }
 
+/** The chat's folder must still be where admission pinned the task; a moved, renamed or held folder never falls back. */
+async function startCwd(tasks: TaskService, task: TaskSnapshot): Promise<SessionCwd | undefined> {
+  const stored = tasks.taskCwd(task);
+  if (!stored) return undefined;
+  if (task.resourceProfile?.mode !== 'host') throw new OrchestrationError('CWD_UNSUPPORTED_AGENT', 'Folder-bound tasks run only in host workspace mode. No worker was started.');
+  const root = task.resourceProfile?.projectRoot ?? '';
+  const cwd = tasks.cwd ? await tasks.cwd.resolver.resolve(stored) : undefined;
+  const dir = cwd?.ok ? await realpathWithin(cwd.value.dir, root) : undefined;
+  if (!cwd?.ok || dir !== root) throw new OrchestrationError('CWD_UNAVAILABLE', 'The chat\'s working folder is no longer available. No worker was started.');
+  return cwd.value;
+}
 export class ClaudeWorkerDriver implements WorkerDriver {
   private readonly instanceId = randomUUID();
   constructor(private readonly agent: AgentConfig, private readonly gateway: GatewayConfig, private readonly tasks: TaskService,
@@ -88,6 +101,7 @@ export class ClaudeWorkerDriver implements WorkerDriver {
 
   private async startAttempt(task: TaskSnapshot, attempt: TaskAttempt, capacityReserved: boolean, providerPermit: ProviderPermit | undefined, execAgent: AgentConfig): Promise<WorkerHandle> {
     if (!['default-worker', 'media-worker', 'skill-worker'].includes(task.targetProfile) || !task.capabilities.execute) throw new OrchestrationError('EXECUTION_DENIED');
+    const cwd = await startCwd(this.tasks, task);
     if (task.targetProfile === 'default-worker' && task.resourceProfile?.mode === 'shared-lock') {
       const [project, identity] = await Promise.all([realpath(task.resourceProfile.projectRoot), realpath(this.agent.workspace)]);
       if (pathWithin(identity, project) || pathWithin(project, identity)) throw new OrchestrationError('SHARED_PROJECT_MUST_DIFFER_FROM_IDENTITY_WORKSPACE');
@@ -101,6 +115,7 @@ export class ClaudeWorkerDriver implements WorkerDriver {
     if (current.state !== 'starting' || current.activeAttemptId !== attempt.attemptId) throw new OrchestrationError('ATTEMPT_CANCELLED_BEFORE_START');
     const directory = join(this.privateRoot, attempt.attemptId);
     let harness = resolveWorkerHarness(this.agent, this.gateway, task.model ?? this.agent.claude.model);
+    if (cwd && harness.harness === 'codex') throw new OrchestrationError('CWD_UNSUPPORTED_AGENT', 'Folder-bound tasks cannot run on the Codex worker harness. No worker was started.');
     let authFingerprint: string | undefined;
     let resolvedCredentials: Readonly<CodexCredentials> | undefined;
     if (harness.harness === 'codex') {
@@ -199,7 +214,7 @@ export class ClaudeWorkerDriver implements WorkerDriver {
         // pstack agents dispatch subagents only as gateway tasks (subagent_spawn); a read-only Claude subagent gets read tools only.
         ...(pstack ? { disallowedTools: ['Agent', 'Task'] } : {}),
         // Read-only is enforced by each harness (read tools; Codex's read-only sandbox) and no user connectors, which can write.
-        ...(task.readonly ? { readOnly: true, connectorsAllowed: false, ...(harness.harness === 'claude' ? { workerTools: ['Read', 'Glob', 'Grep'] } : {}) } : {}), hostExecution: workspace.baseCommit === 'host', containerExecution: this.agent.type === 'app-agent', originSessionId: task.agentSessionId, taskId: task.taskId, attemptId: attempt.attemptId, context, cliSession: { id: attempt.sessionId, resume: Boolean(attempt.resumeSession) }, capacityReserved, skillPluginDir, containerSkill };
+        ...(task.readonly ? { readOnly: true, connectorsAllowed: false, ...(harness.harness === 'claude' ? { workerTools: ['Read', 'Glob', 'Grep'] } : {}) } : {}), hostExecution: workspace.baseCommit === 'host', untrustedCwd: cwd ? !cwd.trusted : undefined, containerExecution: this.agent.type === 'app-agent', originSessionId: task.agentSessionId, taskId: task.taskId, attemptId: attempt.attemptId, context, cliSession: { id: attempt.sessionId, resume: Boolean(attempt.resumeSession) }, capacityReserved, skillPluginDir, containerSkill };
       const workerConfig: AgentConfig = { ...execAgent, workspace: this.agent.type === 'app-agent' ? this.agent.workspace : workspace.path, allow_tools: true, orchestration: undefined,
         claude: { ...this.agent.claude, model: claudeModel, extraFlags: [] } };
       const process = harness.harness === 'codex'

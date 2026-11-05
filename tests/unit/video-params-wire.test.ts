@@ -11,6 +11,7 @@ import express from 'express';
 import * as supertest from 'supertest';
 import { createApiRouter } from '../../src/api/router';
 import { AgentRunner } from '../../src/agent/runner';
+import { NO_CWD_RESOLVER } from '../../src/session/cwd';
 import { AgentConfig, ApiKey, ApiAttachment, VideoParams } from '../../src/types';
 
 // ── Router fixtures ───────────────────────────────────────────────────────────
@@ -228,8 +229,8 @@ test('orchestrated API persists composer video options and forwards their author
   const send = jest.fn(async () => 'ok');
   const update = jest.fn(async () => {});
   const runner = Object.assign(Object.create(AgentRunner.prototype), {
-    pendingApiSessions: new Set(), apiChatIds: new Map(), agentConfig: { id: 'a' },
-    sessionStore: { ensureApiSession: async () => {}, loadIndex: async () => null, updateSessionMeta: update },
+    pendingApiSessions: new Set(), apiChatIds: new Map(), agentConfig: { id: 'a' }, cwdResolver: NO_CWD_RESOLVER,
+    sessionStore: { ensureApiSession: async () => {}, loadIndex: async () => null, updateSessionMeta: update, listApiSessionRecords: async () => new Map(), readLegacyBinding: async () => 'none' },
     getOrchestration: async () => ({ send, responseFiles: () => [], authorizeSession: () => {} }),
     addApiAttachments: () => {}, popApiAttachments: () => [],
   });

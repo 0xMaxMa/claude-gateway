@@ -1,3 +1,4 @@
+import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
@@ -30,4 +31,17 @@ export function expandHome(p: string): string {
 export function pathWithin(root: string, target: string, api: path.PlatformPath = path): boolean {
   const rel = api.relative(root, target);
   return rel !== '..' && !rel.startsWith('..' + api.sep) && !api.isAbsolute(rel);
+}
+
+/**
+ * `requested`, absolute or relative to the real folder `dir`, resolved through every symlink. Undefined when it does
+ * not exist or its real location leaves `dir`.
+ */
+export async function realpathWithin(dir: string, requested: string): Promise<string | undefined> {
+  try {
+    const real = await fs.promises.realpath(path.resolve(dir, requested));
+    return pathWithin(dir, real) ? real : undefined;
+  } catch {
+    return undefined;
+  }
 }

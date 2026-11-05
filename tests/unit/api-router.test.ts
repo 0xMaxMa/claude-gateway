@@ -109,6 +109,10 @@ class MockAgentRunner extends EventEmitter {
   getAllSessionMeta(): Promise<Map<string, { name: string; imageConfig?: unknown; videoConfig?: unknown; model?: string }>> {
     return this.getAllSessionMetaImpl();
   }
+
+  sessionCwdView(_sessionId: string): Promise<{ cwd: string | null; trusted: boolean; cwdState: null; active: boolean }> {
+    return Promise.resolve({ cwd: null, trusted: false, cwdState: null, active: false });
+  }
 }
 
 // ── Test fixtures ─────────────────────────────────────────────────────────────

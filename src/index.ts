@@ -26,6 +26,7 @@ import { watchSkills } from './skills';
 import { syncSharedSkills, syncModuleSkills } from './skills/sync';
 import { createWatcher } from './watch/factory';
 import { AgentRunner } from './agent/runner';
+import { createCwdResolver } from './files/session-cwd';
 import { SkillLearningManager, skillCatalogUsage, skillLearningHostHooks } from './agent/skill-learning';
 import { resolveSkillLearningConfig } from './agent/skill-learning/config';
 import { HistoryDB } from './history/db';
@@ -286,7 +287,7 @@ async function startAgent(
   // Create runner
   let runner: AgentRunner;
   try {
-    runner = new AgentRunner(agentConfig, gatewayConfig, logger);
+    runner = new AgentRunner(agentConfig, gatewayConfig, logger, createCwdResolver(gatewayConfig, logger));
     if (workspace.skillRegistry) {
       runner.setSkillRegistry(workspace.skillRegistry);
     }
@@ -652,8 +653,10 @@ async function main(): Promise<void> {
   // logs/gateway.log at startup too, not only on reload (#427).
   const startupSkips: SkippedAgent[] = [];
   let publicUrlUnsetAtStartup = false;
+  const startupWarnings: string[] = [];
   const config: GatewayConfig = loadConfig(CONFIG_PATH, {
     onSkippedAgent: (s) => startupSkips.push(s),
+    onWarning: (m) => startupWarnings.push(m),
     onPublicUrlUnset: () => { publicUrlUnsetAtStartup = true; },
   });
   config.gateway.logDir = expandTilde(config.gateway.logDir);
@@ -677,6 +680,7 @@ async function main(): Promise<void> {
   // went missing.
   const globalLogger = createLogger('gateway', expandTilde(config.gateway.logDir));
   logSkippedAgents(globalLogger, startupSkips, 'Agent skipped at startup');
+  for (const message of startupWarnings) globalLogger.warn(message);
   // Same #427 rationale as skipped agents: the console.warn already happened
   // inside loadConfig (before logDir/globalLogger could exist), replay it here
   // so it also reaches logs/gateway.log under structured/JSON logging (#472).
@@ -912,7 +916,7 @@ async function main(): Promise<void> {
   const restorePending = await appInstaller.markRestorePending();
 
   // Start gateway router
-  const router = new GatewayRouter(agentRunners, agentConfigs, undefined, config, cronManager, CONFIG_PATH, appsRegistry, appInstaller, registryClient);
+  const router = new GatewayRouter(agentRunners, agentConfigs, undefined, config, cronManager, CONFIG_PATH, appsRegistry, appInstaller, registryClient, globalLogger);
   await router.start(PORT);
   console.log(`[gateway] Listening on port ${PORT}`);
 

@@ -30,6 +30,9 @@ curl --fail http://127.0.0.1:10850/api/v1/agents \
 | Session management | [Open reference](/api/sessions) |
 | Chat history and search | [Open reference](/api/history) |
 | Workspace files | [Open reference](/api/workspace) |
+| Files | [Open reference](/api/files) |
+| Git | [Open reference](/api/git) |
+| Processes | [Open reference](/api/processes) |
 | Skills and metrics | [Open reference](/api/skills) |
 | Telegram access controls | [Open reference](/api/telegram) |
 | WhatsApp and Cloud API | [Open reference](/api/whatsapp) |

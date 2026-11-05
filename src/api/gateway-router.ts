@@ -15,7 +15,7 @@ import * as path from 'path';
 import { Server } from 'http';
 import { WebSocketServer, WebSocket, type RawData } from 'ws';
 import { AgentRunner } from '../agent/runner';
-import { AgentConfig, AgentStats, ApiKey, GatewayConfig, HeartbeatResult } from '../types';
+import { AgentConfig, AgentStats, ApiKey, GatewayConfig, HeartbeatResult, Logger } from '../types';
 import { agentsDirForConfig } from '../config/agent-env';
 import { ptyStreamRegistry } from '../shell/pty-stream-registry';
 import { shouldRoutePtyInput, MAX_PTY_INPUT_BYTES } from '../shell/control-channel';
@@ -49,6 +49,10 @@ import { createMetaRouter } from './meta-router';
 import { createCapabilitiesRouter } from './capabilities';
 import { GATEWAY_VERSION } from './gateway-version';
 import { createWorkspaceRouter } from './workspace-router';
+import { createFilesRouter } from './files-router';
+import { createGitRouter } from './git-router';
+import { createProcessesRouter } from './processes-router';
+import { filesEnabled, resolveFilesRoot } from '../files/config';
 import { createSkillsRouter } from './skills-router';
 import { createPackagesRouter } from './packages';
 import { createWebhooksRouter } from './webhooks-router';
@@ -296,6 +300,8 @@ export class GatewayRouter {
    *  and an OAuth-flow completion can't race each other's read-modify-write
    *  of gateway.customConnectors — see custom-connectors-store.ts. */
   private readonly customConnectorsStore: CustomConnectorsStore;
+  /** The gateway-wide logger (logs/gateway.log); console when a test builds the router without one. */
+  private readonly logger: Logger;
 
   constructor(
     agents: Map<string, AgentRunner>,
@@ -307,6 +313,7 @@ export class GatewayRouter {
     appsRegistry?: AppsRegistry,
     appInstaller?: AppInstaller,
     appRegistryClient?: RegistryClient,
+    logger?: Logger,
   ) {
     this.agents = agents;
     this.configs = configs;
@@ -318,6 +325,7 @@ export class GatewayRouter {
     this.appsRegistry = appsRegistry;
     this.appInstaller = appInstaller;
     this.appRegistryClient = appRegistryClient;
+    this.logger = logger ?? console;
     this.customConnectorsStore = createCustomConnectorsStore(configPath);
     this.app = express();
 
@@ -749,6 +757,20 @@ export class GatewayRouter {
       this.app.use('/api', workspaceRouter);
     }
 
+    // Mount the pod-wide files and git API (gateway.files.root, default ~/projects)
+    if (this.gatewayConfig?.gateway?.api?.keys && filesEnabled(this.gatewayConfig)) {
+      const root = resolveFilesRoot(this.gatewayConfig);
+      this.app.use('/api', createFilesRouter(this.gatewayConfig.gateway.api.keys, resolveFilesRoot(this.gatewayConfig), {
+        logger: this.logger,
+        inUse: async (dir) => {
+          await Promise.all([...this.agents.values()].map((runner) => runner.prepareWorkCheck()));
+          return [...this.agents.values()].some((runner) => [...runner.workIn(dir)].some((reason) => reason !== 'session'));
+        },
+      }));
+      this.app.use('/api', createGitRouter(this.gatewayConfig.gateway.api.keys, root, this.logger));
+      this.app.use('/api', createProcessesRouter(this.gatewayConfig.gateway.api.keys, root, { logger: this.logger }));
+    }
+
     // Mount skills routes
     if (this.gatewayConfig?.gateway?.api?.keys) {
       const skillsRouter = createSkillsRouter(
@@ -823,7 +845,7 @@ export class GatewayRouter {
     // Mount the capability manifest (GET /api/v1/capabilities) so clients can
     // feature-detect this build instead of pinning to a version number.
     if (this.gatewayConfig?.gateway?.api?.keys?.length) {
-      this.app.use('/api', createCapabilitiesRouter(this.gatewayConfig.gateway.api.keys));
+      this.app.use('/api', createCapabilitiesRouter(this.gatewayConfig.gateway.api.keys, this.gatewayConfig));
     }
 
     // Mount apps router (admin routes for installing/managing apps)

@@ -29,6 +29,8 @@ export interface RuntimeProfile {
   /** Explicit execution tool set resolved by gateway policy. */
   workerTools?: string[];
   hostExecution?: boolean;
+  /** A host worker in a folder not in gateway.files.trusted: the repo's hooks, MCP servers and settings must not load. */
+  untrustedCwd?: boolean;
   containerExecution?: boolean;
   /** Captured optional evaluation-tool inventory for this process; permissions remain live. */
   jevEnabled?: boolean;
@@ -97,6 +99,7 @@ export function runtimeProfileArgs(profile: RuntimeProfile, extraFlags: string[]
       ...(profile.pluginOverrides ? { enabledPlugins: profile.pluginOverrides } : {}) };
     // --tools limits built-in tools only; a read-only worker must not load the user's or a plugin's MCP servers either.
     return ['--tools', profile.workerTools === undefined ? 'default' : profile.workerTools.join(','), ...(profile.readOnly ? ['--strict-mcp-config'] : []), '--mcp-config', profile.mcpConfigPath,
+      ...(profile.untrustedCwd ? ['--setting-sources', 'user'] : []),
       ...(Object.keys(settings).length ? ['--settings', JSON.stringify(settings)] : []),
       ...(profile.disallowedTools?.length ? ['--disallowedTools', profile.disallowedTools.join(',')] : []),
       ...(profile.skillPluginDir ? ['--plugin-dir', profile.skillPluginDir] : []),

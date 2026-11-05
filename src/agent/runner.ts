@@ -32,7 +32,7 @@ import { AgentConfig, CustomConnectorEntry, GatewayConfig, Logger, Message, Mode
 import { withConfigWriteLock, writeConfigAtomicSync } from '../config/config-write-lock';
 import { createLogger } from '../logger';
 import { SessionProcess, MAX_HISTORY_MESSAGES, resolveMaxHistoryMessages, INTERRUPTED_NO_REPLY_TEXT } from '../session/process';
-import { SessionStore, SessionNotInIndexError } from '../session/store';
+import { ApiSessionRecord, SessionStore, SessionNotInIndexError } from '../session/store';
 import { startNativeCompact } from '../orchestration/native-compact';
 import { TelegramReceiver } from '../telegram/receiver';
 import { DiscordReceiver } from '../discord/receiver';
@@ -87,6 +87,10 @@ import { isChatChannel } from '../history/types';
 import { managedTurnSkills, toolUseSkills, type SkillLearningManager } from './skill-learning';
 import { spawnArchiveReindex } from './knowledge';
 import { resolveEnabledConnectors } from '../connectors/resolve';
+import { CwdFailure, CwdResolver, CwdState, WorkReason, CwdUnavailableReason, CwdUnsupportedReason, cwdError, NO_CWD_RESOLVER, SessionCwd, StoredCwd, storedCwd } from '../session/cwd';
+import { resolveOrchestrationConfig } from '../orchestration/config';
+import { resolveWorkerHarness } from '../orchestration/worker-harness';
+import { err, Result } from '../utils/result';
 
 const DEFAULT_IDLE_TIMEOUT_MINUTES = 30;
 const DEFAULT_MAX_CONCURRENT = 20;
@@ -114,6 +118,28 @@ import { pstackPanelDefault, renderPstackSheet } from '../pstack/sheet';
 import { updatePstackConfig } from '../pstack/setup';
 import { PstackMenuScreen, PstackMenuState, PstackMenuStep, pstackMenuScreen, pstackMenuStep, pstackMenuText } from '../pstack/menu';
 import type { AgentPstackConfig } from '../pstack/config';
+import { pathWithin } from '../utils/paths';
+
+/** The chat that holds an api session id, and the folder the session is bound to. */
+interface ApiSessionOwner {
+  chatId: string;
+  cwd: StoredCwd;
+}
+
+export interface SessionCwdView {
+  cwd: string | null;
+  trusted: boolean;
+  cwdState: CwdState | null;
+  active: boolean;
+}
+
+function realpathOrNull(p: string): string | null {
+  try {
+    return fs.realpathSync(p);
+  } catch {
+    return null;
+  }
+}
 
 const PSTACK_WRITE_REQUIRED = 'Changing the pstack setup needs an API key with write access to this agent. /pstack-setup without arguments shows it.';
 const PSTACK_SETUP_USAGE = 'Usage: /pstack-setup on | off | <role>: <model-id>[ @<level>] (one per line; "<role>: default" drops an override; "<role> += <model-id>[ @<level>]" / "<role> -= <model-id>" edit a panel list; "default effort: <level|session>").';
@@ -412,6 +438,20 @@ export class AgentRunner extends EventEmitter {
   // (e.g. the app/agent identifier) is not captured at spawn. Record it here
   // keyed by sessionId so the dashboard can show the actual chat id.
   private readonly apiChatIds = new Map<string, string>();
+  /**
+   * Every api session id this agent's chats hold, with its chat and its folder, loaded once from the chat indexes and
+   * kept current on create, register and delete. A session id belongs to one chat, so a client cannot carry a bound
+   * transcript into a chat with no folder.
+   */
+  private apiSessionOwners?: Map<string, ApiSessionOwner>;
+  private apiSessionOwnersLoading?: Promise<Map<string, ApiSessionOwner>>;
+  /**
+   * Sessions deleted while a turn or orchestrated work was live, with the chat they belonged to. Their owner entry
+   * stays until that work ends, so the folder still counts as busy while the turn writes; `reapRetiredSessions` then
+   * purges what it wrote and frees the id.
+   */
+  private readonly retiredSessions = new Map<string, { chatId: string; bound: boolean }>();
+  private readonly cwdResolver: CwdResolver;
 
   // Skill registry for detecting /skill-name commands in user messages
   private skillRegistry: SkillRegistry = { skills: new Map() };
@@ -445,8 +485,117 @@ export class AgentRunner extends EventEmitter {
   }
 
   private orchestrationForApi(sessionId: string): boolean {
-    return Boolean((this.orchestration?.ownsSession(sessionId) && !this.orchestration.canReturnToLegacy()) ||
-      (this.agentConfig.orchestration?.enabled && (this.agentConfig.orchestration.channels ?? ['api']).includes('api')));
+    return Boolean((this.orchestration?.ownsSession(sessionId) && !this.orchestration.canReturnToLegacy()) || this.apiChannelOrchestrated());
+  }
+
+  private apiChannelOrchestrated(): boolean {
+    return Boolean(this.agentConfig.orchestration?.enabled && (this.agentConfig.orchestration.channels ?? ['api']).includes('api'));
+  }
+
+  private sessionOwners(): Promise<Map<string, ApiSessionOwner>> {
+    if (this.apiSessionOwners) return Promise.resolve(this.apiSessionOwners);
+    this.apiSessionOwnersLoading ??= (async () => {
+      const owners = new Map<string, ApiSessionOwner>();
+      for (const [id, record] of await this.sessionStore.listApiSessionRecords(this.agentConfig.id)) {
+        owners.set(id, { chatId: record.chatId, cwd: await this.recordCwd(id, record) });
+      }
+      this.apiSessionOwners = owners;
+      return owners;
+    })().finally(() => { this.apiSessionOwnersLoading = undefined; });
+    return this.apiSessionOwnersLoading;
+  }
+
+  /** The cwd recorded in the session index. */
+  private async recordCwd(_sessionId: string, record: Partial<ApiSessionRecord>): Promise<StoredCwd> {
+    return storedCwd(record);
+  }
+
+  /**
+   * Registers `sessionId` under `chatId`, or throws SESSION_ID_IN_USE when another chat holds it. Called before the
+   * id is added to a chat index, so a turn never runs a session through a chat it does not belong to.
+   */
+  private async claimApiSession(sessionId: string, chatId: string): Promise<void> {
+    const owners = await this.sessionOwners();
+    if (!owners.has(sessionId)) {
+      const cwd = await this.recordCwd(sessionId, {});
+      // A parallel claim from another chat may have landed during the await; the owner check below sees it.
+      if (!owners.has(sessionId)) owners.set(sessionId, { chatId, cwd });
+    }
+    if (owners.get(sessionId)?.chatId !== chatId) {
+      throw Object.assign(new Error(`Session ${sessionId} belongs to another chat`), { code: 'SESSION_ID_IN_USE' });
+    }
+  }
+
+  private async registerApiSession(chatId: string, sessionId: string, onStoreError?: (err: unknown) => void): Promise<void> {
+    await this.claimApiSession(sessionId, chatId);
+    const write = this.sessionStore.ensureApiSession(this.agentConfig.id, chatId, sessionId);
+    await (onStoreError ? write.catch(onStoreError) : write);
+  }
+
+  private async sessionCwdOf(sessionId: string): Promise<StoredCwd> {
+    return (await this.sessionOwners()).get(sessionId)?.cwd ?? { kind: 'none' };
+  }
+
+  private isApiSessionLive(sessionId: string, orchestratedLive = this.orchestration?.liveSessionIds() ?? new Set<string>()): boolean {
+    return orchestratedLive.has(sessionId) || this.pendingApiSessions.has(sessionId) || this.sessionSpawnLocks.has(sessionId);
+  }
+
+  /** Finishes the delete of every retired session whose work has ended: purge what it wrote, then free its id. */
+  private reapRetiredSessions(): void {
+    for (const [id, { chatId, bound }] of [...this.retiredSessions]) {
+      if (this.isApiSessionLive(id)) continue;
+      this.retiredSessions.delete(id);
+      this.purgeApiSessionHistory(chatId, id);
+      if (bound) this.removeApiSessionMedia(id);
+      this.apiSessionOwners?.delete(id);
+    }
+  }
+
+  private purgeApiSessionHistory(chatId: string, sessionId: string): void {
+    const mediaPaths = this.historyDb.clearSession(`api-${chatId}`, sessionId);
+    MediaStore.deleteMediaFiles(this.agentsBaseDir, this.agentConfig.id, mediaPaths);
+  }
+
+  /** Everything under media/api-<id>/ of a deleted folder-bound chat, not only the files its history named. */
+  private removeApiSessionMedia(sessionId: string): void {
+    try {
+      fs.rmSync(MediaStore.mediaDir(this.agentsBaseDir, this.agentConfig.id, `api-${sessionId}`), { recursive: true, force: true });
+    } catch (err) {
+      this.logger.warn('Failed to remove the media folder of a deleted folder-bound session', { sessionId, error: (err as Error).message });
+    }
+  }
+
+  /** Throws CWD_UNAVAILABLE when the session's folder no longer resolves; a no-op for unbound sessions. */
+  async assertApiCwdAvailable(sessionId: string): Promise<void> {
+    const cwd = await this.apiSessionCwd(sessionId);
+    if (cwd && !cwd.ok) throw cwdError(cwd.error);
+  }
+
+  private async apiSessionCwd(sessionId: string): Promise<Result<SessionCwd, CwdFailure> | undefined> {
+    const stored = await this.sessionCwdOf(sessionId);
+    if (stored.kind === 'none') return undefined;
+    const reason = this.cwdUnsupportedReason();
+    if (reason) return err({ code: 'unsupported_agent', reason });
+    const resolved = await this.cwdResolver.resolve(stored.path);
+    return resolved.ok ? resolved : err({ code: 'unavailable', reason: resolved.error });
+  }
+
+  /** A client-supplied cwd for a new session: `invalid` before anything else is looked at. */
+  async parseApiCwd(raw: unknown): Promise<Result<SessionCwd, CwdFailure | 'invalid'>> {
+    const parsed = await this.cwdResolver.parse(raw);
+    if (!parsed.ok && parsed.error === 'invalid') return err('invalid');
+    const reason = this.cwdUnsupportedReason();
+    if (reason) return err({ code: 'unsupported_agent', reason });
+    return parsed.ok ? parsed : err({ code: 'unavailable', reason: parsed.error as CwdUnavailableReason });
+  }
+
+  /** Orchestrated chats run their work in tasks, so the agent's default worker setup must be able to run in the folder. */
+  private cwdUnsupportedReason(): CwdUnsupportedReason | undefined {
+    if (this.agentConfig.type === 'app-agent') return 'container';
+    if (!this.apiChannelOrchestrated()) return undefined;
+    if (resolveOrchestrationConfig(this.agentConfig.orchestration).tasks.workspaceMode !== 'host') return 'workspace_mode';
+    if (resolveWorkerHarness(this.agentConfig, this.gatewayConfig, this.agentConfig.claude.model).harness === 'codex') return 'codex';
+    return undefined;
   }
 
   private async sendLinkedOrchestrationChannel(...[binding, text, _id, file]: Parameters<ChannelSender>): ReturnType<ChannelSender> {
@@ -516,6 +665,8 @@ export class AgentRunner extends EventEmitter {
             this.sessions.set(key, agentSession);
             return agentSession;
           },
+          sessionCwd: ({ source, agentSessionId }) => source === 'api' ? this.apiSessionCwd(agentSessionId) : Promise.resolve(undefined),
+          cwdResolver: this.cwdResolver,
           releaseAgentSession: async (sessionId, agentSession) => {
             await agentSession.stop();
             for (const [key, value] of this.sessions) if (value === agentSession) this.sessions.delete(key);
@@ -691,6 +842,9 @@ export class AgentRunner extends EventEmitter {
         const prior = orchestration.store.apiReceipt(scope, ingressKey, requestFingerprint);
         if (prior) return { text: '', attachments: [], inputId: prior.inputId };
       }
+      await this.claimApiSession(sessionId, chatId);
+      // Fail the turn here, with the code the web shows, instead of leaving a task_spawn error for the model to relay.
+      await this.assertApiCwdAvailable(sessionId);
       await this.sessionStore.ensureApiSession(this.agentConfig.id, chatId, sessionId);
       this.apiChatIds.set(sessionId, chatId);
       const media = opts.mediaFiles?.length ? await promoteUiUploads(this.agentsBaseDir, this.agentConfig.id, sessionId, opts.mediaFiles, this.logger, preparationDir) : [];
@@ -745,8 +899,10 @@ export class AgentRunner extends EventEmitter {
     }
   }
 
-  constructor(agentConfig: AgentConfig, gatewayConfig: GatewayConfig, logger?: Logger) {
+  /** `cwdResolver` comes from the files module through the composition root; without it no session binds a folder. */
+  constructor(agentConfig: AgentConfig, gatewayConfig: GatewayConfig, logger?: Logger, cwdResolver: CwdResolver = NO_CWD_RESOLVER) {
     super();
+    this.cwdResolver = cwdResolver;
     this.agentConfig = applyGatewayOrchestration(agentConfig,gatewayConfig);
     this.gatewayConfig = gatewayConfig;
     this.logger = logger ?? createLogger(agentConfig.id, gatewayConfig.gateway.logDir);
@@ -2348,9 +2504,10 @@ export class AgentRunner extends EventEmitter {
         }
       }
 
-      // Restart if model changed (including switching back to the agent default)
-      if (existing.modelOverride !== effectiveOverride) {
-        this.logger.info('Model changed, restarting session', { mapKey, oldModel: existing.modelOverride, newModel: effectiveOverride ?? agentDefaultModel });
+      // Restart if model changed (including switching back to the agent default),
+      // or if the bound folder moved: the respawn re-resolves it or fails.
+      if (existing.modelOverride !== effectiveOverride || await existing.cwdMoved()) {
+        this.logger.info('Model or working folder changed, restarting session', { mapKey, oldModel: existing.modelOverride, newModel: effectiveOverride ?? agentDefaultModel });
         const respawn = (async () => {
           await existing.stop();
           this.sessions.delete(mapKey);
@@ -2417,6 +2574,12 @@ export class AgentRunner extends EventEmitter {
 
     // Apply per-session model override (caller already normalized to undefined when == agent default)
     if (modelOverride) proc.modelOverride = modelOverride;
+    if (source === 'api' && (await this.sessionCwdOf(actualSessionId)).kind !== 'none') {
+      proc.cwdSource = {
+        resolve: async () => (await this.apiSessionCwd(actualSessionId)) ?? err({ code: 'unavailable', reason: 'internal' }),
+        note: (cwd) => this.cwdResolver.note(cwd),
+      };
+    }
 
     // Keep the searchable memory archive (planning-64) fresh for the memory_search
     // tool. Fire-and-forget, detached, OFF the event loop — never blocks the spawn.
@@ -3999,6 +4162,7 @@ export class AgentRunner extends EventEmitter {
     if (this.agentConfig.orchestration?.enabled || fs.existsSync(path.join(this.agentDir, 'orchestration.db'))) await this.getOrchestration();
     this.stopping = false;
     await this.sweepStaleSessionDirs();
+    await this.sessionOwners();
     await this.startCallbackServer();
     if (this.agentConfig.telegram?.botToken) {
       this.receiver = new TelegramReceiver(
@@ -4765,15 +4929,17 @@ export class AgentRunner extends EventEmitter {
       throw err;
     }
 
+    this.pendingApiSessions.add(sessionId); // reserved before the first await so a folder delete sees the turn while it is still preparing
+    const { session, imageParams, videoParams, imagePaths } = await (async () => {
     // Register session in api-{chatId} index.json on first use (store adds channel prefix internally)
-    await this.sessionStore.ensureApiSession(this.agentConfig.id, chatId, sessionId).catch((err: unknown) => {
+    await this.registerApiSession(chatId, sessionId, (err: unknown) => {
       this.logger.warn('Failed to register API session in index', { agentId: this.agentConfig.id, chatId, sessionId, error: (err as Error).message });
     });
 
     // Use model from request body if provided, otherwise use agent default.
     // A spawn keys its isolated memory by the chat (#601).
-    const session = await this.getOrSpawnSession(sessionId, 'api', undefined, opts.model, chatId);
     this.apiChatIds.set(sessionId, chatId);
+    const session = await this.getOrSpawnSession(sessionId, 'api', undefined, opts.model, chatId);
 
     // Promote UI-uploaded files from staging to permanent per-session storage
     const finalMediaFiles = opts.mediaFiles?.length
@@ -4817,7 +4983,8 @@ export class AgentRunner extends EventEmitter {
       });
     }
 
-    this.pendingApiSessions.add(sessionId);
+    return { session, imageParams, videoParams, imagePaths };
+    })().catch((error: unknown) => { this.pendingApiSessions.delete(sessionId); throw error; });
     // A previous turn that died (hard timeout, crash) may have left attachments
     // buffered under this session — they belong to THAT turn; never let them
     // ride along on this one (#75).
@@ -4958,12 +5125,15 @@ export class AgentRunner extends EventEmitter {
         fail(Object.assign(new Error('Session process exited unexpectedly before responding.'), { code: 'PROCESS_EXITED' }), buffer.join(''));
       };
 
+      const onStartupError = (error: Error) => fail(error, buffer.join(''));
+
       const cleanup = () => {
         clearTimeout(globalTimer);
         if (hardCapTimer) clearTimeout(hardCapTimer);
         if (quietTimer) clearTimeout(quietTimer);
         session.off('output', onOutput);
         session.off('exit', onExit);
+        session.off('startup-error', onStartupError);
         this.pendingApiSessions.delete(sessionId);
       };
 
@@ -5042,6 +5212,7 @@ export class AgentRunner extends EventEmitter {
 
       session.on('output', onOutput);
       session.on('exit', onExit);
+    session.on('startup-error', onStartupError);
       session.setProcessing(true);
       session.sendMessage(channelXml);
       // Do NOT call resetQuiet() here — the quiet timer should only start
@@ -5095,15 +5266,17 @@ export class AgentRunner extends EventEmitter {
       throw err;
     }
 
+    this.pendingApiSessions.add(sessionId); // reserved before the first await so a folder delete sees the turn while it is still preparing
+    const { session, imageParams: imageParamsStream, videoParams: videoParamsStream, imagePaths: imagePathsStream } = await (async () => {
     // Register session in api-{chatId} index.json on first use (store adds channel prefix internally)
-    await this.sessionStore.ensureApiSession(this.agentConfig.id, chatId, sessionId).catch((err: unknown) => {
+    await this.registerApiSession(chatId, sessionId, (err: unknown) => {
       this.logger.warn('Failed to register API session in index', { agentId: this.agentConfig.id, chatId, sessionId, error: (err as Error).message });
     });
 
     // Use model from request body if provided, otherwise use agent default.
     // A spawn keys its isolated memory by the chat (#601).
-    const session = await this.getOrSpawnSession(sessionId, 'api', undefined, opts.model, chatId);
     this.apiChatIds.set(sessionId, chatId);
+    const session = await this.getOrSpawnSession(sessionId, 'api', undefined, opts.model, chatId);
 
     // Promote UI-uploaded files from staging to permanent per-session storage
     const finalMediaFilesStream = opts.mediaFiles?.length
@@ -5142,7 +5315,8 @@ export class AgentRunner extends EventEmitter {
       });
     }
 
-    this.pendingApiSessions.add(sessionId);
+    return { session, imageParams: imageParamsStream, videoParams: videoParamsStream, imagePaths: imagePathsStream };
+    })().catch((error: unknown) => { this.pendingApiSessions.delete(sessionId); throw error; });
     // A previous turn that died (hard timeout, crash) may have left attachments
     // buffered under this session — they belong to THAT turn; never let them
     // ride along on this one (#75).
@@ -5242,11 +5416,14 @@ export class AgentRunner extends EventEmitter {
       fail(Object.assign(new Error('Session process exited unexpectedly before responding.'), { code: 'PROCESS_EXITED' }), buffer.join(''));
     };
 
+    const onStartupError = (error: Error) => fail(error, buffer.join(''));
+
     const cleanup = () => {
       clearTimeout(globalTimer);
       if (hardCapTimer) clearTimeout(hardCapTimer);
       session.off('output', onOutput);
       session.off('exit', onExit);
+      session.off('startup-error', onStartupError);
       this.pendingApiSessions.delete(sessionId);
     };
 
@@ -5371,6 +5548,7 @@ export class AgentRunner extends EventEmitter {
 
     session.on('output', onOutput);
     session.on('exit', onExit);
+    session.on('startup-error', onStartupError);
 
     // Image paths only work when allowTools:true — Claude needs the Read tool to access them
     const allowToolsStream = opts.allowTools ?? false;
@@ -5432,6 +5610,47 @@ export class AgentRunner extends EventEmitter {
    */
   hasActiveApiSession(sessionId: string): boolean {
     return this.pendingApiSessions.has(sessionId);
+  }
+
+  /** Loads what {@link workIn} reads, so the check itself can run with no await, in the same step as what it guards. */
+  async prepareWorkCheck(): Promise<void> {
+    await this.sessionOwners();
+    this.reapRetiredSessions();
+  }
+
+  /**
+   * What works in the real folder `dir`, in a folder inside it, or in one holding it, through any name or symlink
+   * alias: `turn` for a live or queued turn, `spawn` for a process still spawning, `task` for an unfinished task and
+   * `session` for an idle session process still running there. Keyed on live work and on the folder, not on the
+   * session record, so deleting a session mid-turn does not unlock the folder. A live session whose binding cannot be
+   * read counts everywhere. Synchronous; call {@link prepareWorkCheck} first.
+   */
+  workIn(dir: string): Set<WorkReason> {
+    const reasons = new Set<WorkReason>();
+    const owners = this.apiSessionOwners ?? new Map<string, ApiSessionOwner>();
+    const touches = (stored: StoredCwd | undefined): boolean => {
+      if (!stored || stored.kind === 'none') return false;
+      const real = realpathOrNull(stored.path);
+      return real !== null && (pathWithin(real, dir) || pathWithin(dir, real));
+    };
+    const live = this.orchestration?.liveSessionIds() ?? new Set<string>();
+    for (const sessionId of new Set([...this.pendingApiSessions, ...this.sessionSpawnLocks.keys(), ...live])) {
+      if (touches(owners.get(sessionId)?.cwd)) reasons.add(this.sessionSpawnLocks.has(sessionId) ? 'spawn' : 'turn');
+    }
+    for (const task of this.orchestration?.activeTaskCwds() ?? []) {
+      if (touches(storedCwd(task))) reasons.add('task');
+    }
+    for (const proc of this.sessions.values()) {
+      const cwd = proc.cwdDir;
+      if (cwd && (pathWithin(cwd, dir) || pathWithin(dir, cwd))) reasons.add('session');
+    }
+    return reasons;
+  }
+
+  /** A turn, a spawn or a task works in or around the real folder `dir`. An idle session process does not count. */
+  async hasActiveWorkIn(dir: string): Promise<boolean> {
+    await this.prepareWorkCheck();
+    return [...this.workIn(dir)].some((reason) => reason !== 'session');
   }
 
   /**
@@ -5571,6 +5790,20 @@ export class AgentRunner extends EventEmitter {
     return this.historyDb;
   }
 
+  /**
+   * How every session response reports its folder: `cwd` as stored, whether its own settings load, whether it still
+   * resolves, and whether a turn, a spawn or an orchestrated task is live on it.
+   */
+  async sessionCwdView(sessionId: string): Promise<SessionCwdView> {
+    this.reapRetiredSessions();
+    const active = this.isApiSessionLive(sessionId);
+    const stored = await this.sessionCwdOf(sessionId);
+    if (stored.kind === 'none') return { cwd: null, trusted: false, cwdState: null, active };
+    const resolved = await this.cwdResolver.resolve(stored.path);
+    if (resolved.ok) return { cwd: stored.path, trusted: resolved.value.trusted, cwdState: 'available', active };
+    return { cwd: stored.path, trusted: false, cwdState: resolved.error === 'not_found' ? 'missing' : 'unavailable', active };
+  }
+
   getAllSessionMeta(): Promise<Map<string, { name: string; imageConfig?: ImageParams; videoConfig?: VideoParams; model?: string }>> {
     return this.sessionStore.getAllSessionMeta(this.agentConfig.id);
   }
@@ -5613,7 +5846,7 @@ export class AgentRunner extends EventEmitter {
     }
 
     // Register session in the api-{chatId} index on first use (same as sendApiMessageStream)
-    await this.sessionStore.ensureApiSession(agentId, storeChatId, sessionId).catch((err: unknown) => {
+    await this.registerApiSession(storeChatId, sessionId, (err: unknown) => {
       this.logger.warn('Failed to register API session in index for command', { agentId, chatId, sessionId, error: (err as Error).message });
     });
 
@@ -5914,6 +6147,7 @@ export class AgentRunner extends EventEmitter {
   }
 
   async listApiSessions(chatId: string): Promise<import('../types').SessionIndex> {
+    this.reapRetiredSessions();
     return this.sessionStore.listSessions(this.agentConfig.id, chatId, 'api');
   }
 
@@ -5926,12 +6160,15 @@ export class AgentRunner extends EventEmitter {
     return this.sessionStore.apiSessionExists(this.agentConfig.id, chatId, sessionId);
   }
 
-  async createApiSession(chatId: string, prompt?: string, name?: string): Promise<import('../types').SessionMeta> {
+  /** `cwd` comes from {@link parseApiCwd}; its path is stored on the session and resolved again at every turn. */
+  async createApiSession(chatId: string, prompt?: string, name?: string, cwd?: SessionCwd): Promise<import('../types').SessionMeta> {
     const sessionName = name ?? (prompt
       ? (prompt.length > 60 ? `${prompt.slice(0, 60)}...` : prompt)
       : undefined);
 
-    const meta = await this.sessionStore.createTelegramSession(this.agentConfig.id, chatId, sessionName, 'api');
+    const owners = await this.sessionOwners();
+    const meta = await this.sessionStore.createTelegramSession(this.agentConfig.id, chatId, sessionName, 'api', cwd?.path);
+    owners.set(meta.id, { chatId, cwd: cwd ? { kind: 'path', path: cwd.path } : { kind: 'none' } });
 
     if (!name && prompt) {
       this.generateSessionNameInBackground(chatId, meta.id, prompt);
@@ -5970,6 +6207,7 @@ export class AgentRunner extends EventEmitter {
     return {
       sessionId: meta.id,
       sessionName: meta.name,
+      ...await this.sessionCwdView(meta.id),
       messageCount: meta.messageCount,
       archivedCount: meta.archivedCount ?? 0,
       ...context,
@@ -5980,7 +6218,7 @@ export class AgentRunner extends EventEmitter {
   async updateApiSession(chatId: string, sessionId: string, updates: { sessionName?: string }): Promise<{ sessionId: string; sessionName?: string }> {
     if (updates.sessionName) {
       // Ensure session exists in the file index (may be missing for older sessions stored only in SQLite)
-      await this.sessionStore.ensureApiSession(this.agentConfig.id, chatId, sessionId).catch((err: unknown) => {
+      await this.registerApiSession(chatId, sessionId, (err: unknown) => {
         this.logger.warn('Failed to register API session in index', { agentId: this.agentConfig.id, chatId, sessionId, error: (err as Error).message });
       });
       await this.sessionStore.updateSessionMeta(this.agentConfig.id, chatId, sessionId, { name: updates.sessionName }, 'api');
@@ -5989,14 +6227,23 @@ export class AgentRunner extends EventEmitter {
   }
 
   async deleteApiSession(chatId: string, sessionId: string): Promise<void> {
+    let inChat = true;
+    const wasBound = (await this.sessionCwdOf(sessionId)).kind !== 'none';
     await this.sessionStore.deleteTelegramSession(this.agentConfig.id, chatId, sessionId, 'api').catch((err: unknown) => {
       // Legacy sessions (stored only in SQLite, no file index entry) are treated as already deleted
-      if (err instanceof SessionNotInIndexError) return;
+      if (err instanceof SessionNotInIndexError) { inChat = false; return; }
       throw err;
     });
-    // Purge from SQLite so the session no longer appears in listSessions()
-    const mediaPaths = this.historyDb.clearSession(`api-${chatId}`, sessionId);
-    MediaStore.deleteMediaFiles(this.agentsBaseDir, this.agentConfig.id, mediaPaths);
+    this.purgeApiSessionHistory(chatId, sessionId);
+    // A session this chat does not hold keeps its owner and folder, since its transcript is still where it was.
+    if (!inChat) return;
+    // Live work keeps the owner entry, which the busy check reads, until it ends.
+    if (this.isApiSessionLive(sessionId)) {
+      this.retiredSessions.set(sessionId, { chatId, bound: wasBound });
+      return;
+    }
+    if (wasBound) this.removeApiSessionMedia(sessionId);
+    this.apiSessionOwners?.delete(sessionId);
   }
 
   /** The route has already authorized this API principal for the Agent. Preserve

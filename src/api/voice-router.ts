@@ -8,6 +8,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { AgentConfig, ApiKey } from '../types';
 import { AgentRunner } from '../agent/runner';
 import { createApiAuthMiddleware, canAccessAgent } from './auth';
+import { requireValidSessionId } from './router';
 import { apiPrincipal } from '../orchestration/identity';
 import { resolveOrchestrationConfig } from '../orchestration/config';
 import { sttProvider, ttsProvider } from '../voice/providers/registry';
@@ -38,6 +39,7 @@ export class VoiceApi {
   private readonly pruner: ReturnType<typeof setInterval>;
   constructor(private readonly agents: Map<string, AgentRunner>, private readonly configs: Map<string, AgentConfig>, keys: ApiKey[]) {
     const auth = createApiAuthMiddleware(keys);
+    this.router.param('sessionId', requireValidSessionId);
     this.router.use('/v1/agents/:agentId', (req, res, next) => {
       if (!req.path.includes('/voice-sessions')) { next(); return; }
       // Direct browser clients authenticate with a non-ambient API key. Never

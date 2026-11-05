@@ -15,6 +15,7 @@ const gateway: Record<string, ReloadMode> = {
   'gateway.sessionCompaction': 'component', 'gateway.knowledge': 'component',
   'gateway.knowledge.shared.root': 'restart', 'gateway.knowledge.shared.project': 'restart',
   'gateway.knowledge.archive.tokenizer': 'restart',
+  'gateway.files.root': 'restart', 'gateway.files.trusted': 'restart',
   'gateway.appHousekeeping': 'component', 'gateway.appBackup': 'component', 'gateway.appRestore': 'component',
 };
 const agent: Record<string, ReloadMode> = {

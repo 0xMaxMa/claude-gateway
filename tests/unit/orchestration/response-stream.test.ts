@@ -1,4 +1,5 @@
 import { AgentRunner } from '../../../src/agent/runner';
+import { NO_CWD_RESOLVER } from '../../../src/session/cwd';
 import { DecisionService } from '../../../src/orchestration/decisions';
 import { EventEmitter } from 'events';
 import { mkdtempSync,mkdirSync,writeFileSync,rmSync } from 'fs';
@@ -32,7 +33,7 @@ test.each([false,true])('real runtime publishes incremental response text before
   await started;
   const facade = Object.assign(Object.create(AgentRunner.prototype), {
     agentConfig: { ...a, orchestration: { enabled: true } },
-    sessionStore: sessions, agentsBaseDir: root, apiChatIds: new Map(),
+    sessionStore: sessions, agentsBaseDir: root, apiChatIds: new Map(), cwdResolver: NO_CWD_RESOLVER,
     pendingApiSessions: new Set([sid]), logger: { warn: jest.fn() },
     getOrchestration: async () => runtime,
   }) as AgentRunner;

@@ -73,3 +73,6 @@ export function canWriteAgent(apiKey: ApiKey, agentId: string): boolean {
 export function isAdmin(apiKey: ApiKey): boolean {
   return apiKey.admin === true;
 }
+
+/** The 403 body for a files route that needs an admin key. */
+export const ADMIN_KEY_REQUIRED = { error: 'An admin API key is required', code: 'forbidden_key' } as const;

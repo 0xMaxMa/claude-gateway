@@ -76,6 +76,10 @@ class ThinMockRunner extends EventEmitter {
   }
 
   hasActiveApiSession(_sessionId: string): boolean { return false; }
+
+  sessionCwdView(_sessionId: string): Promise<{ cwd: string | null; trusted: boolean; cwdState: null; active: boolean }> {
+    return Promise.resolve({ cwd: null, trusted: false, cwdState: null, active: false });
+  }
 }
 
 const AGENT_ID = 'alfred';

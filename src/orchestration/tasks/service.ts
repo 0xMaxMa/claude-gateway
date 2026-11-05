@@ -6,7 +6,11 @@ import {ANSWERED_FROM_SCREEN,computerActionText,computerOutcomeText,computerProg
 import {browserOutcomeText} from '../../automation/browser-outcome';
 import {textCommand} from '../../automation/direct-command';
 import { parentVerifiableBrowserResult, parkedVerifiableBrowserResult } from '../../jev/browser-contract';
+import { promises as fsp } from 'fs';
 import { isAbsolute } from 'path';
+import { cwdError, type CwdFailure, type CwdResolver, type SessionCwd } from '../../session/cwd';
+import { realpathWithin } from '../../utils/paths';
+import type { Result } from '../../utils/result';
 import { parseWorkflow, advanceWorkflow } from '../workflow';
 import { advanceTiming } from './timing';
 import { taskDirective } from './task-directive';
@@ -19,7 +23,7 @@ import { createHash, randomUUID } from 'crypto';
 import { OrchestrationStore, LISTED_TASK_SQL, boundedText, payloadHash } from '../store';
 import { resolveOrchestrationConfig, OrchestrationConfig } from '../config';
 import { MAX_INTAKE_INPUTS } from '../conversation-intake';
-import { CommandContext, OrchestrationError, TaskSnapshot, TaskRevision, TaskAttempt, TaskResult, WorkerOutcome, TERMINAL_TASK_STATES, ChangeMode, PublicTaskSnapshot, publicTask } from '../types';
+import { CommandContext, ConversationScope, OrchestrationError, TaskSnapshot, TaskRevision, TaskAttempt, TaskResult, WorkerOutcome, TERMINAL_TASK_STATES, ChangeMode, PublicTaskSnapshot, publicTask } from '../types';
 import type { Effort } from '../../agent/model-registry';
 import { SUBAGENT_MAX_DEPTH } from '../subagent-tool-schemas';
 import { markRestartRecovery, restartResumable, resumeAfterRestart } from '../restart-resume';
@@ -46,7 +50,14 @@ export function mergeContextRefs(supplied: unknown, inputRefs: string[]): unknow
   return [...new Set([...assertAgentContextRefs(supplied), ...inputRefs])];
 }
 
-export interface SpawnTask { browserFields?:unknown; runAsGoal?:boolean; computerInputs?:TaskRevision["computerInputs"]; gatewayTarget?: import("../types").GatewayTaskTarget; workingDirectory?: string; title: string; instructions: string; targetProfile: string; skill?: import('../skills').TaskSkill; contextRefs?: string[]; continueTaskId?: string; continuationPolicy?: 'after_success' | 'after_terminal';
+/** Which folder, if any, a conversation's session is bound to. Only the gateway session store knows. */
+export type SessionCwdLookup = (scope: Pick<ConversationScope, 'source' | 'agentSessionId' | 'chatId'>) => Promise<Result<SessionCwd, CwdFailure> | undefined>;
+/** A folder-bound chat's task: `cwd` is the session's stored folder, `dir` the real folder the task runs in, inside it. */
+export interface CwdPin { cwd: string; dir: string }
+/** How tasks learn their chat's folder, injected by the composition root through the runner. */
+export interface TaskCwd { forSession: SessionCwdLookup; resolver: CwdResolver }
+
+export interface SpawnTask { cwd?: CwdPin; browserFields?:unknown; runAsGoal?:boolean; computerInputs?:TaskRevision["computerInputs"]; gatewayTarget?: import("../types").GatewayTaskTarget; workingDirectory?: string; title: string; instructions: string; targetProfile: string; skill?: import('../skills').TaskSkill; contextRefs?: string[]; continueTaskId?: string; continuationPolicy?: 'after_success' | 'after_terminal';
   /** Model id already resolved against the registry by the caller; `requestedModel` is what was asked for. */
   model?: string; requestedModel?: string; effort?: import('../../agent/model-registry').Effort; }
 
@@ -134,8 +145,35 @@ function recordAction(task: TaskSnapshot, revision: number, command: string, out
 export class TaskService {
   private config;
   readonly pool: WorkerPool;
-  constructor(readonly store: OrchestrationStore, config?: OrchestrationConfig, private readonly defaultProjectRoot = '') { this.config = resolveOrchestrationConfig(config); this.pool = new WorkerPool(store); }
+  constructor(readonly store: OrchestrationStore, config?: OrchestrationConfig, private readonly defaultProjectRoot = '', readonly cwd?: TaskCwd,
+    private readonly workerHarness?: (model?: string) => 'claude' | 'codex') { this.config = resolveOrchestrationConfig(config); this.pool = new WorkerPool(store); }
   configure(config?: OrchestrationConfig): void { this.config = resolveOrchestrationConfig(config); }
+
+  /** A folder-bound chat's tasks run in its folder. Resolved before the synchronous spawn transaction. */
+  async cwdPin(context: CommandContext, workingDirectory?: unknown, continueTaskId?: unknown): Promise<CwdPin | undefined> {
+    if (this.store.get('SELECT action_id FROM task_commands WHERE action_id=?', context.actionId)) return undefined;
+    const conversation = this.store.get('SELECT source,agent_session_id,chat_id FROM conversations WHERE id=?', context.conversationId);
+    const cwd = conversation && await this.cwd?.forSession({ source: String(conversation.source) as ConversationScope['source'], agentSessionId: String(conversation.agent_session_id), chatId: String(conversation.chat_id) });
+    if (!cwd) return undefined;
+    if (this.config.tasks.workspaceMode !== 'host') throw new OrchestrationError('CWD_UNSUPPORTED_AGENT', 'No task was queued: folder-bound chats need host workspace mode.');
+    if (this.workerHarness?.(context.model) === 'codex') throw new OrchestrationError('CWD_UNSUPPORTED_AGENT', 'No task was queued: folder-bound tasks cannot run on the Codex worker harness.');
+    if (!cwd.ok) {
+      const code = (cwdError(cwd.error) as Error & { code: string }).code;
+      throw new OrchestrationError(code, 'No task was queued: this chat\'s working folder is no longer available.');
+    }
+    if (workingDirectory === undefined) return { cwd: cwd.value.path, dir: await this.priorCwdDir(context, cwd.value, continueTaskId) ?? cwd.value.dir };
+    const dir = typeof workingDirectory === 'string' ? await realpathWithin(cwd.value.dir, workingDirectory) : undefined;
+    if (!dir || !(await fsp.stat(dir).catch(() => null))?.isDirectory()) throw new OrchestrationError('WORKING_DIRECTORY_OUTSIDE_CWD', `No task was queued: working_directory must be an existing folder inside this chat's working folder ${cwd.value.dir}, absolute or relative to it.`);
+    return { cwd: cwd.value.path, dir };
+  }
+  /** A follow-up stays in the folder its prior task ran in, while that folder is still inside the chat's folder. */
+  private async priorCwdDir(context: CommandContext, cwd: SessionCwd, continueTaskId: unknown): Promise<string | undefined> {
+    const prior = typeof continueTaskId === 'string' ? this.store.task(continueTaskId) : undefined;
+    const dir = prior?.conversationId === context.conversationId && this.taskCwd(prior) === cwd.path ? prior.resourceProfile?.projectRoot : undefined;
+    return dir ? realpathWithin(cwd.dir, dir) : undefined;
+  }
+  /** The task's chat folder. */
+  taskCwd(task: Pick<TaskSnapshot, 'cwd'>): string | undefined { return task.cwd; }
 
   /** Admission feedback reaches the agent before a doomed task is committed. */
   async validateSpawnProfile(context: CommandContext, targetProfile: string): Promise<void> {
@@ -285,7 +323,8 @@ export class TaskService {
   }
   spawn(context: CommandContext, command: SpawnTask): TaskSnapshot {
     if(command.computerInputs!==undefined){command.computerInputs=ComputerInputs.parse(command.computerInputs);if(command.gatewayTarget?.adapter!=='computer')throw new OrchestrationError('INVALID_INPUT');}
-    if (command.workingDirectory !== undefined) {
+    // A cwd pin already validated working_directory and is the root the task runs in; the raw value is only payload.
+    if (command.workingDirectory !== undefined && !command.cwd) {
       if (this.config.tasks.workspaceMode !== 'host') throw new OrchestrationError('WORKING_DIRECTORY_HOST_ONLY');
       if (typeof command.workingDirectory !== 'string' || !isAbsolute(command.workingDirectory) || /[\r\n\0]/.test(command.workingDirectory) || Buffer.byteLength(command.workingDirectory) > 4096) throw new OrchestrationError('INVALID_WORKING_DIRECTORY');
     }
@@ -300,7 +339,9 @@ export class TaskService {
     if (!['default-worker', 'media-worker', 'skill-worker', 'gateway-managed'].includes(command.targetProfile)) throw new OrchestrationError('UNKNOWN_WORKER_PROFILE');
     if ((command.targetProfile === 'gateway-managed') !== Boolean(command.gatewayTarget)) throw new OrchestrationError('INVALID_GATEWAY_TARGET');
     if (command.gatewayTarget && (command.workingDirectory || command.skill || command.contextRefs?.length || command.model || command.effort)) throw new OrchestrationError('INVALID_GATEWAY_TARGET');
-    return this.command(context, 'spawn', command, true, () => {
+    // The pin is the gateway's, not the caller's: a retry skips resolving it and must still match.
+    const { cwd: _pin, ...payload } = command;
+    return this.command(context, 'spawn', payload, true, () => {
       const conversation = this.store.get('SELECT * FROM conversations WHERE id=?', context.conversationId)!;
       let replaced:TaskSnapshot|undefined;
       if(['browser','computer'].includes(command.gatewayTarget?.adapter ?? '')) {
@@ -358,8 +399,9 @@ export class TaskService {
       else if (context.model && !command.gatewayTarget) task.model = context.model;
       const effort = command.effort ?? (command.model ? undefined : prior?.effort);
       if (effort) task.effort = effort;
-      const projectRoot = command.workingDirectory || (this.config.tasks.workspaceMode === 'host' && prior?.resourceProfile?.mode === 'host' ? prior.resourceProfile.projectRoot : undefined) || this.config.tasks.projectRoot || this.defaultProjectRoot;
+      const projectRoot = command.cwd?.dir || command.workingDirectory || (this.config.tasks.workspaceMode === 'host' && prior?.resourceProfile?.mode === 'host' ? prior.resourceProfile.projectRoot : undefined) || this.config.tasks.projectRoot || this.defaultProjectRoot;
       if (projectRoot && !command.gatewayTarget) task.resourceProfile = { projectRoot, mode: this.config.tasks.workspaceMode };
+      if (command.cwd && !command.gatewayTarget) task.cwd = command.cwd.cwd;
       if (command.runAsGoal) task.runAsGoal = { revision: 1 };
       this.store.run('INSERT INTO tasks VALUES(?,?,?,?,?,?,?,?,?)', task.taskId, task.conversationId, task.state, 1, 1, null, JSON.stringify(task), now, now);
       const revision: TaskRevision = { requestBrowserConsent:command.gatewayTarget?.adapter==='browser', taskId: task.taskId, revision: 1, instructions: command.instructions, computerInputs:command.computerInputs,

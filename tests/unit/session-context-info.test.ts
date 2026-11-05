@@ -76,6 +76,7 @@ test('session displays the selected next-turn model without replacing the observ
   sessionStore:{listSessions:async()=>({activeSessionId:'s',sessions:[{id:'s',name:'Session',model:'old-observed-model'}]})},
   channelFor:()=> 'telegram',writeAutoForward:send,
   sessionContextInfo:async()=>({text:'180K / 200K · 90%',contextModel:'old-observed-model',contextTokens:180000,contextWindow:200000,contextUsedPct:90}),
+  sessionCwdView:async()=>({cwd:null,trusted:false,cwdState:null,active:false}),
  });
  await runner.setModel('claude-sonnet-5[1m]');
  await runner.handleCommandSessionInfo('a','c');

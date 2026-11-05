@@ -4,6 +4,7 @@ import { readFile } from 'fs/promises';
 import type { AgentRunner } from '../agent/runner';
 import type { GatewayConfig, ApiKey } from '../types';
 import { createApiAuthMiddleware, isAdmin, canAccessAgent } from './auth';
+import { requireValidSessionId } from './router';
 import { apiPrincipal } from '../orchestration/identity';
 import { withConfigWriteLock, writeConfigAtomic } from '../config/config-write-lock';
 import { inspectBrowser, resolveBrowserConnection, validateBrowserIntegration } from '../jev/browser-connector';
@@ -17,6 +18,7 @@ import type { BrowserConnectorConfig, BrowserIntegrationConfig } from '../jev/br
 /** Binding administration uses existing admin auth. Session identity is derived, never caller supplied. */
 export function createBrowserBindingsRouter(config:GatewayConfig,runners:Map<string,AgentRunner>,configPath?:string):Router {
   const router=Router();
+  router.param('sessionId',requireValidSessionId);
   const base='/v1/agents/:agentId/sessions/:sessionId';
   router.use(base+'/browser-bindings', (req,res,next)=>createApiAuthMiddleware(config.gateway.api?.keys??[])(req,res,next));
   const currentKey=(req:Request)=>{
