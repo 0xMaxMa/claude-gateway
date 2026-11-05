@@ -15,6 +15,14 @@ describe('computer progress card', () => {
     expect(computerProgressText(report({phase:'terminal',status:'succeeded',reason:'GOAL_REACHED',steps:4}))).toBe('Done after 4 actions.');
   });
 
+  // #651: live progress reports keep status 'running'; the outcome rides on the terminal trace event (gateway-tasks/computer.ts).
+  test('a live terminal report names its outcome from the terminal trace event', () => {
+    const terminal=(status:string,reason:string,steps:number)=>report({phase:'terminal',reason,steps,trace:[{sequence:1,round:1,at:1,revision:1,steps,evaluations:0,phase:'acted'},{sequence:2,round:1,at:2,revision:1,steps,evaluations:0,phase:'terminal',status,reason}]});
+    expect(computerProgressText(terminal('succeeded','GOAL_REACHED',5))).toBe('Done after 5 actions.');
+    expect(computerProgressText(terminal('blocked','APPLICATION_PROTECTED',0))).toBe('Stopped after 0 actions. The screen was hidden because a protected app such as GetPod was in front.');
+    expect(computerProgressText(report({phase:'terminal',reason:'terminal',steps:1}))).toBe('Stopped after 1 action. It could not continue.');
+  });
+
   test('raw codes map to sentences; an unlisted code is never shown raw', () => {
     expect(computerReasonText('FOCUS_REQUIRED')).toBe("The app didn't accept typing: no text field had keyboard focus.");
     expect(computerReasonText('COMPUTER_ACCESS_DENIED')).toBe('Access to the computer was denied.');

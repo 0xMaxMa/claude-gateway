@@ -103,7 +103,10 @@ const plural=(n:number,word:string)=>`${n} ${word}${n===1?'':'s'}`;
 export function computerProgressText(report:ComputerTaskReport):string{
  const actions=plural(report.steps,'action');
  if(report.phase!=='terminal')return `Computer Use · ${PHASE_LABELS[report.phase??'']??'Working'} · ${actions} so far`;
- if(report.status==='succeeded')return `Done after ${actions}.`;
+ // Live progress reports keep status 'running'; their outcome rides on the terminal trace event.
+ const last=report.trace?.at(-1);
+ const status=report.status!=='running'?report.status:last?.phase==='terminal'?last.status:undefined;
+ if(status==='succeeded')return `Done after ${actions}.`;
  const paused=pausedText(report);if(paused)return paused;
  const stop=computerReasonText(report.reason)!;
  // The last action the computer refused names the cause when the stop itself is generic (the model gave up after it).
