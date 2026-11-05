@@ -214,6 +214,7 @@ function makeMcpReader(proc: ChildProcess) {
 function startMockCallbackServer(port: number) {
   const commands: Array<Record<string, unknown>> = []
   const voice = new Map<string, string>()
+  let stallGetModels = false
   const server = http.createServer((req, res) => {
     let raw = ''
     req.on('data', c => { raw += c })
@@ -221,6 +222,7 @@ function startMockCallbackServer(port: number) {
       let body: Record<string, unknown> = {}
       try { body = raw ? JSON.parse(raw) : {} } catch {}
       commands.push(body)
+      if (stallGetModels && body['command'] === 'get_models') return
       res.writeHead(200, { 'Content-Type': 'application/json' })
       if (body['command'] === 'telegram_voice') {
         const mode = (body['payload'] as any)?.mode, chat = String(body['chat_id'])
@@ -251,7 +253,11 @@ function startMockCallbackServer(port: number) {
     })
   })
   server.listen(port, '127.0.0.1')
-  return { commands, close: () => new Promise<void>(r => server.close(() => r())) }
+  return {
+    commands,
+    setStallGetModels(value: boolean) { stallGetModels = value },
+    close: () => new Promise<void>(r => server.close(() => r())),
+  }
 }
 
 // ── test suite ──────────────────────────────────────────────────────────────
@@ -707,4 +713,37 @@ describe.each([{orchestration:true,interactive:false},{orchestration:false,inter
     expect(mock.calls.find(c => c.method === 'deleteMessage' && c.ts >= unauthorizedAt)).toBeUndefined()
     expect(mockCb.commands.slice(callbackStart).find(c => c['command'] === 'set_model')).toBeUndefined()
   }, 30000)
+
+  test('stalled /models callback releases the receiver for the next command', async () => {
+    if (!orchestration) return
+    const from = { id: Number(USER_ID), is_bot: false, first_name: 'Tester' }
+    const chat = { id: Number(USER_ID), type: 'private' }
+    const at = Date.now()
+    const callbackStart = mockCb.commands.length
+    mockCb.setStallGetModels(true)
+    try {
+      mock.queueUpdate({ message: {
+        message_id: 990, from, chat, date: Math.floor(at / 1000), text: '/models',
+        entities: [{ type: 'bot_command', offset: 0, length: 7 }],
+      } })
+      const callbackDeadline = Date.now() + 5000
+      while (!mockCb.commands.slice(callbackStart).some(c => c['command'] === 'get_models') && Date.now() < callbackDeadline) await sleep(25)
+      expect(mockCb.commands.slice(callbackStart).some(c => c['command'] === 'get_models')).toBe(true)
+      mock.queueUpdate({ message: {
+        message_id: 991, from, chat, date: Math.floor(Date.now() / 1000), text: '/help',
+        entities: [{ type: 'bot_command', offset: 0, length: 5 }],
+      } })
+      const replyDeadline = Date.now() + 15_000
+      while (Date.now() < replyDeadline) {
+        const replies = mock.calls.filter(c => c.method === 'sendMessage' && c.ts >= at).map(c => String(c.body.text))
+        if (replies.some(text => text === 'Failed to get model info.') && replies.some(text => text.includes('/models'))) break
+        await sleep(25)
+      }
+      const replies = mock.calls.filter(c => c.method === 'sendMessage' && c.ts >= at).map(c => String(c.body.text))
+      expect(replies).toContain('Failed to get model info.')
+      expect(replies.some(text => text.includes('/models'))).toBe(true)
+    } finally {
+      mockCb.setStallGetModels(false)
+    }
+  }, 25_000)
 })
