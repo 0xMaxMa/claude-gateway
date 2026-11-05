@@ -77,14 +77,19 @@ export function computerVision(gateway: GatewayConfig, agent: AgentConfig, membe
     if (use === 'fallback') return configured === 'ax' && gateway.gateway.computerUse?.visionFallback === true ? 'vision' : undefined;
     return configured === 'ax' ? undefined : configured;
   };
+  const effectiveBackend = () => {
+    const backend = computerDecisions(gateway, agent);
+    if (backend !== 'jev') return backend;
+    return gateway.gateway.jev?.images?.enabled === true ? 'jev-images' : 'jev-model';
+  };
   return (use = 'primary') => {
     const mode = selected(use);
-    const backend = computerDecisions(gateway, agent);
+    const backend = effectiveBackend();
     if (mode === undefined || backend === undefined) return undefined;
-    if (backend === 'jev' && gateway.gateway.jev?.images?.enabled === true) return { mode, decide: (task, authorized) => jevVisionDecider({ mode,
+    if (backend === 'jev-images') return { mode, decide: (task, authorized) => jevVisionDecider({ mode,
       // A live switch back to ax, images off, or Computer Use off revokes an in-flight decision.
       evaluate: (request, signal) => jev().evaluate(request, { principalId: task.ownerPrincipalId, agentId: agent.id, sessionId: task.agentSessionId, taskId: task.taskId, consumer: 'computer', signal,
-        authorize: () => authorized() && member(task) && selected(use) === mode && computerDecisions(gateway, agent) === 'jev' && gateway.gateway.jev?.images?.enabled === true }),
+        authorize: () => authorized() && member(task) && selected(use) === mode && effectiveBackend() === backend }),
       // Codes and timings only; never screenshots, screen text or typed text.
       onDecision: event => { try { logger().info('computer_jev_vision_decision', { agentId: agent.id, taskId: task.taskId, ...event }); } catch { /* computer_model_log_unavailable is reported by the evaluator path. */ } },
     }) };
@@ -96,8 +101,8 @@ export function computerVision(gateway: GatewayConfig, agent: AgentConfig, membe
     return { mode, decide: (task, authorized) => visionModelDecider({
       model, timeoutMs: DEFAULT_COMPUTER_VISION_TIMEOUT_MS, fetch: fetchImpl,
       connection: async () => agentIdentity('Computer Use'),
-      // A live switch of mode or decision backend revokes an in-flight decision.
-      authorize: () => authorized() && member(task) && selected(use) === mode && computerDecisions(gateway, agent) === backend,
+      // A live switch of mode or effective image backend revokes an in-flight decision.
+      authorize: () => authorized() && member(task) && selected(use) === mode && effectiveBackend() === backend,
       // Codes, sizes and token counts only; never screenshots, screen text or credentials.
       onDecision: event => {
         const entry = { agentId: agent.id, taskId: task.taskId, ...event };

@@ -302,4 +302,19 @@ describe('computerVision', () => {
     await expect(v.decide(task, () => true)([], new AbortController().signal, view)).rejects.toMatchObject({ code: 'ACCESS_DENIED' });
     expect(fetch).toHaveBeenCalledTimes(1);
   });
+  test('enabling Jev images while a model vision fetch is in flight revokes its result', async () => {
+    jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const config = gatewayConfig(true, undefined, true, { mode: 'vision' }) as any;
+    config.gateway.jev.images = { enabled: false };
+    let enableImages = false;
+    const fetch = jest.fn(async () => {
+      if (enableImages) config.gateway.jev.images.enabled = true;
+      return new Response(JSON.stringify({ content: [], stop_reason: 'end_turn' }), { headers: { 'content-type': 'application/json' } });
+    });
+    const v = computerVision(config, agentConfig(), () => true, fetch as any)()!;
+    await expect(v.decide(task, () => true)([], new AbortController().signal, view)).resolves.toMatchObject({ stopReason: 'end_turn' });
+    enableImages = true;
+    await expect(v.decide(task, () => true)([], new AbortController().signal, view)).rejects.toMatchObject({ code: 'ACCESS_DENIED' });
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
 });

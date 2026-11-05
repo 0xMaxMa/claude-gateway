@@ -548,4 +548,3 @@ describe('an agent hand-off command runs as a short goal',()=>{
   expect(r).toMatchObject({status:'blocked',reason:'STEP_LIMIT',steps:2});
  });
 });
-
