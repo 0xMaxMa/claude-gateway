@@ -291,4 +291,15 @@ describe('computerVision', () => {
     await expect(v.decide(task, () => true)([], new AbortController().signal, view)).rejects.toMatchObject({ code: 'ACCESS_DENIED' });
     expect(fetch).not.toHaveBeenCalled();
   });
+  test('switching from model to Jev while vision fetch is in flight revokes its result', async () => {
+    jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const config = gatewayConfig(false, undefined, true, { mode: 'vision' });
+    const fetch = jest.fn(async () => {
+      (config.gateway as any).jev = { enabled: true, features: { computerTasks: { enabled: true } } };
+      return new Response(JSON.stringify({ content: [], stop_reason: 'end_turn' }), { headers: { 'content-type': 'application/json' } });
+    });
+    const v = computerVision(config, agentConfig(), () => true, fetch as any)()!;
+    await expect(v.decide(task, () => true)([], new AbortController().signal, view)).rejects.toMatchObject({ code: 'ACCESS_DENIED' });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
 });

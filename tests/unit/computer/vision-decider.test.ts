@@ -128,19 +128,20 @@ describe('request shape', () => {
     expect(JSON.stringify(events)).not.toContain(TOKEN);
   });
 
-  test('a non-OK response logs the provider error type and a bounded, redacted message, never the request', async () => {
+  test('a non-OK response logs a safe provider error type but no untrusted message or request', async () => {
     const secret = 'sk-ant-api03-' + 'A'.repeat(40);
-    const message = `messages.4.content.0.tool_result: image blocks are not allowed when is_error is true ${secret} ` + 'x'.repeat(5000);
+    const shortSecret = 'pw=abc12', email = 'alice@example.test';
+    const message = `messages.4.content.0.tool_result: ${email} ${shortSecret} ${secret} ` + 'x'.repeat(5000);
     const fetch = (async () => new Response(JSON.stringify({ type: 'error', error: { type: 'invalid_request_error', message } }), { status: 400, headers: { 'content-type': 'application/json' } })) as unknown as typeof globalThis.fetch;
     const events: any[] = [];
     const decide = visionModelDecider({ model: 'claude-sonnet-5', timeoutMs: 2000, fetch, authorize: () => true, onDecision: e => events.push(e),
       connection: async () => ({ baseUrl: 'https://proxy.example.test', apiKey: TOKEN, scheme: 'bearer' }) });
     await expect(decide([{ role: 'user', content: [{ type: 'text', text: 'SCREEN-TEXT-MARKER' }] }], new AbortController().signal, { goal: 'x', state: { generation: 'g1' } as any, shot }))
       .rejects.toMatchObject({ code: 'INVALID_REQUEST' });
-    expect(events[0]).toMatchObject({ outcome: 'failed', errorCode: 'INVALID_REQUEST', providerError: { type: 'invalid_request_error', message: expect.stringContaining('image blocks are not allowed when is_error is true') } });
-    expect(events[0].providerError.message.length).toBeLessThanOrEqual(300);
+    expect(events[0]).toMatchObject({ outcome: 'failed', errorCode: 'INVALID_REQUEST', httpStatus: 400 });
+    expect(events[0]).not.toHaveProperty('providerError');
     const logged = JSON.stringify(events);
-    for (const hidden of [secret, TOKEN, 'SCREEN-TEXT-MARKER']) expect(logged).not.toContain(hidden);
+    for (const hidden of [secret, shortSecret, email, TOKEN, 'SCREEN-TEXT-MARKER']) expect(logged).not.toContain(hidden);
   });
 
   test('a non-JSON error body still fails with the status code only', async () => {
@@ -150,6 +151,17 @@ describe('request shape', () => {
       connection: async () => ({ baseUrl: 'https://proxy.example.test', apiKey: TOKEN, scheme: 'bearer' }) });
     await expect(decide([], new AbortController().signal, { goal: 'x', state: { generation: 'g1' } as any, shot })).rejects.toMatchObject({ code: 'PROVIDER_UNAVAILABLE' });
     expect(events[0]).not.toHaveProperty('providerError');
+  });
+
+  test('an unexpected provider stop reason does not enter diagnostics', async () => {
+    const stopReason = 'alice@example.test pw=abc12';
+    const fetch = (async () => new Response(JSON.stringify({ content: [], stop_reason: stopReason }), { headers: { 'content-type': 'application/json' } })) as unknown as typeof globalThis.fetch;
+    const events: any[] = [];
+    const decide = visionModelDecider({ model: 'claude-sonnet-5', timeoutMs: 2000, fetch, authorize: () => true, onDecision: e => events.push(e),
+      connection: async () => ({ baseUrl: 'https://proxy.example.test', apiKey: TOKEN, scheme: 'bearer' }) });
+    await decide([], new AbortController().signal, { goal: 'x', state: { generation: 'g1' } as any, shot });
+    expect(events[0]).not.toHaveProperty('stopReason');
+    expect(JSON.stringify(events)).not.toContain(stopReason);
   });
 });
 

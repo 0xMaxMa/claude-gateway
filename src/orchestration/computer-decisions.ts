@@ -96,8 +96,8 @@ export function computerVision(gateway: GatewayConfig, agent: AgentConfig, membe
     return { mode, decide: (task, authorized) => visionModelDecider({
       model, timeoutMs: DEFAULT_COMPUTER_VISION_TIMEOUT_MS, fetch: fetchImpl,
       connection: async () => agentIdentity('Computer Use'),
-      // A live switch back to ax (or Computer Use off) revokes an in-flight decision.
-      authorize: () => authorized() && member(task) && selected(use) === mode && computerDecisions(gateway, agent) !== undefined,
+      // A live switch of mode or decision backend revokes an in-flight decision.
+      authorize: () => authorized() && member(task) && selected(use) === mode && computerDecisions(gateway, agent) === backend,
       // Codes, sizes and token counts only; never screenshots, screen text or credentials.
       onDecision: event => {
         const entry = { agentId: agent.id, taskId: task.taskId, ...event };
