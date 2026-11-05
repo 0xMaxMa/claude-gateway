@@ -292,8 +292,10 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
     // A protected app (GetPod, where the user typed) in front withholds the screen: the task's last approved target
     // application is opened again first, once, before anything is decided on it. Pod-jinawong r10, task 457a4930: GetPod
     // stayed in front, and the agent's next command worked in Chrome's Steam tab instead of TradingView.
-    // A task's first round has no earlier target: the app its command names, from this computer's approved apps.
-    const target=input.reactivate??(state.frontmostProtected===true?namedApp(goal.goal,state.apps):undefined);
+    // The app named by this command wins over the remembered target, using this computer's approved apps.
+    const named=state.frontmostProtected===true?namedApp(goal.goal,state.apps):undefined;
+    const mentionsOtherApp=state.frontmostProtected===true&&state.apps.some(app=>app.id!==input.reactivate?.id&&namedApp(goal.goal,[app]));
+    const target=state.frontmostProtected===true?named??(mentionsOtherApp?undefined:input.reactivate):undefined;
     if(target&&!reactivated&&state.frontmostProtected===true&&state.apps.some(app=>app.id===target.id)){
      reactivated=true;const action={kind:'open',app_id:target.id};emit('decided',{...summary(action,state),reason:'REACTIVATE_TARGET'});
      return {action:{action:'reactivate',generation:state.generation,revision,targets:new Map([['reactivate',action]]),observedContinuation:true}};
@@ -724,12 +726,12 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
     };
     // The page in front after an address submit or a navigation: looked at again until it is another page than before
     // (title or application), at most NAVIGATION_SETTLE_MS. True once it changed or shows the goal's site. A read that
-    // fails is no evidence either way: as goalEvidence, it leaves the goal reached (a stale read is a changing page).
+    // fails is no evidence either way: ask the decision model on a later fresh observation.
     const navigated=async()=>{
      const from=navigationFrom;navigationFrom=undefined;if(!from)return true;
      for(const until=Date.now()+NAVIGATION_SETTLE_MS;;){
       try{last=ComputerObservation.parse(await call('computer_observe'));check();deps.observation?.(last);if(last.windowTitle!==from.title||last.application!==from.application||webAddress&&urlShown(last,webAddress))return true;}
-      catch{check();checkInterruption(deps.interruptSignal);return true;}
+      catch{check();checkInterruption(deps.interruptSignal);return false;}
       if(Date.now()>=until)return false;
       await new Promise<void>((resolve,reject)=>{const stop=()=>{clearTimeout(t);reject(Error('CANCELLED'));};const t=setTimeout(()=>{runSignal.removeEventListener('abort',stop);resolve();},NAVIGATION_POLL_MS);runSignal.addEventListener('abort',stop,{once:true});});
      }

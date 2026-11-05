@@ -289,10 +289,10 @@ describe('a yes to a goal step resumes the goal',()=>{
 // offline, access revoked) must never turn a finished goal into an error, or the
 // caller skips releasing the device session.
 describe('goal evidence is best-effort',()=>{
- const failingObserve=(f:ReturnType<typeof fixture>,from:number,code:string)=>{const call=f.deps.call;let actions=0;
-  f.deps.call=async(...a)=>{if(a[0]==='computer_action')actions++;if(a[0]==='computer_observe'&&actions>=from)throw Error(code);return call(...a);};};
+ const failingObserve=(f:ReturnType<typeof fixture>,from:number,code:string,allowedReads=0)=>{const call=f.deps.call;let actions=0,reads=0;
+  f.deps.call=async(...a)=>{if(a[0]==='computer_action')actions++;if(a[0]==='computer_observe'&&actions>=from&&reads++>=allowedReads)throw Error(code);return call(...a);};};
  test.each(['DEVICE_OFFLINE','ACCESS_DENIED','STALE_OBSERVATION'])('a fast path goal still reaches GOAL_REACHED when the closing read fails with %s',async code=>{
-  const f=fixture([finder,()=>chrome(),()=>chrome('youtube.com'),youtube]);failingObserve(f,3,code);
+  const f=fixture([finder,()=>chrome(),()=>chrome('youtube.com'),youtube]);failingObserve(f,3,code,1);
   const r=await spawn(f,'open YouTube in Chrome');
   expect(r).toMatchObject({status:'succeeded',reason:'GOAL_REACHED',steps:3});
  });
@@ -302,7 +302,7 @@ describe('goal evidence is best-effort',()=>{
   expect(r).toMatchObject({status:'blocked',reason:'STEP_LIMIT',steps:2});
  });
  test('a failed closing read leaves a trace the agent can read, without the provider error text',async()=>{
-  const f=fixture([finder,()=>chrome(),()=>chrome('youtube.com'),youtube]);failingObserve(f,3,'DEVICE_OFFLINE secret-detail');
+  const f=fixture([finder,()=>chrome(),()=>chrome('youtube.com'),youtube]);failingObserve(f,3,'DEVICE_OFFLINE secret-detail',1);
   const r=await spawn(f,'open YouTube in Chrome');
   expect(r).toMatchObject({status:'succeeded',reason:'GOAL_REACHED'});
   expect(waited(r)).toBe('GOAL_EVIDENCE_UNAVAILABLE');

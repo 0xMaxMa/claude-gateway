@@ -323,7 +323,7 @@ export class ComputerTaskAdapter implements GatewayTaskAdapter {
      impact:t.automationController!=='agent',yieldAfterAction:false,literalText:true,approvedOnly:true},result);
     if('fallback' in outcome){
      // The Windows helper has no raw input yet: nothing for the user to turn on there.
-     const reason=!VISION_RAW_UNAVAILABLE.has(outcome.fallback)?'SCREEN_CAPTURE_REQUIRED':observed?.platform?.os==='windows'?'RAW_INPUT_UNAVAILABLE':'RAW_INPUT_REQUIRED';
+     const reason=VISION_RAW_UNAVAILABLE.has(outcome.fallback)?observed?.platform?.os==='windows'?'RAW_INPUT_UNAVAILABLE':'RAW_INPUT_REQUIRED':outcome.fallback==='SCREEN_RECORDING_PERMISSION_REQUIRED'?'SCREEN_CAPTURE_REQUIRED':'SCREEN_CAPTURE_UNAVAILABLE';
      const event={phase:'waiting' as const,reason,sequence:(result.trace?.events.at(-1)?.sequence??0)+1,round:result.trace?.events.at(-1)?.round??1,at:Date.now(),revision:t.revision,steps:result.steps,evaluations:result.evaluations};
      deps.progress?.(event);result={...result,trace:{events:[...(result.trace?.events??[]),event],truncated:result.trace?.truncated??false}};
     }else result={...outcome,steps:result.steps+outcome.steps,evaluations:result.evaluations+outcome.evaluations,trace:{events:[...(result.trace?.events??[]),...outcome.trace.events.map(e=>continued(result!,e))],truncated:!!(result.trace?.truncated||outcome.trace.truncated)},...(outcome.lastAction??result.lastAction?{lastAction:outcome.lastAction??result.lastAction}:{})};

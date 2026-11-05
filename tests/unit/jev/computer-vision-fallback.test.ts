@@ -79,6 +79,22 @@ test('an older helper without raw-input capabilities reads the same; a capture f
   }finally{await f.close();}
  }
 });
+test('a transient capture error does not claim Screen Recording permission is missing',async()=>{
+ const f=fixture(fallbackOnly);try{
+  runComputerUse.mockImplementationOnce(stuck);
+  runVisionComputerUse.mockImplementationOnce(async()=>({fallback:'SCREENSHOT_CAPTURE_FAILED',trace:[]}));
+  const text=computerOutcomeText((await f.run('play bodyslam on Spotify')).computerReport);
+  expect(text).toContain('could not be captured');
+  expect(text).not.toContain('Check the Screen Recording permission');
+ }finally{await f.close();}
+});
+test('an explicit Screen Recording permission error keeps its permission guidance',async()=>{
+ const f=fixture(fallbackOnly);try{
+  runComputerUse.mockImplementationOnce(stuck);
+  runVisionComputerUse.mockImplementationOnce(async()=>({fallback:'SCREEN_RECORDING_PERMISSION_REQUIRED',trace:[]}));
+  expect(computerOutcomeText((await f.run('play bodyslam on Spotify')).computerReport)).toContain('Check the Screen Recording permission');
+ }finally{await f.close();}
+});
 
 test('no fallback without visionFallback, for a user one-shot command, or for another stop',async()=>{
  const stop=(reason:string)=>({...STUCK,trace:{events:[ev(1,'waiting',{reason})],truncated:false}});

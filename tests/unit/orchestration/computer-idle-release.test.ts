@@ -199,6 +199,8 @@ describe('an expired session ends its waiting round',()=>{
   const closed={status:'closed',idleTimeoutMs:1,closedReason:'idle_timeout'};
   const base={gatewayTarget:{adapter:'computer',sessionId:'s',name:'PC'},state:'waiting_input',automationSession:closed};
   expect(expiredWaitingRound(base)).toBe(true);
+  expect(expiredWaitingRound({...base,computerReport:{status:'needs_input',reason:'CONFIRMATION_REQUIRED',steps:1,lastAction:{kind:'press',confirm:true}}})).toBe(false);
+  expect(expiredWaitingRound({...base,computerReport:{status:'needs_input',reason:'CONFIRMATION_REQUIRED',steps:1,trace:[{phase:'waiting',reason:'CONFIRMATION_REQUIRED'}]}})).toBe(false);
   expect(expiredWaitingRound({...base,activeAttemptId:'a'})).toBe(false);
   expect(expiredWaitingRound({...base,state:'needs_reconciliation'})).toBe(false);
   expect(expiredWaitingRound({...base,automationSession:{...closed,closedReason:'user'}})).toBe(false);

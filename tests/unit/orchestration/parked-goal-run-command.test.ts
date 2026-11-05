@@ -81,6 +81,16 @@ test('a notice for an older state_version is refused: the run changed since',()=
   expect(f.store.task(f.task.taskId)!.revision).toBe(1);
  }finally{f.close();}
 });
+test('a different notice cannot share the parked round version or authorize its command',()=>{
+ const f=fixture();try{
+  const waiting=f.finish(parked()),[parkedNotice]=f.notices(),otherNotice=randomUUID();
+  const original=f.store.get('SELECT conversation_id,originating_binding_id FROM notifications WHERE id=?',parkedNotice)!;
+  f.store.run('INSERT OR IGNORE INTO notifications(id,conversation_id,task_id,task_state_version,originating_binding_id) VALUES(?,?,?,?,?)',otherNotice,original.conversation_id,f.task.taskId,waiting.stateVersion,original.originating_binding_id);
+  expect(f.notices()).toEqual([parkedNotice]);
+  const t=f.turn('report',{notice:otherNotice});
+  expect(f.code(()=>f.tasks.update(t.context(),f.task.taskId,1,'key enter','when_ready'))).toBe('USER_CONTROLS_AUTOMATION');
+ }finally{f.close();}
+});
 
 test('the one command gains no extra authority: plain when_ready on the current revision only',()=>{
  const f=fixture();try{

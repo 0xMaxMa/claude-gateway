@@ -63,6 +63,19 @@ describe('f40127bd replay: a fast path waits for the page to change before GOAL_
   expect(r.observation?.windowTitle).toBe('Welcome to Steam - Google Chrome - Profile');
   expect(m.requests).toHaveLength(0);
  });
+ test('a failed navigation observation cannot certify a fast-path goal',async()=>{
+  const m=script([before.windowTitle]);let afterEnter=false,failed=false;
+  const call=m.deps.call;
+  m.deps.call=async(name,args,s)=>{
+   if(name==='computer_action'&&args.kind==='key'&&args.key==='enter')afterEnter=true;
+   if(name==='computer_observe'&&afterEnter&&!failed){failed=true;throw Error('OBSERVATION_FAILED');}
+   return call(name,args,s);
+  };
+  const r=await runComputerUse(goalRun(steam.command),m.deps,signal());
+  expect(failed).toBe(true);
+  expect(r.trace.events.some(e=>e.reason==='NAVIGATION_PENDING')).toBe(true);
+  expect(r.evaluations).toBeGreaterThan(0);
+ },20000);
  test('a page that never changes within the wait goes to the decision model instead of GOAL_REACHED',async()=>{
   const m=script([before.windowTitle]);m.requests.length=0;
   const started=Date.now();
@@ -120,6 +133,20 @@ describe('457a4930 withheld replay: a round that starts with GetPod in front reo
   expect(m.requests[0].state.desktop?.application??JSON.stringify(m.requests[0])).toContain(TRADINGVIEW);
   // Reopening the target is no step of the command itself.
   expect(r.trace.events.find(e=>e.phase==='acted')).toMatchObject({action:'open',appId:TRADINGVIEW,reason:'REACTIVATE_TARGET'});
+ });
+ test('an explicit new app in the command wins over the previous target on a withheld screen',async()=>{
+  const spotify={id:'com.spotify.client',name:'Spotify'};
+  const screen={...withheld,apps:[...withheld.apps,spotify]};
+  const m=mac(screen,(action,s)=>{if(action.kind==='open')s.screen={...chartWindow,application:action.app_id};},[{pick:'UNCLEAR'}]);
+  await runComputerUse(goalRun('open Spotify',{sessionStart:false,reactivate:target}),m.deps,signal());
+  expect(m.actions()[0]).toEqual({kind:'open',app_id:spotify.id});
+ });
+ test('an ambiguous command mentioning other approved apps does not reactivate the old target',async()=>{
+  const spotify={id:'com.spotify.client',name:'Spotify'};
+  const screen={...withheld,apps:[...withheld.apps,spotify]};
+  const m=mac(screen,()=>undefined,[{pick:'UNCLEAR'}]);
+  await runComputerUse(goalRun('play Spotify in Google Chrome',{sessionStart:false,reactivate:target}),m.deps,signal());
+  expect(m.actions()[0]).not.toEqual({kind:'open',app_id:target.id});
  });
  test('a direct user command reopens it too, once, and a screen that is not withheld is left alone',async()=>{
   const direct=mac(withheld,(action,s)=>{if(action.kind==='open')s.screen=chartWindow;},[{pick:'UNCLEAR'}]);

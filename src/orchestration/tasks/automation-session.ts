@@ -119,7 +119,7 @@ export const agentGoalRunParkedSql=(alias:string)=>{
  * (TaskService.endExpiredComputerRound) instead of showing as an active task forever.
  * Pod-jinawong, tasks 2f65b7cf, d1b6f841, 59e5ce4f, 207e15a8: "Waiting for input" long after the expiry. */
 export function expiredWaitingRound(task: Omit<TaskSnapshot,'skill'>): boolean {
-  return task.gatewayTarget?.adapter==='computer'&&task.state==='waiting_input'&&!task.activeAttemptId&&!task.pendingQuestion
+  return task.gatewayTarget?.adapter==='computer'&&task.state==='waiting_input'&&!task.activeAttemptId&&!task.pendingQuestion&&!confirmationAsked(task)
     &&task.automationSession?.status==='closed'&&task.automationSession.closedReason==='idle_timeout';
 }
 /** The task waits for the owner's next direct command (a settled or paused round). */

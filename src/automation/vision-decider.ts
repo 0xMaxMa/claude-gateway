@@ -474,7 +474,7 @@ export async function runVisionComputerUse(raw: unknown, deps: VisionDependencie
         answer(use, 'ACTION_NOT_SUPPORTED', true);
       } else {
         const decoded = mapComputerCall(use.name, use.input, caps!, seen.shot, seen.state.apps);
-        const unapproved = input.approvedOnly && 'action' in decoded && decoded.action.kind !== 'open' && (seen.state.frontmostProtected === true || seen.state.application === 'unapproved');
+        const unapproved = input.approvedOnly && 'action' in decoded && (decoded.action.kind === 'open' || seen.state.frontmostProtected === true || seen.state.application === 'unapproved');
         const mapped: MappedCall = unapproved ? { error: 'APPLICATION_NOT_APPROVED' }
           : input.literalText && 'action' in decoded && decoded.action.kind === 'type_focused' && !input.goal.includes(decoded.action.text) ? { error: 'TEXT_NOT_IN_GOAL' } : decoded;
         if ('screenshot' in mapped) {

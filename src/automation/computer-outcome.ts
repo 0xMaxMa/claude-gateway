@@ -25,6 +25,7 @@ const HINTS:Record<string,string>={
  RAW_INPUT_REQUIRED:'this app shows no controls Computer Use can read, so it has to work from the screen with the mouse and keyboard. Turn on "Allow mouse and keyboard control" in GetPod\'s Computer Use settings, then send the command again.',
  RAW_INPUT_UNAVAILABLE:'this app shows no controls Computer Use can read, and mouse and keyboard control is not available on this computer yet.',
  SCREEN_CAPTURE_REQUIRED:'this app shows no controls Computer Use can read, and its window could not be captured to work from the screen. Check the Screen Recording permission for GetPod, then send the command again.',
+ SCREEN_CAPTURE_UNAVAILABLE:'this app shows no controls Computer Use can read, and its window could not be captured to work from the screen. Check the app window and try again.',
  APPLICATION_LAUNCH_UNCONFIRMED:'the computer did not confirm that the app opened. Check that it is in front, then send the command again.',
  ADDRESS_NOT_SHOWN:'the page in front does not show the web address yet. Check the browser, then send the command again.',
 };
@@ -64,6 +65,7 @@ const REASONS:Record<string,string>={
  RAW_INPUT_REQUIRED:'The app shows no controls Computer Use can read, and mouse and keyboard control is turned off.',
  RAW_INPUT_UNAVAILABLE:'The app shows no controls Computer Use can read, and mouse and keyboard control is not available on this computer yet.',
  SCREEN_CAPTURE_REQUIRED:'The app shows no controls Computer Use can read, and its window could not be captured.',
+ SCREEN_CAPTURE_UNAVAILABLE:'The app shows no controls Computer Use can read, and its window could not be captured.',
  VISION_TARGET_NOT_FOUND:'What it needed was not on the screen.',
  VISION_SIGN_IN_REQUIRED:'The app needs you to sign in first.',
  VISION_HIGH_IMPACT_ACTION:'The next step would buy, send, delete or change something, so it stopped for you.',

@@ -530,6 +530,12 @@ describe('literal text for an Accessibility fallback', () => {
       expect(result).toMatchObject({ status: 'blocked', reason: 'VISION_APPLICATION_NOT_APPROVED', steps: 1 });
     }
   });
+  test('approvedOnly refuses an app switch even from an approved window', async () => {
+    const d=device({at:()=>({apps:[{id:'com.spotify.client',name:'Spotify'}]})}),m=model([{name:'open_application',input:{app_id:'com.spotify.client'}},{name:'open_application',input:{app_id:'com.spotify.client'}},{name:'open_application',input:{app_id:'com.spotify.client'}}]);
+    const result=await runVisionComputerUse({goal:'continue in Spotify',approvedOnly:true},d.deps(m.decide),signal()) as any;
+    expect(d.actions()).toHaveLength(0);
+    expect(result).toMatchObject({status:'blocked',reason:'VISION_APPLICATION_NOT_APPROVED'});
+  });
   test('without literalText a primary vision run keeps its behavior', async () => {
     const d = device(), m = model([{ name: 'type', input: { text: 'Paradise' } }, finish('done')]);
     await runVisionComputerUse({ goal: 'play something on Spotify' }, d.deps(m.decide), signal());
