@@ -537,7 +537,7 @@ describe('vision no-progress (no action limit)', () => {
     deps.screenshot = async s => ({ generation: s.generation, data: '/9j/SAME', width: 1280, height: 800 });
     const result = await runVisionComputerUse({ goal: 'x' }, deps, signal());
     expect(result).toMatchObject({ status: 'needs_input', reason: 'NO_PROGRESS', steps: 3 });
-    expect(result.trace.events.some(e => e.phase === 'waiting' && e.reason === 'NO_PROGRESS')).toBe(true);
+    expect((result.trace as { events: { phase: string; reason?: string }[] }).events.some(e => e.phase === 'waiting' && e.reason === 'NO_PROGRESS')).toBe(true);
     expect(d.actions()).toHaveLength(3);
   });
   test('the same click on the same spot three times pauses even while the screen changes', async () => {
