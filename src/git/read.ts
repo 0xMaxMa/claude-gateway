@@ -73,11 +73,13 @@ const SUMMARY_READ: ReadOptions = { timeoutMs: GIT_READ_TIMEOUT_MS, untracked: '
 /** What git said when it could not read the repository, in words the client can act on. LC_ALL=C keeps these messages stable. */
 async function readFailure(dir: string, out: GitOutput): Promise<GitError> {
   if (/detected dubious ownership/.test(out.stderr)) return { code: 'git_unsafe_owner' };
-  if (/not a git repository/.test(out.stderr)) {
+  if (/not a git repository/i.test(out.stderr)) {
     // A `.git` entry git cannot open reads as "not a repository": say it is there but unreadable.
     return { code: (await fsp.lstat(path.join(dir, '.git')).then(() => true, () => false)) ? 'git_unreadable' : 'not_a_git_repo' };
   }
-  if (/permission denied|cannot (open|read|access)|unable to (open|read|access)|operation not permitted|bad config/i.test(out.stderr)) return { code: 'git_unreadable' };
+  if (/permission denied|cannot (open|read|access)|unable to (open|read|access)|operation not permitted|bad config|invalid gitfile/i.test(out.stderr)) return { code: 'git_unreadable' };
+  // Git versions differ in the message for a broken gitfile. A present .git entry means the repository itself failed to open.
+  if (await fsp.lstat(path.join(dir, '.git')).then(() => true, () => false)) return { code: 'git_unreadable' };
   return { code: 'git_failed' };
 }
 

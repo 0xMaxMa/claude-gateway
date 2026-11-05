@@ -403,6 +403,9 @@ describe('a repository with many files', () => {
 describe('errors that say what is wrong', () => {
   /** Runs the real git, but as if another user owned every repository, which git checks for itself. */
   function otherOwner(): void {
+    // Hosted runners can trust every directory globally; isolate Git's trust config so this fixture proves the refusal.
+    process.env.GIT_CONFIG_GLOBAL = path.join(base, 'empty-gitconfig');
+    process.env.GIT_CONFIG_NOSYSTEM = '1';
     const bin = path.join(base, 'owner-bin');
     const real = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
     write(path.join(bin, 'git'), `#!/bin/sh\nGIT_TEST_ASSUME_DIFFERENT_OWNER=1 exec "${real}" "$@"\n`);
