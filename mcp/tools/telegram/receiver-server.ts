@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { commandHelp } from '../../../dist/agent/command-help.js';
 import { parseSessionInfo } from './session-browser';
+import { fetchModelMenuResponses, sendModelMenuReply } from './model-menu-request';
 /**
  * Telegram channel for Claude Gateway.
  *
@@ -1266,25 +1267,7 @@ async function fetchModelMenuData(chatId: string): Promise<{
   liveModels: Array<{ id: string; label: string }>
 } | null> {
   if (!CALLBACK_URL_BASE) return null
-  const [modelRes, modelsRes] = await Promise.all([
-    fetch(CALLBACK_URL_BASE + '/command', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ command: 'get_model', chat_id: chatId }),
-    }),
-    fetch(CALLBACK_URL_BASE + '/command', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ command: 'get_models' }),
-    }),
-  ])
-  if (!modelRes.ok || !modelsRes.ok) throw new Error('model request failed')
-  const modelData = (await modelRes.json()) as { model?: string }
-  const modelsData = (await modelsRes.json()) as {
-    models?: unknown
-    configuredModels?: unknown
-    liveModels?: unknown
-  }
+  const { modelData, modelsData } = await fetchModelMenuResponses(CALLBACK_URL_BASE, chatId)
   const currentModel = typeof modelData.model === 'string' ? modelData.model : ''
   const availableRaw = validModelRows(modelsData.models)
   const availableModels = availableRaw.length ? availableRaw : validModelRows(AVAILABLE_MODELS)
@@ -1322,15 +1305,27 @@ bot.command('models', async ctx => {
   if (!access.allowFrom.includes(String(ctx.from!.id))) return
   if (!CALLBACK_URL_BASE) return
 
+  let stage: 'callback' | 'send' = 'callback'
   try {
     const menu = await fetchModelMenuData(String(ctx.chat.id))
     if (!menu) return
     const keyboard = buildModelsRootKeyboard(menu.currentModel, menu.configuredModels, menu.liveModels)
-    await ctx.reply(`Current model: ${menu.currentModel}\nSelect a model:`, {
+    stage = 'send'
+    await sendModelMenuReply(signal => ctx.reply(`Current model: ${menu.currentModel}\nSelect a model:`, {
       reply_markup: keyboard,
-    })
+    }, signal as Parameters<Context['reply']>[2]))
   } catch (err) {
-    await ctx.reply('Failed to get model info.')
+    const errorName = err instanceof Error ? err.name : 'UnknownError'
+    process.stderr.write(`telegram channel: /models ${stage} failed (${errorName})\n`)
+    // A failed send may already have reached Telegram. Only a callback failure
+    // is known to have occurred before any menu message was sent.
+    if (stage !== 'callback') return
+    try {
+      await sendModelMenuReply(signal => ctx.reply('Failed to get model info.', {}, signal as Parameters<Context['reply']>[2]))
+    } catch (replyErr) {
+      const replyErrorName = replyErr instanceof Error ? replyErr.name : 'UnknownError'
+      process.stderr.write(`telegram channel: /models fallback send failed (${replyErrorName})\n`)
+    }
   }
 })
 
@@ -1912,6 +1907,7 @@ bot.on('callback_query:data', async ctx => {
       await ctx.answerCallbackQuery({ text: 'Not available.' }).catch(() => {})
       return
     }
+    let answered = false
     try {
       const chatId = String(ctx.callbackQuery.message?.chat.id ?? ctx.from.id)
       const menu = await fetchModelMenuData(chatId)
@@ -1936,9 +1932,12 @@ bot.on('callback_query:data', async ctx => {
       if (safePage < totalPages - 1) keyboard.text('»', `models:more:${safePage + 1}`)
       keyboard.row().text('Dismiss', 'models:dismiss')
       await ctx.answerCallbackQuery().catch(() => {})
-      await ctx.editMessageText(`More models (live) — page ${safePage + 1}/${totalPages}:`, { reply_markup: keyboard })
-    } catch {
-      await ctx.answerCallbackQuery({ text: 'Request failed' }).catch(() => {})
+      answered = true
+      await sendModelMenuReply(signal => ctx.editMessageText(`More models (live) — page ${safePage + 1}/${totalPages}:`, { reply_markup: keyboard }, signal as Parameters<Context['editMessageText']>[2]))
+    } catch (err) {
+      const errorName = err instanceof Error ? err.name : 'UnknownError'
+      process.stderr.write(`telegram channel: models:more failed (${errorName})\n`)
+      if (!answered) await ctx.answerCallbackQuery({ text: 'Request failed' }).catch(() => {})
     }
     return
   }
@@ -1952,6 +1951,7 @@ bot.on('callback_query:data', async ctx => {
       await ctx.answerCallbackQuery({ text: 'Not available.' }).catch(() => {})
       return
     }
+    let answered = false
     try {
       const chatId = String(ctx.callbackQuery.message?.chat.id ?? ctx.from.id)
       const menu = await fetchModelMenuData(chatId)
@@ -1961,9 +1961,12 @@ bot.on('callback_query:data', async ctx => {
       }
       const keyboard = buildModelsRootKeyboard(menu.currentModel, menu.configuredModels, menu.liveModels)
       await ctx.answerCallbackQuery().catch(() => {})
-      await ctx.editMessageText(`Current model: ${menu.currentModel}\nSelect a model:`, { reply_markup: keyboard })
-    } catch {
-      await ctx.answerCallbackQuery({ text: 'Request failed' }).catch(() => {})
+      answered = true
+      await sendModelMenuReply(signal => ctx.editMessageText(`Current model: ${menu.currentModel}\nSelect a model:`, { reply_markup: keyboard }, signal as Parameters<Context['editMessageText']>[2]))
+    } catch (err) {
+      const errorName = err instanceof Error ? err.name : 'UnknownError'
+      process.stderr.write(`telegram channel: models:back failed (${errorName})\n`)
+      if (!answered) await ctx.answerCallbackQuery({ text: 'Request failed' }).catch(() => {})
     }
     return
   }

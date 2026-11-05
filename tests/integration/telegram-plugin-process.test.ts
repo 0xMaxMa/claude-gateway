@@ -45,6 +45,9 @@ function startMockTelegramServer(port: number) {
   const pendingUpdates: object[] = []
   const pollWaiters: Array<() => void> = []
   let updateIdCounter = 0
+  let stalledMethod: string | null = null
+  let stalledCalls = 0
+  let abortedStalledCalls = 0
 
   function flushWaiters() {
     // Wake all long-poll holders so they can pick up pending updates
@@ -63,6 +66,11 @@ function startMockTelegramServer(port: number) {
       qs.forEach((v, k) => { body[k] = v })
 
       calls.push({ method, body, ts: Date.now() })
+      if (method === stalledMethod && (method !== 'sendMessage' || String(body['text']).startsWith('Current model:'))) {
+        stalledCalls++
+        res.on('close', () => { if (!res.writableEnded) abortedStalledCalls++ })
+        return
+      }
 
       const ok = (result: unknown) => {
         res.writeHead(200, { 'Content-Type': 'application/json' })
@@ -137,6 +145,9 @@ function startMockTelegramServer(port: number) {
 
   return {
     calls,
+    setStalledMethod(method: string | null) { stalledMethod = method },
+    get stalledCalls() { return stalledCalls },
+    get abortedStalledCalls() { return abortedStalledCalls },
     queueUpdate(update: object) {
       pendingUpdates.push(update)
       flushWaiters()
@@ -214,6 +225,7 @@ function makeMcpReader(proc: ChildProcess) {
 function startMockCallbackServer(port: number) {
   const commands: Array<Record<string, unknown>> = []
   const voice = new Map<string, string>()
+  let stallGetModels = false
   const server = http.createServer((req, res) => {
     let raw = ''
     req.on('data', c => { raw += c })
@@ -221,6 +233,7 @@ function startMockCallbackServer(port: number) {
       let body: Record<string, unknown> = {}
       try { body = raw ? JSON.parse(raw) : {} } catch {}
       commands.push(body)
+      if (stallGetModels && body['command'] === 'get_models') return
       res.writeHead(200, { 'Content-Type': 'application/json' })
       if (body['command'] === 'telegram_voice') {
         const mode = (body['payload'] as any)?.mode, chat = String(body['chat_id'])
@@ -244,14 +257,21 @@ function startMockCallbackServer(port: number) {
         res.end(JSON.stringify({ models: [
           { id: 'claude-opus-5', label: 'Opus 5' },
           { id: 'claude-sonnet-5', label: 'Sonnet 5' },
-        ] }))
+        ], configuredModels: [
+          { id: 'claude-opus-5', label: 'Opus 5' },
+          { id: 'claude-sonnet-5', label: 'Sonnet 5' },
+        ], liveModels: [{ id: 'claude-haiku-5', label: 'Haiku 5' }] }))
       } else {
         res.end(JSON.stringify({ success: true }))
       }
     })
   })
   server.listen(port, '127.0.0.1')
-  return { commands, close: () => new Promise<void>(r => server.close(() => r())) }
+  return {
+    commands,
+    setStallGetModels(value: boolean) { stallGetModels = value },
+    close: () => new Promise<void>(r => server.close(() => r())),
+  }
 }
 
 // ── test suite ──────────────────────────────────────────────────────────────
@@ -707,4 +727,95 @@ describe.each([{orchestration:true,interactive:false},{orchestration:false,inter
     expect(mock.calls.find(c => c.method === 'deleteMessage' && c.ts >= unauthorizedAt)).toBeUndefined()
     expect(mockCb.commands.slice(callbackStart).find(c => c['command'] === 'set_model')).toBeUndefined()
   }, 30000)
+
+  test('stalled /models callback releases the receiver for the next command', async () => {
+    if (!orchestration) return
+    const from = { id: Number(USER_ID), is_bot: false, first_name: 'Tester' }
+    const chat = { id: Number(USER_ID), type: 'private' }
+    const at = Date.now()
+    const callbackStart = mockCb.commands.length
+    mockCb.setStallGetModels(true)
+    try {
+      mock.queueUpdate({ message: {
+        message_id: 990, from, chat, date: Math.floor(at / 1000), text: '/models',
+        entities: [{ type: 'bot_command', offset: 0, length: 7 }],
+      } })
+      const callbackDeadline = Date.now() + 5000
+      while (!mockCb.commands.slice(callbackStart).some(c => c['command'] === 'get_models') && Date.now() < callbackDeadline) await sleep(25)
+      expect(mockCb.commands.slice(callbackStart).some(c => c['command'] === 'get_models')).toBe(true)
+      mock.queueUpdate({ message: {
+        message_id: 991, from, chat, date: Math.floor(Date.now() / 1000), text: '/help',
+        entities: [{ type: 'bot_command', offset: 0, length: 5 }],
+      } })
+      const replyDeadline = Date.now() + 15_000
+      while (Date.now() < replyDeadline) {
+        const replies = mock.calls.filter(c => c.method === 'sendMessage' && c.ts >= at).map(c => String(c.body.text))
+        if (replies.some(text => text === 'Failed to get model info.') && replies.some(text => text.includes('/models'))) break
+        await sleep(25)
+      }
+      const replies = mock.calls.filter(c => c.method === 'sendMessage' && c.ts >= at).map(c => String(c.body.text))
+      expect(replies).toContain('Failed to get model info.')
+      expect(replies.some(text => text.includes('/models'))).toBe(true)
+    } finally {
+      mockCb.setStallGetModels(false)
+    }
+  }, 25_000)
+
+  test('stalled /models send aborts in the receiver and does not send a second message', async () => {
+    if (!orchestration) return
+    const from = { id: Number(USER_ID), is_bot: false, first_name: 'Tester' }
+    const chat = { id: Number(USER_ID), type: 'private' }
+    const at = Date.now()
+    const stalledBefore = mock.stalledCalls
+    const abortedBefore = mock.abortedStalledCalls
+    mock.setStalledMethod('sendMessage')
+    try {
+      mock.queueUpdate({ message: { message_id: 992, from, chat, date: Math.floor(at / 1000), text: '/models',
+        entities: [{ type: 'bot_command', offset: 0, length: 7 }] } })
+      await mock.waitForCall('sendMessage', at, 5000)
+      mock.queueUpdate({ message: { message_id: 993, from, chat, date: Math.floor(Date.now() / 1000), text: '/help',
+        entities: [{ type: 'bot_command', offset: 0, length: 5 }] } })
+      const deadline = Date.now() + 15_000
+      while (mock.abortedStalledCalls === abortedBefore && Date.now() < deadline) await sleep(25)
+      mock.setStalledMethod(null)
+      const helpDeadline = Date.now() + 5000
+      while (!mock.calls.some(c => c.method === 'sendMessage' && c.ts >= at && String(c.body.text).includes('/models')) && Date.now() < helpDeadline) await sleep(25)
+      const calls = mock.calls.filter(c => c.method === 'sendMessage' && c.ts >= at)
+      expect(mock.stalledCalls - stalledBefore).toBe(1)
+      expect(mock.abortedStalledCalls - abortedBefore).toBe(1)
+      expect(calls.filter(c => String(c.body.text) === 'Failed to get model info.')).toHaveLength(0)
+      expect(calls.some(c => String(c.body.text).includes('/models'))).toBe(true)
+    } finally {
+      mock.setStalledMethod(null)
+    }
+  }, 25_000)
+
+  test.each(['models:more:0', 'models:back'])('stalled %s edit releases the receiver', async data => {
+    if (!orchestration) return
+    const from = { id: Number(USER_ID), is_bot: false, first_name: 'Tester' }
+    const chat = { id: Number(USER_ID), type: 'private' }
+    const at = Date.now()
+    const stalledBefore = mock.stalledCalls
+    const abortedBefore = mock.abortedStalledCalls
+    mock.setStalledMethod('editMessageText')
+    try {
+      mock.queueUpdate({ callback_query: { id: `stalled-${data}`, chat_instance: 'stalled-models', data, from,
+        message: { message_id: 500, date: Math.floor(at / 1000), chat,
+          from: { id: 99999, is_bot: true, username: 'testbot', first_name: 'TestBot' } } } })
+      await mock.waitForCall('editMessageText', at, 5000)
+      mock.queueUpdate({ message: { message_id: 994, from, chat, date: Math.floor(Date.now() / 1000), text: '/help',
+        entities: [{ type: 'bot_command', offset: 0, length: 5 }] } })
+      const deadline = Date.now() + 15_000
+      while (mock.abortedStalledCalls === abortedBefore && Date.now() < deadline) await sleep(25)
+      mock.setStalledMethod(null)
+      const helpDeadline = Date.now() + 5000
+      while (!mock.calls.some(c => c.method === 'sendMessage' && c.ts >= at && String(c.body.text).includes('/models')) && Date.now() < helpDeadline) await sleep(25)
+      expect(mock.calls.some(c => c.method === 'sendMessage' && c.ts >= at && String(c.body.text).includes('/models'))).toBe(true)
+      expect(mock.stalledCalls - stalledBefore).toBe(1)
+      expect(mock.abortedStalledCalls - abortedBefore).toBe(1)
+      expect(mock.calls.filter(c => c.method === 'answerCallbackQuery' && c.ts >= at && c.body.callback_query_id === `stalled-${data}`)).toHaveLength(1)
+    } finally {
+      mock.setStalledMethod(null)
+    }
+  }, 25_000)
 })
