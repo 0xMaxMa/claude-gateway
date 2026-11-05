@@ -59,7 +59,11 @@ export interface ComputerProgress {
  outcome?:'completed'|'not_executed'|'unknown';changed?:boolean;reason?:string;status?:ComputerUseResult['status'];
  /** Which Jev response check failed (JEV_INVALID_RESPONSE); a fixed code, never response content. */
  validationReason?:string;
+ /** The helper's own step at which it refused an action (receipt `phase`, e.g. pointer_hit_other_window); structural only. */
+ nativePhase?:string;
 }
+/** A helper diagnostic phase: lowercase words joined by underscores, nothing else. */
+export const NATIVE_PHASE=/^[a-z_]{1,40}$/;
 /** A bounded diagnostic code from a Jev error; anything else is dropped. */
 export const jevValidationReason=(error:unknown)=>error instanceof JevError&&typeof error.metadata.validationReason==='string'&&/^[A-Z][A-Z_]{0,39}$/.test(error.metadata.validationReason)?error.metadata.validationReason:undefined;
 export interface ComputerUseDependencies {
@@ -242,6 +246,7 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
  // In-run feedback is discarded on a goal revision; it is not learned or downloaded knowledge.
  let prematureDone=0;
  const ineffective=new Map<string,number>();
+ let notReachedRedecided=false;
  const transitions=new Map<string,number>();let consecutiveOpens=0,cycling=false;
  const emit=(phase:ComputerProgress['phase'],extra:Partial<ComputerProgress>={})=>{
   const event:ComputerProgress={...extra,phase,sequence:++sequence,round,at:Date.now(),revision:goal.revision,steps,evaluations};
@@ -648,7 +653,7 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
     const operationId=randomUUID();await deps.beforeMutation(operationId,{...action,generation:d.generation,revision:goal.revision});
     check();if(deps.interruptSignal?.aborted){emit('acted',{operationId,outcome:'not_executed',reason:'REVISION_SUPERSEDED'});checkInterruption(deps.interruptSignal);}update();if(goal.revision!==d.revision){emit('acted',{operationId,outcome:'not_executed',reason:'GOAL_CHANGED'});return;}
     pending=operationId;emit('acting',{...summary(action),operationId});const started=Date.now();
-    const Receipt=z.object({state:z.enum(['completed','not_executed','unknown']),error:z.string().optional()});
+    const Receipt=z.object({state:z.enum(['completed','not_executed','unknown']),error:z.string().optional(),phase:z.string().regex(NATIVE_PHASE).optional().catch(undefined)});
     let receipt:z.infer<typeof Receipt>;let rejected:string|undefined;
     // The helper stopped on an unconfirmed operation and takes the next command without replaying it (continuation_ready).
     let continuable=false;const ready=(body:unknown)=>{continuable||=(body as {continuation_ready?:unknown}|undefined)?.continuation_ready===true;};
@@ -687,7 +692,7 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
     }
     pending=undefined;
     if(receipt.state==='not_executed'){
-     emit('acted',{...summary(action),operationId,outcome:'not_executed',reason:receipt.error&&/^[A-Z][A-Z_0-9]{0,79}$/.test(receipt.error)?receipt.error:'ACTION_REJECTED',elapsedMs:Date.now()-started});
+     emit('acted',{...summary(action),operationId,outcome:'not_executed',reason:receipt.error&&/^[A-Z][A-Z_0-9]{0,79}$/.test(receipt.error)?receipt.error:'ACTION_REJECTED',...(receipt.phase?{nativePhase:receipt.phase}:{}),elapsedMs:Date.now()-started});
      // Not executed on a changed screen: look again shortly and let Jev decide afresh.
      if(receipt.error==='STALE_OBSERVATION'){if(direct&&((steps>0&&!(goalRun&&!d.observedContinuation))||redecided>=REDECIDE_MAX))return waitForCommand('STALE_OBSERVATION');if(direct){redecided++;replan();await settleDelay();return;}noProgress++;return;}
      const typed=last?.controls.find(c=>c.ref===action.ref);
@@ -698,7 +703,11 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
      // refused it before input. Nothing ran, so a goal run drops that choice and decides
      // afresh (type on the same field stays offered) instead of failing the whole goal.
      if(goalRun&&receipt.error==='UNSUPPORTED_ACTION'&&redecided<REDECIDE_MAX){ineffective.set(identity(last!,action),2);redecided++;replan();return;}
-     if(receipt.error&&['TARGET_OCCLUDED','FOCUS_REQUIRED','FOCUS_UNSUPPORTED'].includes(receipt.error)){last=ComputerObservation.parse(await call('computer_observe'));check();deps.observation?.(last);await capture();return waitForCommand(receipt.error);}
+     // GetPod Desktop 0.1.1+: the press reached another part of the same window even after hovering its target, a button
+     // that only shows under the pointer (Spotify web's row Play, pod-jinawong task 56f64e16 rev 8). Nothing ran, so a goal
+     // run drops that choice once and decides again on a fresh look; a second miss waits (computer.ts may go on with vision).
+     if(goalRun&&receipt.error==='TARGET_NOT_REACHED'&&!notReachedRedecided){notReachedRedecided=true;ineffective.set(identity(last!,action),2);replan();return;}
+     if(receipt.error&&['TARGET_OCCLUDED','TARGET_NOT_REACHED','FOCUS_REQUIRED','FOCUS_UNSUPPORTED'].includes(receipt.error)){last=ComputerObservation.parse(await call('computer_observe'));check();deps.observation?.(last);await capture();return waitForCommand(receipt.error);}
      return result('blocked',receipt.error&&/^[A-Z][A-Z_0-9]{0,79}$/.test(receipt.error)?receipt.error:'ACTION_REJECTED');
     }
     previous={state:structuredClone(last!),signature:fingerprint(last!),identity:identity(last!,action),action,field:last?.controls.find(c=>c.ref===action.ref)};

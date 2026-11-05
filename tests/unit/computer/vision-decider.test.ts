@@ -262,7 +262,7 @@ describe('vision loop', () => {
     for (let i = 1; i < m.seen.length; i++) expect(noImages(m.seen[i].slice(0, m.seen[i - 1].length))).toEqual(noImages(m.seen[i - 1]));
   });
 
-  test.each(['STALE_OBSERVATION', 'TARGET_OCCLUDED'])('%s re-observes and lets the model decide on the new screenshot', async error => {
+  test.each(['STALE_OBSERVATION', 'TARGET_OCCLUDED', 'TARGET_NOT_REACHED'])('%s re-observes and lets the model decide on the new screenshot', async error => {
     const d = device({ receipts: [{ state: 'not_executed', error }] }), m = model([{ name: 'left_click', input: { coordinate: [10, 10] } }, { name: 'left_click', input: { coordinate: [20, 20] } }, finish('done')]);
     const result = await runVisionComputerUse({ goal: 'click it' }, d.deps(m.decide), signal()) as any;
     expect(result).toMatchObject({ status: 'succeeded', reason: 'GOAL_REACHED', steps: 1 });
