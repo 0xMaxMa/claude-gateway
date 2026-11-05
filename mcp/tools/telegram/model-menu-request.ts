@@ -26,9 +26,23 @@ export async function fetchModelMenuResponses(
   }
 }
 
-export function sendModelMenuReply<T>(
+export async function sendModelMenuReply<T>(
   send: (signal: AbortSignal) => Promise<T>,
   timeoutMs = 10_000,
 ): Promise<T> {
-  return send(AbortSignal.timeout(timeoutMs))
+  const controller = new AbortController()
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      controller.abort()
+      const error = new Error('Telegram model menu request timed out')
+      error.name = 'TimeoutError'
+      reject(error)
+    }, timeoutMs)
+  })
+  try {
+    return await Promise.race([send(controller.signal), deadline])
+  } finally {
+    clearTimeout(timer)
+  }
 }

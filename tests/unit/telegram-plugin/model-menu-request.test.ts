@@ -70,25 +70,11 @@ test('/models Telegram send timeout releases the next update', async () => {
   expect(seen).toEqual(['send-error', 'session'])
 })
 
-test('/models fallback send timeout releases the next update', async () => {
-  const seen: string[] = []
-  const bot = mockBot()
-  bot.api.config.use((_previous, _method, _payload, signal) => new Promise((_resolve, reject) => {
-    signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true })
-  }))
-  bot.command('models', async ctx => {
-    try {
-      await sendModelMenuReply(signal => ctx.reply('model menu', {}, signal as Parameters<typeof ctx.reply>[2]), 30)
-    } catch {
-      try { await sendModelMenuReply(signal => ctx.reply('fallback', {}, signal as Parameters<typeof ctx.reply>[2]), 30) }
-      catch { seen.push('fallback-error') }
-    }
-  })
-  bot.command('session', () => { seen.push('session') })
-  const outcome = await Promise.race([
-    handleTwoUpdates(bot).then(() => 'done'),
-    new Promise<string>(resolve => setTimeout(() => resolve('stalled'), 500)),
-  ])
-  expect(outcome).toBe('done')
-  expect(seen).toEqual(['fallback-error', 'session'])
+test('model menu deadline settles even if the transport ignores abort', async () => {
+  let signal: AbortSignal | undefined
+  await expect(sendModelMenuReply(received => {
+    signal = received
+    return new Promise<void>(() => {})
+  }, 30)).rejects.toHaveProperty('name', 'TimeoutError')
+  expect(signal?.aborted).toBe(true)
 })
