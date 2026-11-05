@@ -1,0 +1,2636 @@
+{
+ "source": "pod-jinawong r12 5f88c9cf, task 56f64e16 rev 8, app 0.1.1-alpha.2.wincu.9 on Windows (Chrome, open.spotify.com); screenshot dropped",
+ "rev8": {
+  "command": "click \"Play ขี้หึง by Silly Fools\" in the Songs list on Spotify in Chrome",
+  "goalRun": true,
+  "targetApp": {
+   "id": "chrome.exe",
+   "name": "Google Chrome"
+  },
+  "toolErrors": [
+   {
+    "tool": "computer_action",
+    "code": "TARGET_OCCLUDED",
+    "operationId": "bad68ea8-61ff-4945-80e5-8bc7b0c2766d",
+    "nativePhase": "pointer_hit_ancestor",
+    "at": 1793846157941
+   }
+  ],
+  "report": {
+   "targetApp": {
+    "id": "chrome.exe",
+    "name": "Google Chrome"
+   },
+   "durationMs": 5698,
+   "status": "needs_input",
+   "reason": "COMMAND_WAITING_INPUT",
+   "steps": 0,
+   "evaluations": 1,
+   "phase": "terminal",
+   "trace": [
+    {
+     "phase": "observing",
+     "sequence": 1,
+     "round": 1,
+     "at": 1793846153932,
+     "revision": 8,
+     "steps": 0,
+     "evaluations": 0
+    },
+    {
+     "elapsedMs": 1020,
+     "phase": "observed",
+     "sequence": 2,
+     "round": 1,
+     "at": 1793846154964,
+     "revision": 8,
+     "steps": 0,
+     "evaluations": 0
+    },
+    {
+     "requestId": "f8d797eb-d659-475e-85b3-c8051abd0de5",
+     "decisionMode": "model",
+     "phase": "evaluating",
+     "sequence": 3,
+     "round": 1,
+     "at": 1793846154973,
+     "revision": 8,
+     "steps": 0,
+     "evaluations": 0
+    },
+    {
+     "targetGeneration": "D645ADB4-DCFB-450B-836A-F3875088D90E",
+     "application": "chrome.exe",
+     "action": "press",
+     "ref": "c5",
+     "role": "AXButton",
+     "focused": false,
+     "requestId": "f8d797eb-d659-475e-85b3-c8051abd0de5",
+     "confidence": 0.95,
+     "elapsedMs": 2544,
+     "phase": "decided",
+     "sequence": 4,
+     "round": 1,
+     "at": 1793846157517,
+     "revision": 8,
+     "steps": 0,
+     "evaluations": 1
+    },
+    {
+     "targetGeneration": "D645ADB4-DCFB-450B-836A-F3875088D90E",
+     "application": "chrome.exe",
+     "action": "press",
+     "ref": "c5",
+     "role": "AXButton",
+     "focused": false,
+     "operationId": "bad68ea8-61ff-4945-80e5-8bc7b0c2766d",
+     "phase": "acting",
+     "sequence": 5,
+     "round": 1,
+     "at": 1793846157559,
+     "revision": 8,
+     "steps": 0,
+     "evaluations": 1
+    },
+    {
+     "targetGeneration": "D645ADB4-DCFB-450B-836A-F3875088D90E",
+     "application": "chrome.exe",
+     "action": "press",
+     "ref": "c5",
+     "role": "AXButton",
+     "focused": false,
+     "operationId": "bad68ea8-61ff-4945-80e5-8bc7b0c2766d",
+     "outcome": "not_executed",
+     "reason": "TARGET_OCCLUDED",
+     "elapsedMs": 389,
+     "phase": "acted",
+     "sequence": 6,
+     "round": 1,
+     "at": 1793846157953,
+     "revision": 8,
+     "steps": 0,
+     "evaluations": 1
+    },
+    {
+     "reason": "TARGET_OCCLUDED",
+     "phase": "waiting",
+     "sequence": 7,
+     "round": 1,
+     "at": 1793846158996,
+     "revision": 8,
+     "steps": 0,
+     "evaluations": 1
+    },
+    {
+     "status": "needs_input",
+     "reason": "COMMAND_WAITING_INPUT",
+     "phase": "terminal",
+     "sequence": 8,
+     "round": 1,
+     "at": 1793846159001,
+     "revision": 8,
+     "steps": 0,
+     "evaluations": 1
+    }
+   ]
+  },
+  "state": {
+   "contractVersion": 1,
+   "capabilities": {
+    "standardCommands": [
+     "scroll:up",
+     "scroll:down",
+     "close:window",
+     "address:focus",
+     "app:quit",
+     "tab:close",
+     "tab:new"
+    ],
+    "keys": [
+     "backspace",
+     "down",
+     "enter",
+     "escape",
+     "left",
+     "right",
+     "tab",
+     "up"
+    ]
+   },
+   "scrollAreas": [
+    {
+     "ref": "s0",
+     "label": "Scrollable area",
+     "bounds": {
+      "x": 0,
+      "y": 0.17151162790697674,
+      "width": 0.000390625,
+      "height": 0.0009689922480620155
+     }
+    },
+    {
+     "ref": "s1",
+     "label": "Scrollable area",
+     "bounds": {
+      "x": 0.1703125,
+      "y": 0.23352713178294573,
+      "width": 0.8109375,
+      "height": 0.687015503875969
+     }
+    }
+   ],
+   "supportedActions": [
+    "scroll:up",
+    "scroll:down",
+    "navigate:back",
+    "navigate:forward"
+   ],
+   "screenshotAvailable": true,
+   "observationStats": {
+    "visited": 585,
+    "candidates": 142,
+    "exported": 142,
+    "incomplete": false
+   },
+   "generation": "8763837A-5D52-4247-BF27-C2AB5DB84A6B",
+   "application": "chrome.exe",
+   "controls": [
+    {
+     "identity": "0E019230-727B-4206-B251-7D15A394BF08",
+     "bounds": {
+      "x": 0.0109375,
+      "y": 0.187015503875969,
+      "width": 0.0125,
+      "height": 0.031007751937984496
+     },
+     "ref": "c0",
+     "label": "Spotify",
+     "role": "AXLink",
+     "value": "https://open.spotify.com/",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "39A64043-2F18-4CF1-A36D-6598328516D5",
+     "bounds": {
+      "x": 0.40234375,
+      "y": 0.24903100775193798,
+      "width": 0.025,
+      "height": 0.031007751937984496
+     },
+     "ref": "c1",
+     "label": "Songs",
+     "context": "All · Playlists · Albums · Artists · Podcasts & Shows · Genres & Moods",
+     "role": "AXLink",
+     "value": "https://open.spotify.com/search/sillyfools/tracks",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "0C05B7B5-57C7-452C-8ABF-C262B209C057",
+     "bounds": {
+      "x": 0.40234375,
+      "y": 0.24903100775193798,
+      "width": 0.025,
+      "height": 0.031007751937984496
+     },
+     "ref": "c2",
+     "label": "Songs",
+     "context": "All · Playlists · Albums · Artists · Podcasts & Shows · Genres & Moods",
+     "role": "AXCheckBox",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "D893C7C2-E0E6-4C09-883E-AFA16D46BECC",
+     "bounds": {
+      "x": 0.2109375,
+      "y": 0.500968992248062,
+      "width": 0.0546875,
+      "height": 0.041666666666666664
+     },
+     "ref": "c3",
+     "label": "Silly Fools",
+     "context": "Artist · Play",
+     "role": "AXLink",
+     "value": "https://open.spotify.com/artist/2xjp1njSsecnNhjgKZ35Ok",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "CDECFC75-57EC-4F6A-BC77-073727475A7E",
+     "bounds": {
+      "x": 0.33828125,
+      "y": 0.5339147286821705,
+      "width": 0.019140625,
+      "height": 0.046511627906976744
+     },
+     "ref": "c4",
+     "label": "Play",
+     "context": "Artist · Silly Fools",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "A6E6878E-4B73-4317-BB43-C420DF163608",
+     "bounds": {
+      "x": 0.3734375,
+      "y": 0.3817829457364341,
+      "width": 0.016015625,
+      "height": 0.03875968992248062
+     },
+     "ref": "c5",
+     "label": "Play ขี้หึง by Silly Fools",
+     "context": "ขี้หึง · Silly Fools",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "7B212E53-FBE3-48EC-9949-37F893584E45",
+     "bounds": {
+      "x": 0.39375,
+      "y": 0.3808139534883721,
+      "width": 0.01171875,
+      "height": 0.02131782945736434
+     },
+     "ref": "c6",
+     "label": "ขี้หึง",
+     "context": "Play ขี้หึง by Silly Fools · Silly Fools",
+     "role": "AXLink",
+     "value": "https://open.spotify.com/track/1nmdJTwB575vxvNm6PdXHq",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "33FDBE75-4054-4FDD-80D6-18FC3B3CAD78",
+     "bounds": {
+      "x": 0.39375,
+      "y": 0.4021317829457364,
+      "width": 0.024609375,
+      "height": 0.01937984496124031
+     },
+     "ref": "c7",
+     "label": "Silly Fools",
+     "context": "Play ขี้หึง by Silly Fools · ขี้หึง",
+     "role": "AXLink",
+     "value": "https://open.spotify.com/artist/2xjp1njSsecnNhjgKZ35Ok",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "5D13B470-5F0A-48DA-A48F-645ACF5629EB",
+     "bounds": {
+      "x": 0.39375,
+      "y": 0.4563953488372093,
+      "width": 0.024609375,
+      "height": 0.01937984496124031
+     },
+     "ref": "c8",
+     "label": "Silly Fools",
+     "context": "Play น้ำลาย by Silly Fools · น้ำลาย",
+     "role": "AXLink",
+     "value": "https://open.spotify.com/artist/2xjp1njSsecnNhjgKZ35Ok",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "993DA8C2-EF43-4D79-93FE-421F7316C8E5",
+     "bounds": {
+      "x": 0.39375,
+      "y": 0.5106589147286822,
+      "width": 0.024609375,
+      "height": 0.01937984496124031
+     },
+     "ref": "c9",
+     "label": "Silly Fools",
+     "context": "Play ไหนว่าจะไม่หลอกกัน by Silly Fools · ไหนว่าจะไม่หลอกกัน",
+     "role": "AXLink",
+     "value": "https://open.spotify.com/artist/2xjp1njSsecnNhjgKZ35Ok",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "FDB05461-A927-4180-A88E-4D257841D303",
+     "bounds": {
+      "x": 0.39375,
+      "y": 0.564922480620155,
+      "width": 0.024609375,
+      "height": 0.01937984496124031
+     },
+     "ref": "c10",
+     "label": "Silly Fools",
+     "context": "Play ฟังดูง่ายง่าย by Silly Fools · ฟังดูง่ายง่าย",
+     "role": "AXLink",
+     "value": "https://open.spotify.com/artist/2xjp1njSsecnNhjgKZ35Ok",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "4588F75F-F30B-4017-9E68-50E037829A5E",
+     "bounds": {
+      "x": 0.984375,
+      "y": 0.044573643410852716,
+      "width": 0.015625,
+      "height": 0.03294573643410853
+     },
+     "ref": "c11",
+     "label": "Chrome",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "A617CA68-0121-4653-8CBE-5B9CEE3DF92E",
+     "bounds": {
+      "x": 0.418359375,
+      "y": 0.17926356589147288,
+      "width": 0.18515625,
+      "height": 0.046511627906976744
+     },
+     "ref": "c12",
+     "label": "What do you want to play?",
+     "context": "Search · Clear search field · Browse",
+     "role": "AXComboBox",
+     "value": "sillyfools",
+     "focused": false,
+     "actions": [
+      "press",
+      "type"
+     ]
+    },
+    {
+     "identity": "60AF86E8-9D94-4EEE-9D36-DFDDFBC90C8C",
+     "bounds": {
+      "x": 0,
+      "y": 0.17151162790697674,
+      "width": 1,
+      "height": 0.8284883720930233
+     },
+     "ref": "c13",
+     "label": "AXGroup",
+     "role": "AXGroup",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "FA728B57-CE1A-42EC-8E61-DD127ECF7428",
+     "bounds": {
+      "x": 0,
+      "y": 0.17151162790697674,
+      "width": 1,
+      "height": 0.8284883720930233
+     },
+     "ref": "c14",
+     "label": "AXGroup",
+     "role": "AXGroup",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "3755463C-D651-4D46-AC23-172D320DA838",
+     "bounds": {
+      "x": 0.396484375,
+      "y": 0.17926356589147288,
+      "width": 0.01875,
+      "height": 0.046511627906976744
+     },
+     "ref": "c15",
+     "label": "Home",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "64A016B6-5545-422C-8190-5BA225C07276",
+     "bounds": {
+      "x": 0.769921875,
+      "y": 0.17926356589147288,
+      "width": 0.0265625,
+      "height": 0.046511627906976744
+     },
+     "ref": "c16",
+     "label": "Premium",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "F6F74E2C-4281-4CEF-98E8-1210A7AAAE81",
+     "bounds": {
+      "x": 0.79921875,
+      "y": 0.17926356589147288,
+      "width": 0.024609375,
+      "height": 0.046511627906976744
+     },
+     "ref": "c17",
+     "label": "Support",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "E5A034B0-BE2C-4CD4-90AB-74795C545E63",
+     "bounds": {
+      "x": 0.8265625,
+      "y": 0.17926356589147288,
+      "width": 0.03046875,
+      "height": 0.046511627906976744
+     },
+     "ref": "c18",
+     "label": "Download",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "D0AEC766-99F0-4ADD-8EBA-D776AB7AE906",
+     "bounds": {
+      "x": 0.87578125,
+      "y": 0.187015503875969,
+      "width": 0.04765625,
+      "height": 0.031007751937984496
+     },
+     "ref": "c19",
+     "label": "Install App",
+     "role": "AXLink",
+     "value": "https://open.spotify.com/download",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "3F468F85-6E8D-468D-A09C-DF7D76E597B3",
+     "bounds": {
+      "x": 0.926171875,
+      "y": 0.187015503875969,
+      "width": 0.028515625,
+      "height": 0.031007751937984496
+     },
+     "ref": "c20",
+     "label": "Sign up",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "87CF2435-58BF-40A6-91DA-428D3EBA2827",
+     "bounds": {
+      "x": 0.954296875,
+      "y": 0.17926356589147288,
+      "width": 0.042578125,
+      "height": 0.046511627906976744
+     },
+     "ref": "c21",
+     "label": "Log in",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "B2499615-7A59-49CB-9691-70B9EEB35B75",
+     "bounds": {
+      "x": 0.978125,
+      "y": 0.2374031007751938,
+      "width": 0.003125,
+      "height": 0.6792635658914729
+     },
+     "ref": "c22",
+     "label": "AXGroup",
+     "role": "AXGroup",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "89B9C14D-2B95-41D4-A2AA-9796A872AE7F",
+     "bounds": {
+      "x": 0.984375,
+      "y": 0.23352713178294573,
+      "width": 0.015625,
+      "height": 0.687015503875969
+     },
+     "ref": "c23",
+     "label": "AXGroup",
+     "role": "AXGroup",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "0E3D9E63-086E-45C4-9DC6-4EED8BF923E4",
+     "bounds": {
+      "x": 0,
+      "y": 0.17926356589147288,
+      "width": 1,
+      "height": 0.7412790697674418
+     },
+     "ref": "c24",
+     "label": "AXGroup",
+     "role": "AXGroup",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "EF2696AE-70F3-4958-A96E-1ED0DDFCD938",
+     "bounds": {
+      "x": 0.418359375,
+      "y": 0.17926356589147288,
+      "width": 0.01875,
+      "height": 0.046511627906976744
+     },
+     "ref": "c25",
+     "label": "Search",
+     "context": "What do you want to play? · Clear search field · Browse",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "3CC9A34F-F93F-4BFA-8BC9-AF702515BBFF",
+     "bounds": {
+      "x": 0.5640625,
+      "y": 0.18992248062015504,
+      "width": 0.01875,
+      "height": 0.025193798449612403
+     },
+     "ref": "c26",
+     "label": "Clear search field",
+     "context": "Search · What do you want to play? · Browse",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "AD4A1C0D-7334-4408-9874-02844675E481",
+     "bounds": {
+      "x": 0.587890625,
+      "y": 0.19089147286821706,
+      "width": 0.009375,
+      "height": 0.02422480620155039
+     },
+     "ref": "c27",
+     "label": "Browse",
+     "context": "Search · What do you want to play? · Clear search field",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "E4782C3C-F706-4819-B6DF-059960CCE28D",
+     "bounds": {
+      "x": 0.0125,
+      "y": 0.8062015503875969,
+      "width": 0.023828125,
+      "height": 0.02131782945736434
+     },
+     "ref": "c28",
+     "label": "Cookies",
+     "role": "AXLink",
+     "value": "https://www.spotify.com/legal/cookies-policy/",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "69F2D034-C652-4D4B-895C-8D3EB2BCDC98",
+     "bounds": {
+      "x": 0.0125,
+      "y": 0.8585271317829457,
+      "width": 0.039453125,
+      "height": 0.031007751937984496
+     },
+     "ref": "c29",
+     "label": "English",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "3CE3B9D8-CA60-4CFC-867F-F464ED2B9E80",
+     "bounds": {
+      "x": 0.003125,
+      "y": 0.9282945736434108,
+      "width": 0.99375,
+      "height": 0.06395348837209303
+     },
+     "ref": "c30",
+     "label": "AXGroup",
+     "context": "Preview of Spotify · Sign up to get unlimited songs and podcasts with occasional ads. No credit card needed. · Sign up free",
+     "role": "AXGroup",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "175BCB40-CBBC-4141-9F3E-D7334A2A3D5B",
+     "bounds": {
+      "x": 0.9859375,
+      "y": 0.561046511627907,
+      "width": 0.0125,
+      "height": 0.03197674418604651
+     },
+     "ref": "c31",
+     "label": "Show Now Playing view",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "5BD30255-0663-4D66-AF46-FD5107787118",
+     "bounds": {
+      "x": 0.927734375,
+      "y": 0.938953488372093,
+      "width": 0.059765625,
+      "height": 0.046511627906976744
+     },
+     "ref": "c32",
+     "label": "Sign up free",
+     "context": "Preview of Spotify · Sign up to get unlimited songs and podcasts with occasional ads. No credit card needed.",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "B17E93D4-C4E4-4E4A-9BB6-991BDA37721A",
+     "bounds": {
+      "x": 0.121875,
+      "y": 0.24903100775193798,
+      "width": 0.0390625,
+      "height": 0.03488372093023256
+     },
+     "ref": "c33",
+     "label": "Create",
+     "context": "Your Library",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "EC84CC85-5500-4A44-99F5-4A39D9485E57",
+     "bounds": {
+      "x": 0.0140625,
+      "y": 0.4060077519379845,
+      "width": 0.04921875,
+      "height": 0.031007751937984496
+     },
+     "ref": "c34",
+     "label": "Create playlist",
+     "context": "Create your first playlist · It's easy, we'll help you · Let's find some podcasts to follow · We'll keep you updated on new episodes · Browse podcasts",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "7DC19835-0D85-44F2-AEF7-DFAA612F2D28",
+     "bounds": {
+      "x": 0.0140625,
+      "y": 0.5591085271317829,
+      "width": 0.055859375,
+      "height": 0.031007751937984496
+     },
+     "ref": "c35",
+     "label": "Browse podcasts",
+     "context": "Create your first playlist · It's easy, we'll help you · Let's find some podcasts to follow · We'll keep you updated on new episodes · Create playlist",
+     "role": "AXLink",
+     "value": "https://open.spotify.com/genre/podcasts-web",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "FB307EE1-2250-4A79-AD26-64BB53A7DEAA",
+     "bounds": {
+      "x": 0.0125,
+      "y": 0.7577519379844961,
+      "width": 0.01171875,
+      "height": 0.016472868217054265
+     },
+     "ref": "c36",
+     "label": "Legal",
+     "context": "Safety & Privacy Center · Privacy Policy · Cookies · About Ads · Accessibility",
+     "role": "AXLink",
+     "value": "https://www.spotify.com/th-th/legal/",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "0A99D11B-3B71-41EC-9B6E-54B5F458C038",
+     "bounds": {
+      "x": 0.030078125,
+      "y": 0.7577519379844961,
+      "width": 0.05,
+      "height": 0.016472868217054265
+     },
+     "ref": "c37",
+     "label": "Safety & Privacy Center",
+     "context": "Legal · Privacy Policy · Cookies · About Ads · Accessibility",
+     "role": "AXLink",
+     "value": "https://www.spotify.com/th-th/safetyandprivacy/",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "2F2F8A90-1FB6-44FB-B72E-893E2C79798F",
+     "bounds": {
+      "x": 0.0859375,
+      "y": 0.7577519379844961,
+      "width": 0.02890625,
+      "height": 0.016472868217054265
+     },
+     "ref": "c38",
+     "label": "Privacy Policy",
+     "context": "Legal · Safety & Privacy Center · Cookies · About Ads · Accessibility",
+     "role": "AXLink",
+     "value": "https://www.spotify.com/th-th/legal/privacy-policy/",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "B2B2666A-EECF-4430-8247-676EF8A0295D",
+     "bounds": {
+      "x": 0.120703125,
+      "y": 0.7577519379844961,
+      "width": 0.017578125,
+      "height": 0.016472868217054265
+     },
+     "ref": "c39",
+     "label": "Cookies",
+     "context": "Legal · Safety & Privacy Center · Privacy Policy · About Ads · Accessibility",
+     "role": "AXLink",
+     "value": "https://www.spotify.com/th-th/legal/cookies-policy/",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "50540D15-338F-4113-8A4D-66B5238894DA",
+     "bounds": {
+      "x": 0.0125,
+      "y": 0.7819767441860465,
+      "width": 0.02265625,
+      "height": 0.016472868217054265
+     },
+     "ref": "c40",
+     "label": "About Ads",
+     "context": "Legal · Safety & Privacy Center · Privacy Policy · Cookies · Accessibility",
+     "role": "AXLink",
+     "value": "https://www.spotify.com/th-th/legal/privacy-policy/#s3",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "C5D37A64-A773-43EB-A527-D1A4C5344D9D",
+     "bounds": {
+      "x": 0.041015625,
+      "y": 0.7819767441860465,
+      "width": 0.026953125,
+      "height": 0.016472868217054265
+     },
+     "ref": "c41",
+     "label": "Accessibility",
+     "context": "Legal · Safety & Privacy Center · Privacy Policy · Cookies · About Ads",
+     "role": "AXLink",
+     "value": "https://www.spotify.com/th-th/accessibility/",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "6530A6CC-1974-4F92-B24D-AFEF767AB4B0",
+     "bounds": {
+      "x": 0.35078125,
+      "y": 0.24903100775193798,
+      "width": 0.016015625,
+      "height": 0.031007751937984496
+     },
+     "ref": "c42",
+     "label": "All",
+     "context": "Playlists · Songs · Albums · Artists · Podcasts & Shows · Genres & Moods",
+     "role": "AXLink",
+     "value": "https://open.spotify.com/search/sillyfools",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "35636BA1-8EF7-4C95-971C-53FFCCF4775D",
+     "bounds": {
+      "x": 0.36953125,
+      "y": 0.24903100775193798,
+      "width": 0.030078125,
+      "height": 0.031007751937984496
+     },
+     "ref": "c43",
+     "label": "Playlists",
+     "context": "All · Songs · Albums · Artists · Podcasts & Shows · Genres & Moods",
+     "role": "AXLink",
+     "value": "https://open.spotify.com/search/sillyfools/playlists",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "28609FC2-15F1-4D27-9D19-8B742FEA4324",
+     "bounds": {
+      "x": 0.430078125,
+      "y": 0.24903100775193798,
+      "width": 0.02890625,
+      "height": 0.031007751937984496
+     },
+     "ref": "c44",
+     "label": "Albums",
+     "context": "All · Playlists · Songs · Artists · Podcasts & Shows · Genres & Moods",
+     "role": "AXLink",
+     "value": "https://open.spotify.com/search/sillyfools/albums",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "2D106C60-D5DF-41E0-AC0B-DD1F7D7F36F2",
+     "bounds": {
+      "x": 0.46171875,
+      "y": 0.24903100775193798,
+      "width": 0.026171875,
+      "height": 0.031007751937984496
+     },
+     "ref": "c45",
+     "label": "Artists",
+     "context": "All · Playlists · Songs · Albums · Podcasts & Shows · Genres & Moods",
+     "role": "AXLink",
+     "value": "https://open.spotify.com/search/sillyfools/artists",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "C504A240-BD5A-4054-A669-7A08F1BFC9ED",
+     "bounds": {
+      "x": 0.490625,
+      "y": 0.24903100775193798,
+      "width": 0.054296875,
+      "height": 0.031007751937984496
+     },
+     "ref": "c46",
+     "label": "Podcasts & Shows",
+     "context": "All · Playlists · Songs · Albums · Artists · Genres & Moods",
+     "role": "AXLink",
+     "value": "https://open.spotify.com/search/sillyfools/podcastAndEpisodes",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "9D2FF1A0-424A-42D4-97C9-3F595DA7518C",
+     "bounds": {
+      "x": 0.54765625,
+      "y": 0.24903100775193798,
+      "width": 0.05078125,
+      "height": 0.031007751937984496
+     },
+     "ref": "c47",
+     "label": "Genres & Moods",
+     "context": "All · Playlists · Songs · Albums · Artists · Podcasts & Shows",
+     "role": "AXLink",
+     "value": "https://open.spotify.com/search/sillyfools/genres",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "BE0B3892-C61B-465A-A20E-D640EA839909",
+     "bounds": {
+      "x": 0.35078125,
+      "y": 0.24903100775193798,
+      "width": 0.016015625,
+      "height": 0.031007751937984496
+     },
+     "ref": "c48",
+     "label": "All",
+     "context": "Playlists · Songs · Albums · Artists · Podcasts & Shows · Genres & Moods",
+     "role": "AXCheckBox",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "CAA728A2-EEB5-40BB-8F14-130DF347123A",
+     "bounds": {
+      "x": 0.36953125,
+      "y": 0.24903100775193798,
+      "width": 0.030078125,
+      "height": 0.031007751937984496
+     },
+     "ref": "c49",
+     "label": "Playlists",
+     "context": "All · Songs · Albums · Artists · Podcasts & Shows · Genres & Moods",
+     "role": "AXCheckBox",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "9FF35E24-B8BA-4576-B356-18AF5427800C",
+     "bounds": {
+      "x": 0.430078125,
+      "y": 0.24903100775193798,
+      "width": 0.02890625,
+      "height": 0.031007751937984496
+     },
+     "ref": "c50",
+     "label": "Albums",
+     "context": "All · Playlists · Songs · Artists · Podcasts & Shows · Genres & Moods",
+     "role": "AXCheckBox",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "343593AD-0579-452D-9089-C2D4A52DD128",
+     "bounds": {
+      "x": 0.46171875,
+      "y": 0.24903100775193798,
+      "width": 0.026171875,
+      "height": 0.031007751937984496
+     },
+     "ref": "c51",
+     "label": "Artists",
+     "context": "All · Playlists · Songs · Albums · Podcasts & Shows · Genres & Moods",
+     "role": "AXCheckBox",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "6FEF802E-6330-4116-BA8D-0EE42DE1D74D",
+     "bounds": {
+      "x": 0.490625,
+      "y": 0.24903100775193798,
+      "width": 0.054296875,
+      "height": 0.031007751937984496
+     },
+     "ref": "c52",
+     "label": "Podcasts & Shows",
+     "context": "All · Playlists · Songs · Albums · Artists · Genres & Moods",
+     "role": "AXCheckBox",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "7B8A3B42-6F65-4C3B-B60E-ED52B2F8213D",
+     "bounds": {
+      "x": 0.54765625,
+      "y": 0.24903100775193798,
+      "width": 0.05078125,
+      "height": 0.031007751937984496
+     },
+     "ref": "c53",
+     "label": "Genres & Moods",
+     "context": "All · Playlists · Songs · Albums · Artists · Podcasts & Shows",
+     "role": "AXCheckBox",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "F690C61F-5950-47B5-8EFA-D99B83DBB3C4",
+     "bounds": {
+      "x": 0.203125,
+      "y": 0.37306201550387597,
+      "width": 0.162109375,
+      "height": 0.2189922480620155
+     },
+     "ref": "c54",
+     "label": "AXGroup",
+     "context": "Artist · Silly Fools · Play",
+     "role": "AXGroup",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "D10435BC-4D13-461E-860F-DF5F3BB1A212",
+     "bounds": {
+      "x": 0.369921875,
+      "y": 0.374031007751938,
+      "width": 0.578125,
+      "height": 0.05426356589147287
+     },
+     "ref": "c55",
+     "label": "Play ขี้หึง by Silly Fools ขี้หึง Silly Fools Add to Liked Songs 4:26 More options for ขี้หึง by Silly Fools",
+     "role": "AXRow",
+     "value": "Not selected",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "07B81B4D-7B76-457B-BC55-861529EFC467",
+     "bounds": {
+      "x": 0.369921875,
+      "y": 0.42829457364341084,
+      "width": 0.578125,
+      "height": 0.05426356589147287
+     },
+     "ref": "c56",
+     "label": "Play น้ำลาย by Silly Fools น้ำลาย Silly Fools Add to Liked Songs 4:22 More options for น้ำลาย by Silly Fools",
+     "role": "AXRow",
+     "value": "Not selected",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "168B4D2D-2560-48A4-838E-2E5102F24FA8",
+     "bounds": {
+      "x": 0.369921875,
+      "y": 0.48255813953488375,
+      "width": 0.578125,
+      "height": 0.05426356589147287
+     },
+     "ref": "c57",
+     "label": "Play ไหนว่าจะไม่หลอกกัน by Silly Fools ไหนว่าจะไม่หลอกกัน Silly Fools Add to Liked Songs 5:07 More options for ไหนว่าจะไม่หลอกกัน by Silly Fools",
+     "role": "AXRow",
+     "value": "Not selected",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "7271FC6C-A7FB-40DB-8624-156A1A22C8D1",
+     "bounds": {
+      "x": 0.369921875,
+      "y": 0.5368217054263565,
+      "width": 0.578125,
+      "height": 0.05426356589147287
+     },
+     "ref": "c58",
+     "label": "Play ฟังดูง่ายง่าย by Silly Fools ฟังดูง่ายง่าย Silly Fools Add to Liked Songs 4:19 More options for ฟังดูง่ายง่าย by Silly Fools",
+     "role": "AXRow",
+     "value": "Not selected",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "54F60D27-B533-441D-9D4C-30DA0A560732",
+     "bounds": {
+      "x": 0.1984375,
+      "y": 0.6773255813953488,
+      "width": 0.07578125,
+      "height": 0.24031007751937986
+     },
+     "ref": "c59",
+     "label": "This Is Silly Fools By Spotify",
+     "context": "By Spotify · Play This Is Silly Fools · This Is Silly Fools",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "B0D33B0D-05C2-4580-8D05-616E99938661",
+     "bounds": {
+      "x": 0.247265625,
+      "y": 0.8062015503875969,
+      "width": 0.019140625,
+      "height": 0.04748062015503876
+     },
+     "ref": "c60",
+     "label": "Play This Is Silly Fools",
+     "context": "By Spotify · This Is Silly Fools By Spotify · This Is Silly Fools",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "059B6DD1-F8FC-44D2-8541-33D59DF91E42",
+     "bounds": {
+      "x": 0.203125,
+      "y": 0.8604651162790697,
+      "width": 0.046484375,
+      "height": 0.022286821705426358
+     },
+     "ref": "c61",
+     "label": "This Is Silly Fools",
+     "context": "By Spotify · This Is Silly Fools By Spotify · Play This Is Silly Fools",
+     "role": "AXLink",
+     "value": "https://open.spotify.com/playlist/37i9dQZF1DZ06evO1sbm4s",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "58AEB17D-6CCE-4204-B72C-4C75F9E1C5A8",
+     "bounds": {
+      "x": 0.273828125,
+      "y": 0.6773255813953488,
+      "width": 0.07578125,
+      "height": 0.24031007751937986
+     },
+     "ref": "c62",
+     "label": "Silly Fools Radio By Spotify",
+     "context": "By Spotify · Play Silly Fools Radio · Silly Fools Radio",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "B461EE69-E806-4E3F-B521-1E04DB872546",
+     "bounds": {
+      "x": 0.32265625,
+      "y": 0.8062015503875969,
+      "width": 0.019140625,
+      "height": 0.04748062015503876
+     },
+     "ref": "c63",
+     "label": "Play Silly Fools Radio",
+     "context": "By Spotify · Silly Fools Radio By Spotify · Silly Fools Radio",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "BA4C43C2-A2F4-4F17-A156-3B9214AB4E2B",
+     "bounds": {
+      "x": 0.278515625,
+      "y": 0.8604651162790697,
+      "width": 0.045703125,
+      "height": 0.022286821705426358
+     },
+     "ref": "c64",
+     "label": "Silly Fools Radio",
+     "context": "By Spotify · Silly Fools Radio By Spotify · Play Silly Fools Radio",
+     "role": "AXLink",
+     "value": "https://open.spotify.com/playlist/37i9dQZF1E4AZOJ4lDOZ2o",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "03A7BF0F-EF07-4F8F-B41A-13B9A9D84E18",
+     "bounds": {
+      "x": 0.3765625,
+      "y": 0.375,
+      "width": 0.446875,
+      "height": 0.05232558139534884
+     },
+     "ref": "c65",
+     "label": "Play ขี้หึง by Silly Fools ขี้หึง Silly Fools",
+     "context": "Add to Liked Songs 4:26 More options for ขี้หึง by Silly Fools · Play ขี้หึง by Silly Fools · ขี้หึง · Silly Fools · Add to Liked Songs · More options for ขี้หึง by Silly Fools",
+     "role": "AXRow",
+     "value": "Not selected",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "D366CBD7-8845-4455-A992-418C2FB27C61",
+     "bounds": {
+      "x": 0.829296875,
+      "y": 0.375,
+      "width": 0.112109375,
+      "height": 0.05232558139534884
+     },
+     "ref": "c66",
+     "label": "Add to Liked Songs 4:26 More options for ขี้หึง by Silly Fools",
+     "context": "Play ขี้หึง by Silly Fools ขี้หึง Silly Fools · Play ขี้หึง by Silly Fools · ขี้หึง · Silly Fools · Add to Liked Songs · More options for ขี้หึง by Silly Fools",
+     "role": "AXRow",
+     "value": "Not selected",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "DD71521A-E82C-431C-941F-3C9BE4E55591",
+     "bounds": {
+      "x": 0.3765625,
+      "y": 0.42926356589147285,
+      "width": 0.446875,
+      "height": 0.05232558139534884
+     },
+     "ref": "c67",
+     "label": "Play น้ำลาย by Silly Fools น้ำลาย Silly Fools",
+     "context": "Add to Liked Songs 4:22 More options for น้ำลาย by Silly Fools · Play น้ำลาย by Silly Fools · น้ำลาย · Silly Fools · Add to Liked Songs · More options for น้ำลาย by Silly Fools",
+     "role": "AXRow",
+     "value": "Not selected",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "959AE6B6-9F5D-48C5-BC53-ECF1EF6452F0",
+     "bounds": {
+      "x": 0.829296875,
+      "y": 0.42926356589147285,
+      "width": 0.112109375,
+      "height": 0.05232558139534884
+     },
+     "ref": "c68",
+     "label": "Add to Liked Songs 4:22 More options for น้ำลาย by Silly Fools",
+     "context": "Play น้ำลาย by Silly Fools น้ำลาย Silly Fools · Play น้ำลาย by Silly Fools · น้ำลาย · Silly Fools · Add to Liked Songs · More options for น้ำลาย by Silly Fools",
+     "role": "AXRow",
+     "value": "Not selected",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "67B2CABC-FB96-478F-9E7E-A7DF8213B158",
+     "bounds": {
+      "x": 0.3765625,
+      "y": 0.48352713178294576,
+      "width": 0.446875,
+      "height": 0.05232558139534884
+     },
+     "ref": "c69",
+     "label": "Play ไหนว่าจะไม่หลอกกัน by Silly Fools ไหนว่าจะไม่หลอกกัน Silly Fools",
+     "context": "Add to Liked Songs 5:07 More options for ไหนว่าจะไม่หลอกกัน by Silly Fools · Play ไหนว่าจะไม่หลอกกัน by Silly Fools · ไหนว่าจะไม่หลอกกัน · Silly Fools · Add to Liked Songs · More options for ไหนว่าจะไม่หลอกกัน by Silly Fools",
+     "role": "AXRow",
+     "value": "Not selected",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "6D87E747-5868-42CF-95C4-FE39E0B54B0A",
+     "bounds": {
+      "x": 0.829296875,
+      "y": 0.48352713178294576,
+      "width": 0.112109375,
+      "height": 0.05232558139534884
+     },
+     "ref": "c70",
+     "label": "Add to Liked Songs 5:07 More options for ไหนว่าจะไม่หลอกกัน by Silly Fools",
+     "context": "Play ไหนว่าจะไม่หลอกกัน by Silly Fools ไหนว่าจะไม่หลอกกัน Silly Fools · Play ไหนว่าจะไม่หลอกกัน by Silly Fools · ไหนว่าจะไม่หลอกกัน · Silly Fools · Add to Liked Songs · More options for ไหนว่าจะไม่หลอกกัน by Silly Fools",
+     "role": "AXRow",
+     "value": "Not selected",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "DCDEBB8A-0AF6-44CB-AA72-BB83EBFC6D03",
+     "bounds": {
+      "x": 0.3765625,
+      "y": 0.5377906976744186,
+      "width": 0.446875,
+      "height": 0.05232558139534884
+     },
+     "ref": "c71",
+     "label": "Play ฟังดูง่ายง่าย by Silly Fools ฟังดูง่ายง่าย Silly Fools",
+     "context": "Add to Liked Songs 4:19 More options for ฟังดูง่ายง่าย by Silly Fools · Play ฟังดูง่ายง่าย by Silly Fools · ฟังดูง่ายง่าย · Silly Fools · Add to Liked Songs · More options for ฟังดูง่ายง่าย by Silly Fools",
+     "role": "AXRow",
+     "value": "Not selected",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "1F5B66F4-CFD6-44B4-83F0-E2E056395E20",
+     "bounds": {
+      "x": 0.829296875,
+      "y": 0.5377906976744186,
+      "width": 0.112109375,
+      "height": 0.05232558139534884
+     },
+     "ref": "c72",
+     "label": "Add to Liked Songs 4:19 More options for ฟังดูง่ายง่าย by Silly Fools",
+     "context": "Play ฟังดูง่ายง่าย by Silly Fools ฟังดูง่ายง่าย Silly Fools · Play ฟังดูง่ายง่าย by Silly Fools · ฟังดูง่ายง่าย · Silly Fools · Add to Liked Songs · More options for ฟังดูง่ายง่าย by Silly Fools",
+     "role": "AXRow",
+     "value": "Not selected",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "FE14FE61-86FB-4BAC-921A-47D29C281E98",
+     "bounds": {
+      "x": 0.203125,
+      "y": 0.8604651162790697,
+      "width": 0.046484375,
+      "height": 0.022286821705426358
+     },
+     "ref": "c73",
+     "label": "This Is Silly Fools",
+     "context": "By Spotify · This Is Silly Fools By Spotify · Play This Is Silly Fools",
+     "role": "AXGroup",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "2A1858AE-40DC-4D8B-B475-EC18B75B11A7",
+     "bounds": {
+      "x": 0.278515625,
+      "y": 0.8604651162790697,
+      "width": 0.045703125,
+      "height": 0.022286821705426358
+     },
+     "ref": "c74",
+     "label": "Silly Fools Radio",
+     "context": "By Spotify · Silly Fools Radio By Spotify · Play Silly Fools Radio",
+     "role": "AXGroup",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "39859942-5833-4F22-9A44-91908308DE8B",
+     "bounds": {
+      "x": 0.44375,
+      "y": 0.9563953488372093,
+      "width": 0.1125,
+      "height": 0.031007751937984496
+     },
+     "ref": "c75",
+     "label": "daily.dev | Where developers discover what's next",
+     "context": "Customize Chrome",
+     "role": "AXLink",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "94C099BC-1076-4350-B229-ADF10C6EFCEC",
+     "bounds": {
+      "x": 0.92890625,
+      "y": 0.9563953488372093,
+      "width": 0.06484375,
+      "height": 0.031007751937984496
+     },
+     "ref": "c76",
+     "label": "Customize Chrome",
+     "context": "daily.dev | Where developers discover what's next",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "F8E1B60F-C3AD-4DDC-B6C2-5847962A4CD3",
+     "bounds": {
+      "x": 0.901171875,
+      "y": 0.3856589147286822,
+      "width": 0.006640625,
+      "height": 0.031007751937984496
+     },
+     "ref": "c77",
+     "label": "Add to Liked Songs",
+     "context": "More options for ขี้หึง by Silly Fools",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "74E0508F-0E66-4DA8-AD1B-DA4126D8DCE0",
+     "bounds": {
+      "x": 0.934765625,
+      "y": 0.3856589147286822,
+      "width": 0.006640625,
+      "height": 0.031007751937984496
+     },
+     "ref": "c78",
+     "label": "More options for ขี้หึง by Silly Fools",
+     "context": "Add to Liked Songs",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "562EC706-C721-4920-9FFC-F873C01F2458",
+     "bounds": {
+      "x": 0.3734375,
+      "y": 0.436046511627907,
+      "width": 0.016015625,
+      "height": 0.03875968992248062
+     },
+     "ref": "c79",
+     "label": "Play น้ำลาย by Silly Fools",
+     "context": "น้ำลาย · Silly Fools",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "5A5DFB93-E9CB-44F4-BC30-1A4E7BF20D4C",
+     "bounds": {
+      "x": 0.39375,
+      "y": 0.43507751937984496,
+      "width": 0.01796875,
+      "height": 0.02131782945736434
+     },
+     "ref": "c80",
+     "label": "น้ำลาย",
+     "context": "Play น้ำลาย by Silly Fools · Silly Fools",
+     "role": "AXLink",
+     "value": "https://open.spotify.com/track/0nUOnbRTWEAOVRu4FRQENe",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "5D6C4519-E516-4131-B2FA-CEF4150D430E",
+     "bounds": {
+      "x": 0.901171875,
+      "y": 0.43992248062015504,
+      "width": 0.006640625,
+      "height": 0.031007751937984496
+     },
+     "ref": "c81",
+     "label": "Add to Liked Songs",
+     "context": "More options for น้ำลาย by Silly Fools",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "BCE7CD98-46CB-4605-A812-A7C7A0D79049",
+     "bounds": {
+      "x": 0.934765625,
+      "y": 0.43992248062015504,
+      "width": 0.006640625,
+      "height": 0.031007751937984496
+     },
+     "ref": "c82",
+     "label": "More options for น้ำลาย by Silly Fools",
+     "context": "Add to Liked Songs",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "BCFFBBC0-959A-421E-866E-508335465346",
+     "bounds": {
+      "x": 0.3734375,
+      "y": 0.4903100775193798,
+      "width": 0.016015625,
+      "height": 0.03875968992248062
+     },
+     "ref": "c83",
+     "label": "Play ไหนว่าจะไม่หลอกกัน by Silly Fools",
+     "context": "ไหนว่าจะไม่หลอกกัน · Silly Fools",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "0AD3F1BB-FF0A-4497-9806-E950409D9C76",
+     "bounds": {
+      "x": 0.39375,
+      "y": 0.4893410852713178,
+      "width": 0.05390625,
+      "height": 0.02131782945736434
+     },
+     "ref": "c84",
+     "label": "ไหนว่าจะไม่หลอกกัน",
+     "context": "Play ไหนว่าจะไม่หลอกกัน by Silly Fools · Silly Fools",
+     "role": "AXLink",
+     "value": "https://open.spotify.com/track/3V7Lg8NfRBWZNVzX9LGYyX",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "1877F598-C88A-4B02-B6FF-F87AA463C78F",
+     "bounds": {
+      "x": 0.901171875,
+      "y": 0.4941860465116279,
+      "width": 0.006640625,
+      "height": 0.031007751937984496
+     },
+     "ref": "c85",
+     "label": "Add to Liked Songs",
+     "context": "More options for ไหนว่าจะไม่หลอกกัน by Silly Fools",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "3E9463DD-6B08-488C-9822-6A6803A986B7",
+     "bounds": {
+      "x": 0.934765625,
+      "y": 0.4941860465116279,
+      "width": 0.006640625,
+      "height": 0.031007751937984496
+     },
+     "ref": "c86",
+     "label": "More options for ไหนว่าจะไม่หลอกกัน by Silly Fools",
+     "context": "Add to Liked Songs",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "FAE97B78-85A0-4FF0-815D-A23301142108",
+     "bounds": {
+      "x": 0.3734375,
+      "y": 0.5445736434108527,
+      "width": 0.016015625,
+      "height": 0.03875968992248062
+     },
+     "ref": "c87",
+     "label": "Play ฟังดูง่ายง่าย by Silly Fools",
+     "context": "ฟังดูง่ายง่าย · Silly Fools",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "33CD7927-1CEE-47DE-9DA1-F81AFE9CE74A",
+     "bounds": {
+      "x": 0.39375,
+      "y": 0.5436046511627907,
+      "width": 0.03125,
+      "height": 0.02131782945736434
+     },
+     "ref": "c88",
+     "label": "ฟังดูง่ายง่าย",
+     "context": "Play ฟังดูง่ายง่าย by Silly Fools · Silly Fools",
+     "role": "AXLink",
+     "value": "https://open.spotify.com/track/5UbABVhLmmXgrKa9vASvwS",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "C5A8454C-7870-4C03-9FD5-624A9FCE2BB8",
+     "bounds": {
+      "x": 0.901171875,
+      "y": 0.5484496124031008,
+      "width": 0.006640625,
+      "height": 0.031007751937984496
+     },
+     "ref": "c89",
+     "label": "Add to Liked Songs",
+     "context": "More options for ฟังดูง่ายง่าย by Silly Fools",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "733A2ACD-7A47-49AF-9B80-8623C3D01788",
+     "bounds": {
+      "x": 0.934765625,
+      "y": 0.5484496124031008,
+      "width": 0.006640625,
+      "height": 0.031007751937984496
+     },
+     "ref": "c90",
+     "label": "More options for ฟังดูง่ายง่าย by Silly Fools",
+     "context": "Add to Liked Songs",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "16934806-9753-430F-95C6-F8BF2B481D82",
+     "bounds": {
+      "x": 0.06171875,
+      "y": 0.04941860465116279,
+      "width": 0.593359375,
+      "height": 0.023255813953488372
+     },
+     "ref": "c91",
+     "label": "Address and search bar",
+     "context": "View site information · This site can use identifiers to play protected content. · Ask Google · Install Spotify · Bookmark this tab",
+     "role": "AXTextField",
+     "value": "open.spotify.com/search/sillyfools",
+     "focused": false,
+     "actions": [
+      "type"
+     ]
+    },
+    {
+     "identity": "7DD56E76-A082-42EA-8F71-A921077B953F",
+     "bounds": {
+      "x": 0.946484375,
+      "y": 0,
+      "width": 0.017578125,
+      "height": 0.03875968992248062
+     },
+     "ref": "c92",
+     "label": "Minimize",
+     "context": "Restore · Close",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "734AF7FB-51A1-49CD-8720-6BF2C05F43AB",
+     "bounds": {
+      "x": 0.9640625,
+      "y": 0,
+      "width": 0.01796875,
+      "height": 0.03875968992248062
+     },
+     "ref": "c93",
+     "label": "Restore",
+     "context": "Minimize · Close",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "F268E1B0-9AEC-4380-AF10-3D4318686680",
+     "bounds": {
+      "x": 0.98203125,
+      "y": 0,
+      "width": 0.01796875,
+      "height": 0.03875968992248062
+     },
+     "ref": "c94",
+     "label": "Close",
+     "context": "Minimize · Restore",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "ADCAB47C-7DAF-4414-A20C-228500B6FA8E",
+     "bounds": {
+      "x": 0.09765625,
+      "y": 0,
+      "width": 0.0109375,
+      "height": 0.03972868217054264
+     },
+     "ref": "c95",
+     "label": "New Tab",
+     "context": "Open Gemini in Chrome · Search for sillyfools | Spotify · Close",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "0D983E75-FC9B-45C1-BCDA-55A8CE91E0F8",
+     "bounds": {
+      "x": 0,
+      "y": 0.044573643410852716,
+      "width": 0.015625,
+      "height": 0.03294573643410853
+     },
+     "ref": "c96",
+     "label": "Back",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "862C89C1-4E2C-4CFD-AC8A-224C96870377",
+     "bounds": {
+      "x": 0.03046875,
+      "y": 0.044573643410852716,
+      "width": 0.01328125,
+      "height": 0.03294573643410853
+     },
+     "ref": "c97",
+     "label": "Reload",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "082F0CCE-7526-4C90-AC0E-850277E85409",
+     "bounds": {
+      "x": 0.95625,
+      "y": 0.044573643410852716,
+      "width": 0.01328125,
+      "height": 0.03294573643410853
+     },
+     "ref": "c98",
+     "label": "Control your music, videos, and more",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "71281A43-869A-49E8-B9E0-D0F882C00B7B",
+     "bounds": {
+      "x": 0.9703125,
+      "y": 0.044573643410852716,
+      "width": 0.01328125,
+      "height": 0.03294573643410853
+     },
+     "ref": "c99",
+     "label": "Jinawong",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "EA794DD2-D390-44F4-B438-6916F5A0C5CE",
+     "bounds": {
+      "x": 0.0203125,
+      "y": 0.08333333333333333,
+      "width": 0.028125,
+      "height": 0.027131782945736434
+     },
+     "ref": "c100",
+     "label": "GitHub",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "09DF11AB-68E7-4C07-91E0-2EC1EFD10286",
+     "bounds": {
+      "x": 0.05,
+      "y": 0.08333333333333333,
+      "width": 0.033203125,
+      "height": 0.027131782945736434
+     },
+     "ref": "c101",
+     "label": "Facebook",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "DEF1B639-3692-4213-933C-73BF94B18D9C",
+     "bounds": {
+      "x": 0.084765625,
+      "y": 0.08333333333333333,
+      "width": 0.03125,
+      "height": 0.027131782945736434
+     },
+     "ref": "c102",
+     "label": "YouTube",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "4AB58A71-2B41-43B2-9AC8-3A5F3303E5D3",
+     "bounds": {
+      "x": 0.117578125,
+      "y": 0.08333333333333333,
+      "width": 0.0296875,
+      "height": 0.027131782945736434
+     },
+     "ref": "c103",
+     "label": "Binance",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "B6701987-AC76-49EE-9962-A3671CE94601",
+     "bounds": {
+      "x": 0.148828125,
+      "y": 0.08333333333333333,
+      "width": 0.03515625,
+      "height": 0.027131782945736434
+     },
+     "ref": "c104",
+     "label": "Shopping",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "A021A7FD-E8D5-4DE1-ACC5-A50F49068C0C",
+     "bounds": {
+      "x": 0.185546875,
+      "y": 0.08333333333333333,
+      "width": 0.037890625,
+      "height": 0.027131782945736434
+     },
+     "ref": "c105",
+     "label": "IT websites",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "9A4D18A9-2919-4996-8F81-A487092663A8",
+     "bounds": {
+      "x": 0.225,
+      "y": 0.08333333333333333,
+      "width": 0.041796875,
+      "height": 0.027131782945736434
+     },
+     "ref": "c106",
+     "label": "Photography",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "9664DC22-BDE0-4993-B037-951AC6148E99",
+     "bounds": {
+      "x": 0.268359375,
+      "y": 0.08333333333333333,
+      "width": 0.027734375,
+      "height": 0.027131782945736434
+     },
+     "ref": "c107",
+     "label": "Foods",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "CEDBEE25-F885-437D-85E2-6DBAA03700F8",
+     "bounds": {
+      "x": 0.29765625,
+      "y": 0.08333333333333333,
+      "width": 0.021875,
+      "height": 0.027131782945736434
+     },
+     "ref": "c108",
+     "label": "API",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "837B5D49-BA7A-48C8-AAEC-4F90C4D1B163",
+     "bounds": {
+      "x": 0.32109375,
+      "y": 0.08333333333333333,
+      "width": 0.043359375,
+      "height": 0.027131782945736434
+     },
+     "ref": "c109",
+     "label": "Programming",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "2A1D0A60-0643-47B8-AC0C-5A9233AE708F",
+     "bounds": {
+      "x": 0.366015625,
+      "y": 0.08333333333333333,
+      "width": 0.03046875,
+      "height": 0.027131782945736434
+     },
+     "ref": "c110",
+     "label": "Readed",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "D8E6E8D7-C46F-4413-A03D-6DC1FBBE8FB7",
+     "bounds": {
+      "x": 0.398046875,
+      "y": 0.08333333333333333,
+      "width": 0.029296875,
+      "height": 0.027131782945736434
+     },
+     "ref": "c111",
+     "label": "Musics",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "FC16C9FC-3D9F-4FDB-8038-9F0258BE05EE",
+     "bounds": {
+      "x": 0.42890625,
+      "y": 0.08333333333333333,
+      "width": 0.0359375,
+      "height": 0.027131782945736434
+     },
+     "ref": "c112",
+     "label": "Interested",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "447A8040-B5D2-42A7-8FAE-640AE78580CD",
+     "bounds": {
+      "x": 0.46640625,
+      "y": 0.08333333333333333,
+      "width": 0.037109375,
+      "height": 0.027131782945736434
+     },
+     "ref": "c113",
+     "label": "Languages",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "071D8918-B036-4809-874E-A0BE8128836F",
+     "bounds": {
+      "x": 0.505078125,
+      "y": 0.08333333333333333,
+      "width": 0.029296875,
+      "height": 0.027131782945736434
+     },
+     "ref": "c114",
+     "label": "Design",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "EA33F6CC-0025-4160-A848-ADA9D245D19D",
+     "bounds": {
+      "x": 0.5359375,
+      "y": 0.08333333333333333,
+      "width": 0.03671875,
+      "height": 0.027131782945736434
+     },
+     "ref": "c115",
+     "label": "ServerSide",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "CFF5756F-4107-4419-A136-61790FFF09DB",
+     "bounds": {
+      "x": 0.57421875,
+      "y": 0.08333333333333333,
+      "width": 0.02890625,
+      "height": 0.027131782945736434
+     },
+     "ref": "c116",
+     "label": "Crypto",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "C977532B-362C-4E8A-BBB2-9615ED932123",
+     "bounds": {
+      "x": 0.6046875,
+      "y": 0.08333333333333333,
+      "width": 0.03125,
+      "height": 0.027131782945736434
+     },
+     "ref": "c117",
+     "label": "AI Tools",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "76734CA4-4461-44C1-9ED8-F84658B52A3B",
+     "bounds": {
+      "x": 0.894921875,
+      "y": 0,
+      "width": 0.046875,
+      "height": 0.03875968992248062
+     },
+     "ref": "c118",
+     "label": "Open Gemini in Chrome",
+     "context": "New Tab · Search for sillyfools | Spotify · Close",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "5863F7F8-85BF-45B5-90BA-0A5B893FEEA5",
+     "bounds": {
+      "x": 0.04921875,
+      "y": 0.04941860465116279,
+      "width": 0.009375,
+      "height": 0.023255813953488372
+     },
+     "ref": "c119",
+     "label": "View site information",
+     "context": "Address and search bar · This site can use identifiers to play protected content. · Ask Google · Install Spotify · Bookmark this tab",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "C5F64FAC-918E-4942-8CBC-6436EFA3238C",
+     "bounds": {
+      "x": 0.658203125,
+      "y": 0.04941860465116279,
+      "width": 0.009375,
+      "height": 0.023255813953488372
+     },
+     "ref": "c120",
+     "label": "This site can use identifiers to play protected content.",
+     "context": "View site information · Address and search bar · Ask Google · Install Spotify · Bookmark this tab",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "84B6BDD3-62EB-4DF3-8162-0B4D95240D0F",
+     "bounds": {
+      "x": 0.76640625,
+      "y": 0.044573643410852716,
+      "width": 0.01328125,
+      "height": 0.03294573643410853
+     },
+     "ref": "c121",
+     "label": "Automatic picture-in-picture (on)\nHas access to this site",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "7215B9F1-50DA-41AB-A8D8-3E9165AF9B27",
+     "bounds": {
+      "x": 0.78046875,
+      "y": 0.044573643410852716,
+      "width": 0.01328125,
+      "height": 0.03294573643410853
+     },
+     "ref": "c122",
+     "label": "MetaMask\nHas access to this site",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "CB35A931-A008-40CB-98D5-DDF009B7D19E",
+     "bounds": {
+      "x": 0.79453125,
+      "y": 0.044573643410852716,
+      "width": 0.01328125,
+      "height": 0.03294573643410853
+     },
+     "ref": "c123",
+     "label": "Popup\nWants access to this site",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "9F1E8E77-8B37-4818-9EC4-F3FDDF0DB693",
+     "bounds": {
+      "x": 0.80859375,
+      "y": 0.044573643410852716,
+      "width": 0.01328125,
+      "height": 0.03294573643410853
+     },
+     "ref": "c124",
+     "label": "Google Translate\n\nLeft-click to translate!\nRight-click for options.\nHas access to this site",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "44AB3595-4D8D-48DE-B80C-442F7450D534",
+     "bounds": {
+      "x": 0.82265625,
+      "y": 0.044573643410852716,
+      "width": 0.01328125,
+      "height": 0.03294573643410853
+     },
+     "ref": "c125",
+     "label": "Rabby\nHas access to this site",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "C99E13DE-CBB0-446F-BBD2-6727829F19BD",
+     "bounds": {
+      "x": 0.83671875,
+      "y": 0.044573643410852716,
+      "width": 0.01328125,
+      "height": 0.03294573643410853
+     },
+     "ref": "c126",
+     "label": "Awesome Screen Recorder & Screenshot\nHas access to this site",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "A9CB6A9D-3698-48C3-9F97-91EE78F29B6D",
+     "bounds": {
+      "x": 0.85078125,
+      "y": 0.044573643410852716,
+      "width": 0.01328125,
+      "height": 0.03294573643410853
+     },
+     "ref": "c127",
+     "label": "Open Claude\nHas access to this site",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "6698043B-17CC-4BDC-873E-ED126AD55E2A",
+     "bounds": {
+      "x": 0.86484375,
+      "y": 0.044573643410852716,
+      "width": 0.01328125,
+      "height": 0.03294573643410853
+     },
+     "ref": "c128",
+     "label": "Phantom\nHas access to this site",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "8518FB2A-4748-4F57-95A8-96CCA202F87D",
+     "bounds": {
+      "x": 0.87890625,
+      "y": 0.044573643410852716,
+      "width": 0.01328125,
+      "height": 0.03294573643410853
+     },
+     "ref": "c129",
+     "label": "Some URLs are restricted by your browser or a setting!\nHas access to this site",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "36FA14C8-E7AC-4676-B3EB-501BC8D11C94",
+     "bounds": {
+      "x": 0.89296875,
+      "y": 0.044573643410852716,
+      "width": 0.01328125,
+      "height": 0.03294573643410853
+     },
+     "ref": "c130",
+     "label": "Download videos from this page\nHas access to this site",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "7671BD5D-27ED-404F-B1FA-4966A650D7BF",
+     "bounds": {
+      "x": 0.90703125,
+      "y": 0.044573643410852716,
+      "width": 0.01328125,
+      "height": 0.03294573643410853
+     },
+     "ref": "c131",
+     "label": "Web Audio Recorder – Record Tab Audio to MP3, WAV & M4A\nHas access to this site",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "F9F855DE-1645-42E7-8EE3-FCF1DF9064CA",
+     "bounds": {
+      "x": 0.92109375,
+      "y": 0.044573643410852716,
+      "width": 0.01328125,
+      "height": 0.03294573643410853
+     },
+     "ref": "c132",
+     "label": "Tofu Dubbing – real-time dubbing translation",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "F14168A9-41FC-4356-BE37-DC25F12AF4BE",
+     "bounds": {
+      "x": 0.93515625,
+      "y": 0.044573643410852716,
+      "width": 0.01328125,
+      "height": 0.03294573643410853
+     },
+     "ref": "c133",
+     "label": "Extensions",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "EB3D7E76-2E3C-47CE-B1F9-0C9AFA0BC6D1",
+     "bounds": {
+      "x": 0.00234375,
+      "y": 0.08333333333333333,
+      "width": 0.0109375,
+      "height": 0.027131782945736434
+     },
+     "ref": "c134",
+     "label": "Tab groups",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "B2C25309-F5BE-4ECE-8F5D-F907C5E20D51",
+     "bounds": {
+      "x": 0.578515625,
+      "y": 0.12790697674418605,
+      "width": 0.025,
+      "height": 0.03294573643410853
+     },
+     "ref": "c135",
+     "label": "Allow",
+     "context": "Begin browsing instantly: Chrome can now launch when Windows starts.",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "4F92C953-9605-44CC-AA68-CF63FBC74DEE",
+     "bounds": {
+      "x": 0.9828125,
+      "y": 0.1308139534883721,
+      "width": 0.0109375,
+      "height": 0.027131782945736434
+     },
+     "ref": "c136",
+     "label": "Close",
+     "context": "Begin browsing instantly: Chrome can now launch when Windows starts. · Allow",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "A3A87522-E6D2-451F-B9CA-A3FD31FA91FB",
+     "bounds": {
+      "x": 0,
+      "y": 0,
+      "width": 0.1,
+      "height": 0.03972868217054264
+     },
+     "ref": "c137",
+     "label": "Search for sillyfools | Spotify",
+     "context": "Close",
+     "role": "AXRadioButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "1DC19E23-DF77-4D62-90CB-C09304ADB543",
+     "bounds": {
+      "x": 0.670703125,
+      "y": 0.04941860465116279,
+      "width": 0.0421875,
+      "height": 0.023255813953488372
+     },
+     "ref": "c138",
+     "label": "Ask Google",
+     "context": "Install Spotify · Bookmark this tab",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "8EEC46F2-DDD6-45F7-B563-EE433833ED37",
+     "bounds": {
+      "x": 0.716015625,
+      "y": 0.04941860465116279,
+      "width": 0.0296875,
+      "height": 0.023255813953488372
+     },
+     "ref": "c139",
+     "label": "Install Spotify",
+     "context": "Ask Google · Bookmark this tab",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "05D22F93-B7F0-4BF1-A4D1-8EDF5C74C0D1",
+     "bounds": {
+      "x": 0.748828125,
+      "y": 0.04941860465116279,
+      "width": 0.009375,
+      "height": 0.023255813953488372
+     },
+     "ref": "c140",
+     "label": "Bookmark this tab",
+     "context": "Ask Google · Install Spotify",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "6F1FC4C2-CAB8-4C06-BBCD-FCA01C247441",
+     "bounds": {
+      "x": 0.084375,
+      "y": 0.006782945736434108,
+      "width": 0.01015625,
+      "height": 0.025193798449612403
+     },
+     "ref": "c141",
+     "label": "Close",
+     "context": "Search for sillyfools | Spotify",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    }
+   ],
+   "focusedControl": {
+    "role": "AXWebArea",
+    "label": "Search for sillyfools | Spotify"
+   },
+   "windowTitle": "Search for sillyfools | Spotify - Google Chrome",
+   "text": [
+    "Resize main navigation",
+    "Search results",
+    "Preview of Spotify",
+    "Sign up to get unlimited songs and podcasts with occasional ads. No credit card needed.",
+    "Your Library",
+    "Create your first playlist",
+    "It's easy, we'll help you",
+    "Let's find some podcasts to follow",
+    "We'll keep you updated on new episodes",
+    "Artist",
+    "By Spotify",
+    "Begin browsing instantly: Chrome can now launch when Windows starts.",
+    "Customize Chrome"
+   ],
+   "truncated": true,
+   "platform": {
+    "os": "windows",
+    "osVersion": "10.0.26200",
+    "appVersion": "156.0.8078",
+    "helperVersion": "0.1.1-alpha.2.wincu.9",
+    "helperBuild": "41777707601",
+    "helperCommit": "073878608f5357937e605e7397147d140ded04fd"
+   },
+   "apps": [
+    {
+     "id": "chrome.exe",
+     "name": "Google Chrome"
+    }
+   ]
+  }
+ }
+}
