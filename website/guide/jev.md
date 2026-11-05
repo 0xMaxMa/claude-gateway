@@ -627,6 +627,15 @@ The shared `gateway.jev.thinking` supplies field text and independent completion
 verification. Without a Thinking helper, unknown field values require input and
 completion candidates are never reported as verified success.
 
+### Device shell
+
+`device_shell` is a separate agent tool for one shell command on the same
+computer session. It uses the relay's `computer_shell` capability and asks the
+device for a separate shell grant after computer access. It does not type a
+command into Terminal or use the vision controller. If the helper lacks
+`computer_shell`, the tool returns `SHELL_UNSUPPORTED`; pending consent returns
+without running the command. The agent receives command output directly.
+
 ### Computer Use without Jev
 
 `gateway.computerUse` lets Computer Use run when Jev is off. Each controller
@@ -725,13 +734,14 @@ failures return their own `COMPUTER_*` code instead of `INVALID_REQUEST`.
 |---|---|---|
 | `mode` | `ax` | `ax`: Accessibility only. `vision`: the model sees the window screenshot and acts with pixel coordinates. `hybrid`: `vision` plus the Accessibility element boxes (in screenshot pixels) as hints. |
 | `visionModel` | `claude-sonnet-5` | Model for vision decisions. It must support the computer toolset (`computer_toolset_20260801`): Opus 5.5, Opus 5, Sonnet 5, Fable 5 / 5.1, Opus 4.8, Mythos 5.1. Any other model (Haiku 4.5 included) keeps the agent on `ax` and logs `computer_vision_model_unsupported` once. |
+| `visionFallback` | `false` | With `mode: "ax"`, a goal round that finds no supported Accessibility action may continue from the current screenshot in vision mode. It requires an approved window and raw input; actions already completed are not replayed. It does not apply to ordered step lists. |
 
 Vision needs a Computer Use decision backend (Jev or the model backend above)
-and applies to goal runs: the first request of a computer session, an agent
-handoff and agent-controlled tasks. Step lists and mid-session user commands
-stay on Accessibility. Control is handed back as on Accessibility: an
-agent-controlled task and an agent handoff return after each action, and only
-the session's first request runs on toward its goal. Each step sends one Messages request with the
+and applies to goal runs, agent handoffs, agent-controlled tasks, and
+mid-session user commands when no explicit ordered step list is given. Step
+lists stay on Accessibility. Control is handed back as on Accessibility: an
+agent-controlled task returns after each action; a user's session-start goal
+or an agent handoff runs toward its goal. Each step sends one Messages request with the
 goal, a short escaped `<screen_state>` and the screenshot of the current
 observation generation, through the agent's own endpoint and credential. The
 computer toolset is GA, so no `anthropic-beta` header is sent, and the request
