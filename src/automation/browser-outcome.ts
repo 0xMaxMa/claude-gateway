@@ -55,8 +55,8 @@ function done(action:BrowserCommandAction|undefined){
 function hint(reason:string,action?:BrowserCommandAction){
  return HINTS[reason].replace('{target}',quoted(action?.label)).replace('{direction}',action?.direction??'back').replace('{edge}',action?.direction==='up'?'top':'bottom');
 }
-export function browserOutcomeText(report:BrowserTaskReport):string{
- if(report.stepRun)return stepRunText(report.stepRun,detail=>HINTS[detail]?hint(detail):undefined);
+export function browserOutcomeText(report:BrowserTaskReport,context:{handedOff?:boolean}={}):string{
+ if(report.stepRun)return stepRunText(report.stepRun,detail=>HINTS[detail]?hint(detail):undefined,{...context,surface:'browser'});
  const outcome=report.commandOutcome;
  if(report.reason==='OUTCOME_UNKNOWN'||report.lastAction?.outcome==='unknown')return `${UNKNOWN_PREFIX} the last action may have run. Check the page before sending the command again.`;
  if(outcome?.reason==='SESSION_READY')return 'Ready: the session is open and waits for the next command.';

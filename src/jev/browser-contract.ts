@@ -99,6 +99,11 @@ export interface BrowserProviderFailure { code: string; validationReason?: strin
 
 export type BrowserTaskReport = Omit<BrowserExecutionResult, 'observation' | 'trace'>;
 
+/** A parked goal run (agentGoalRunParked) settled waiting for its next command: the woken agent may
+ * confirm its goal from fresh evidence. Never a provider failure or an action with an unknown outcome. */
+export function parkedVerifiableBrowserResult(result: BrowserExecutionResult | undefined): boolean {
+  return Boolean(result && !result.providerFailure && result.lastAction?.outcome !== 'unknown');
+}
 /** Independent parent verification is valid only after a known non-ambiguous stop. */
 export function parentVerifiableBrowserResult(result: BrowserExecutionResult | undefined): boolean {
   return Boolean(result && !result.providerFailure && result.lastAction?.outcome !== 'unknown' &&

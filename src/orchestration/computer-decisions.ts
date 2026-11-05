@@ -66,18 +66,25 @@ export function computerThinking(gateway: GatewayConfig, agent: AgentConfig): Br
  * Undefined keeps the Accessibility path: mode ax (the default), no decision backend, or a model without the computer toolset. */
 export function computerVision(gateway: GatewayConfig, agent: AgentConfig, member: (task: TaskSnapshot) => boolean, fetchImpl?: typeof fetch,
   jev: () => Pick<JevService, 'evaluate'> = () => gatewayJev(gateway).service):
-  () => { mode: 'vision' | 'hybrid'; decide: (task: TaskSnapshot, authorized: () => boolean) => VisionDecide } | undefined {
+  (use?: 'primary' | 'fallback') => { mode: 'vision' | 'hybrid'; decide: (task: TaskSnapshot, authorized: () => boolean) => VisionDecide } | undefined {
   let warned = false;
   let log: ReturnType<typeof createLogger> | undefined;
   const logger = () => log ??= createLogger(agent.id, gateway.gateway.logDir);
-  return () => {
-    const mode = gateway.gateway.computerUse?.mode ?? 'ax';
+  // `fallback`: mode ax with visionFallback on, for a goal round Accessibility found no control for; it decides from
+  // the screenshot alone (mode vision). A live switch of either setting revokes an in-flight decision.
+  const selected = (use: 'primary' | 'fallback') => {
+    const configured = gateway.gateway.computerUse?.mode ?? 'ax';
+    if (use === 'fallback') return configured === 'ax' && gateway.gateway.computerUse?.visionFallback === true ? 'vision' : undefined;
+    return configured === 'ax' ? undefined : configured;
+  };
+  return (use = 'primary') => {
+    const mode = selected(use);
     const backend = computerDecisions(gateway, agent);
-    if (mode === 'ax' || backend === undefined) return undefined;
+    if (mode === undefined || backend === undefined) return undefined;
     if (backend === 'jev' && gateway.gateway.jev?.images?.enabled === true) return { mode, decide: (task, authorized) => jevVisionDecider({ mode,
       // A live switch back to ax, images off, or Computer Use off revokes an in-flight decision.
       evaluate: (request, signal) => jev().evaluate(request, { principalId: task.ownerPrincipalId, agentId: agent.id, sessionId: task.agentSessionId, taskId: task.taskId, consumer: 'computer', signal,
-        authorize: () => authorized() && member(task) && (gateway.gateway.computerUse?.mode ?? 'ax') === mode && computerDecisions(gateway, agent) === 'jev' && gateway.gateway.jev?.images?.enabled === true }),
+        authorize: () => authorized() && member(task) && selected(use) === mode && computerDecisions(gateway, agent) === 'jev' && gateway.gateway.jev?.images?.enabled === true }),
       // Codes and timings only; never screenshots, screen text or typed text.
       onDecision: event => { try { logger().info('computer_jev_vision_decision', { agentId: agent.id, taskId: task.taskId, ...event }); } catch { /* computer_model_log_unavailable is reported by the evaluator path. */ } },
     }) };
@@ -90,7 +97,7 @@ export function computerVision(gateway: GatewayConfig, agent: AgentConfig, membe
       model, timeoutMs: DEFAULT_COMPUTER_VISION_TIMEOUT_MS, fetch: fetchImpl,
       connection: async () => agentIdentity('Computer Use'),
       // A live switch back to ax (or Computer Use off) revokes an in-flight decision.
-      authorize: () => authorized() && member(task) && (gateway.gateway.computerUse?.mode ?? 'ax') === mode && computerDecisions(gateway, agent) !== undefined,
+      authorize: () => authorized() && member(task) && selected(use) === mode && computerDecisions(gateway, agent) !== undefined,
       // Codes, sizes and token counts only; never screenshots, screen text or credentials.
       onDecision: event => {
         const entry = { agentId: agent.id, taskId: task.taskId, ...event };

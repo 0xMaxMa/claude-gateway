@@ -1,3 +1,4 @@
+import { validateComputerUseConfig } from '../../../src/automation/model-choice-evaluator';
 jest.mock('../../../src/config/claude-settings', () => ({ claudeSettingsEnv: jest.fn() }));
 import { claudeSettingsEnv } from '../../../src/config/claude-settings';
 import { configureLogging, resetLoggingForTests } from '../../../src/logger';
@@ -227,6 +228,22 @@ describe('computerVision', () => {
     expect(vision(true, { mode: 'ax' })).toBeUndefined();
     expect(vision(undefined)).toBeUndefined();
     expect(vision(false, { mode: 'vision' })).toBeUndefined();
+  });
+  // AX stays the primary path; a goal round with no Accessibility control continues on vision (gateway-tasks/computer.ts).
+  test('visionFallback: a vision decider only for the fallback, only in ax mode, revoked when switched off', async () => {
+    const config = gatewayConfig(undefined, undefined, true, { mode: 'ax', visionFallback: true }) as any;
+    const factory = computerVision(config, agentConfig(), () => true, jest.fn() as any);
+    expect(factory()).toBeUndefined();
+    const fallback = factory('fallback')!;
+    expect(fallback.mode).toBe('vision');
+    expect(computerVision(gatewayConfig(undefined, undefined, true, { mode: 'ax' }), agentConfig(), () => true)('fallback')).toBeUndefined();
+    // A primary vision mode needs no fallback.
+    expect(computerVision(gatewayConfig(undefined, undefined, true, { mode: 'hybrid', visionFallback: true }), agentConfig(), () => true)('fallback')).toBeUndefined();
+    // Switching it off revokes a decision in flight.
+    config.gateway.computerUse.visionFallback = false;
+    await expect(fallback.decide(task, () => true)([], new AbortController().signal, view)).rejects.toThrow();
+    expect(() => validateComputerUseConfig({ mode: 'ax', visionFallback: 'yes' })).toThrow('visionFallback must be a boolean');
+    expect(() => validateComputerUseConfig({ mode: 'ax', visionFallback: true })).not.toThrow();
   });
   test('a model without the computer toolset falls back to ax with one warning', () => {
     const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);

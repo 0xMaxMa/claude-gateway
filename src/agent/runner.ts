@@ -525,6 +525,11 @@ export class AgentRunner extends EventEmitter {
     return this.orchestrationStarting;
   }
 
+  /** The live Computer Use run on a device's relay grant; never starts orchestration just to answer. */
+  computerActivity(grantId: string, principalId: string) {
+    return this.orchestration?.computerActivity(grantId, principalId);
+  }
+
   async orchestrationActivity(sessionId: string, principalId: string, after: number) {
     return (await this.getOrchestration()).activity(sessionId, principalId, after);
   }

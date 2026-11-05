@@ -1,15 +1,22 @@
-import {buildComputerCommand,readComputerCommand,labelCommand,labelTarget,standardComputerCommand,standardKeyboardCommand,standardNavigationCommand,shortcutCommand,shortcutTarget,addressFields,quitShortcut,helperSupports,namedBrowser,STANDARD_QUIT} from './computer-command';
+import {buildComputerCommand,readComputerCommand,labelCommand,labelTarget,standardComputerCommand,standardKeyboardCommand,standardNavigationCommand,shortcutCommand,shortcutTarget,addressFields,quitShortcut,helperSupports,namedBrowser,frontIsBrowser,STANDARD_QUIT} from './computer-command';
 import {eraseCommand,focusedTextField,textFocused} from './computer-safety';
 import {decisionInstructions,readChoice,observedEffect,decisionState,literalTextCandidates} from './computer-policy';
 import {checkInterruption,interruptible} from './interrupt';
 import {createHash,randomUUID} from 'node:crypto';
 import {JevError} from '../jev/types';
-import {COMMAND_DECISION_FAILURES,browserAddressCommand} from './direct-command';
+import {COMMAND_DECISION_FAILURES,browserAddressCommand,goalWebAddress} from './direct-command';
 import {z} from 'zod';
 import {runLoop} from '../../lib/automation/index.cjs';
 
 export const COMPUTER_USE_CONTRACT_VERSION = 1;
 const REDECIDE_MAX=2,REDECIDE_DELAY_MS=1000;
+/** After a fast path submits an address or navigates, the page is looked at again this often, up to this long, until
+ * its title (or the application) differs from before: Chrome still showed the old page 1.5 s after Enter
+ * (pod-jinawong r10, task f40127bd: GOAL_REACHED on "Download History" while Steam loaded). */
+const NAVIGATION_POLL_MS=500,NAVIGATION_SETTLE_MS=6000;
+/** Internal loop guards of a run with no action limit, from its time budget: a cycle (observe and decide) and a
+ * thinking call each take at least this long, so the run's own timeout ends it first. */
+const MIN_CYCLE_MS=500,MIN_THINKING_MS=5000;
 // Relay errors raised before an operation is recorded (getpod-computer-use
 // relay.ts execute). DEVICE_OFFLINE can also follow the record, so it becomes
 // not_executed only when the receipt lookup confirms no operation exists.
@@ -31,7 +38,11 @@ const contractMajor=(value:unknown)=>typeof value==='number'?Math.trunc(value):t
 const ControlBounds=z.object({x:z.number().finite().min(0).max(1),y:z.number().finite().min(0).max(1),width:z.number().finite().positive().max(1),height:z.number().finite().positive().max(1)}).refine(b=>b.x+b.width<=1.000001&&b.y+b.height<=1.000001);
 const Control=z.object({identity:z.string().uuid().optional(),bounds:ControlBounds.optional(),ref:z.string().min(1).max(100),label:nativeText(500),context:nativeText(500).optional(),role:z.string().max(100),value:nativeText(2000).optional(),focused:z.boolean().optional(),actions:known(['press','type'] as const),sensitive:z.boolean().optional()});
 const ScrollArea=z.object({ref:z.string().min(1).max(100),label:nativeText(500),bounds:z.object({x:z.number().finite().min(0).max(1),y:z.number().finite().min(0).max(1),width:z.number().finite().positive().max(1),height:z.number().finite().positive().max(1)}).refine(b=>b.x+b.width<=1.000001&&b.y+b.height<=1.000001)});
-export const ComputerObservation=z.object({contractVersion:z.union([z.number(),z.string().max(20)]).optional().catch(undefined),capabilities:z.object({standardCommands:z.array(z.string().max(100)).max(64).optional(),keys:z.array(z.string().max(40)).max(64).optional()}).optional().catch(undefined),standardCommand:z.enum(['scroll:up','scroll:down','close:window',...STANDARD_SHORTCUTS]).optional().catch(undefined),scrollAreas:z.array(ScrollArea).max(16).refine(rows=>new Set(rows.map(r=>r.ref)).size===rows.length).optional(),supportedActions:known(['scroll:up','scroll:down','navigate:back','navigate:forward'] as const,4).optional(),screenshotAvailable:z.boolean().optional(),screenshotRestriction:z.string().max(100).optional(),observationStats:z.object({visited:z.number().int().nonnegative(),candidates:z.number().int().nonnegative(),exported:z.number().int().nonnegative(),incomplete:z.boolean()}).optional(),generation:z.string().min(1),application:z.string(),controls:z.array(Control).max(150),focusedControl:z.object({ref:z.string().max(100).optional(),role:z.string().max(100),label:nativeText(500),sensitive:z.boolean().optional()}).optional(),windowTitle:nativeText(500).optional(),text:z.array(nativeText(300)).max(80).optional(),truncated:z.boolean(),platform:z.object({os:z.string(),osVersion:z.string(),appVersion:z.string().optional(),helperVersion:z.string().max(100).optional(),helperBuild:z.string().max(100).optional(),helperCommit:z.string().max(100).optional()}).optional(),apps:z.array(z.object({id:z.string(),name:z.string()})).max(100)}).transform(state=>{
+export const ComputerObservation=z.object({contractVersion:z.union([z.number(),z.string().max(20)]).optional().catch(undefined),capabilities:z.object({standardCommands:z.array(z.string().max(100)).max(64).optional(),keys:z.array(z.string().max(40)).max(64).optional()}).optional().catch(undefined),standardCommand:z.enum(['scroll:up','scroll:down','close:window',...STANDARD_SHORTCUTS]).optional().catch(undefined),scrollAreas:z.array(ScrollArea).max(16).refine(rows=>new Set(rows.map(r=>r.ref)).size===rows.length).optional(),supportedActions:known(['scroll:up','scroll:down','navigate:back','navigate:forward'] as const,4).optional(),screenshotAvailable:z.boolean().optional(),screenshotRestriction:z.string().max(100).optional(),
+ // GetPod Desktop withholds the screen while a protected app (GetPod itself, where the user types) is frontmost:
+ // application "unapproved", no controls, and these two fields saying why. Kept so neither the model nor the
+ // agent reads it as the target app not being approved (pod-jinawong, task 2f65b7cf: "Spotify is not approved").
+ frontmostProtected:z.boolean().optional().catch(undefined),reason:z.string().max(300).optional().catch(undefined),observationStats:z.object({visited:z.number().int().nonnegative(),candidates:z.number().int().nonnegative(),exported:z.number().int().nonnegative(),incomplete:z.boolean()}).optional(),generation:z.string().min(1),application:z.string(),controls:z.array(Control).max(150),focusedControl:z.object({ref:z.string().max(100).optional(),role:z.string().max(100),label:nativeText(500),sensitive:z.boolean().optional()}).optional(),windowTitle:nativeText(500).optional(),text:z.array(nativeText(300)).max(80).optional(),truncated:z.boolean(),platform:z.object({os:z.string(),osVersion:z.string(),appVersion:z.string().optional(),helperVersion:z.string().max(100).optional(),helperBuild:z.string().max(100).optional(),helperCommit:z.string().max(100).optional()}).optional(),apps:z.array(z.object({id:z.string(),name:z.string()})).max(100)}).transform(state=>{
  // A helper that reports a different major contract cannot be driven safely.
  if(state.contractVersion!==undefined&&contractMajor(state.contractVersion)!==COMPUTER_USE_CONTRACT_VERSION)throw Error('COMPUTER_CONTRACT_UNSUPPORTED');
  return state;
@@ -67,7 +78,9 @@ export interface ComputerUseDependencies {
  /** The user's answer to a confirmation question, read before anything runs. */
  confirmed?:(reply:'YES'|'NO'|'OTHER')=>void;
 }
-export interface ComputerUseResult {status:'succeeded'|'needs_verification'|'needs_input'|'blocked'|'cancelled'|'needs_reconciliation';reason:string;revision:number;steps:number;evaluations:number;trace:{events:ComputerProgress[];truncated:boolean};operationId?:string;observation?:ComputerState;stepRun?:import('./computer-steps').ComputerStepRun;lastAction?:ComputerLastAction}
+export interface ComputerUseResult {status:'succeeded'|'needs_verification'|'needs_input'|'blocked'|'cancelled'|'needs_reconciliation';reason:string;revision:number;steps:number;evaluations:number;trace:{events:ComputerProgress[];truncated:boolean};operationId?:string;observation?:ComputerState;stepRun?:import('./computer-steps').ComputerStepRun;lastAction?:ComputerLastAction;
+ /** A goal run stopped at a field it has no literal value for: the agent is asked for it. */
+ fieldRequest?:{label:string;application?:string;windowTitle?:string;role?:string;reason:'missing'}}
 /** The command's own interaction, for the owner's outcome line. Never typed text. */
 export interface ComputerLastAction {kind:string;label?:string;role?:string;key?:string;direction?:string;appId?:string;count?:number;blocked?:boolean;sequence?:string[];planned?:number;
  /** Not run: the agent's command chose a high-impact action and the user was asked to confirm it. */
@@ -75,11 +88,63 @@ export interface ComputerLastAction {kind:string;label?:string;role?:string;key?
  /** The asked action and its exact target (window, control, position), hashed: a yes covers only this. */
  target?:string;
  /** Asked by the vision loop: a yes resumes it there, where the target was hashed. */
- vision?:boolean}
+ vision?:boolean;
+ /** The opened application's name from the approved catalogue, for the owner's line ("opened TradingView"). */
+ appName?:string}
 const PreparedInput=z.object({application:z.string().min(1).max(200),label:z.string().min(1).max(500),text:z.string().max(2000),role:z.string().max(100).optional(),windowTitle:nativeText(500).optional()}).strict();
-const Input=z.object({interactionContext:z.string().max(8000).optional(),yieldAfterAction:z.boolean().default(false),yieldAfterInteraction:z.boolean().default(false),runToGoal:z.boolean().default(false),resumeGoal:z.number().int().min(1).max(100).optional(),readRequest:z.boolean().default(false),agentCommand:z.boolean().default(false),sessionStart:z.boolean().default(false),confirmation:z.object({command:z.string().min(1).max(2000),label:z.string().max(250),target:z.string().regex(/^[0-9a-f]{32}$/).optional(),reply:z.enum(['YES','NO']).optional()}).strict().optional(),preparedInputs:z.array(PreparedInput).max(30).default([]),goal:z.string().min(1).max(16000),revision:z.number().int().positive().default(1),maxSteps:z.number().int().min(1).max(100).default(30),timeoutMs:z.number().int().min(1).max(600000).default(120000)}).strict();
+const Input=z.object({interactionContext:z.string().max(8000).optional(),yieldAfterAction:z.boolean().default(false),yieldAfterInteraction:z.boolean().default(false),runToGoal:z.boolean().default(false),resumeGoal:z.union([z.literal(true),z.number().int().min(1).max(100)]).optional(),readRequest:z.boolean().default(false),agentCommand:z.boolean().default(false),sessionStart:z.boolean().default(false),confirmation:z.object({command:z.string().min(1).max(2000),label:z.string().max(250),target:z.string().regex(/^[0-9a-f]{32}$/).optional(),reply:z.enum(['YES','NO']).optional()}).strict().optional(),preparedInputs:z.array(PreparedInput).max(30).default([]),goal:z.string().min(1).max(16000),revision:z.number().int().positive().default(1),
+ /** An action limit; a goal run has none (its round time and the no-progress check end it), other runs default to 30. */
+ maxSteps:z.number().int().min(1).max(100).optional(),timeoutMs:z.number().int().min(1).max(600000).default(120000),
+ /** The task's last approved target application: a round that starts with a protected app (GetPod, where the user
+  *  typed) in front opens it again first, so the screen is not withheld. Never the protected app itself. */
+ reactivate:z.object({id:z.string().min(1).max(200),name:z.string().max(200)}).strict().optional()}).strict();
 const fingerprint=(s:ComputerState)=>JSON.stringify([s.application,s.windowTitle,s.text,s.supportedActions,s.focusedControl&&{role:s.focusedControl.role,label:s.focusedControl.label},s.controls.map(({ref,...c})=>c),s.scrollAreas?.map(({ref,...area})=>area),s.truncated]);
 const identity=(state:ComputerState,action:Record<string,unknown>)=>{const field=state.controls.find(c=>c.ref===action.ref),area=state.scrollAreas?.find(a=>a.ref===action.ref);return JSON.stringify([state.application,state.windowTitle,action.kind,action.key,action.direction,action.app_id,field?.label,field?.role,area?.label,area?.bounds]);};
+/** The page in front shows the site a goal's web address names: its title carries the host's main label. */
+const urlShown=(state:ComputerState,web:{label:string})=>(state.windowTitle??'').toLocaleLowerCase().includes(web.label);
+/** GetPod Desktop opens a new relay socket 3 s after one closes (its desktop-client.ts): a lease or a look that met the
+ *  gap asks again for this long before the round says the computer is offline. Pod-jinawong r11, task ec82ed05: the
+ *  socket closed at 04:31:11Z while computer_acquire waited, the app was back 4 s later, and the task had already failed
+ *  as "the computer went offline". Reads only (the lease, an observation): an action is never sent twice. */
+export const DEVICE_RECONNECT_GRACE_MS=12000;
+const DEVICE_RECONNECT_RETRY_MS=1000;
+const RECONNECT_READS=new Set(['computer_acquire','computer_observe']);
+export async function reconnecting<T>(name:string,read:()=>Promise<T>,signal:AbortSignal,graceMs=DEVICE_RECONNECT_GRACE_MS):Promise<T>{
+ const until=Date.now()+graceMs;
+ for(;;){
+  try{return await read();}
+  catch(error){
+   if(!RECONNECT_READS.has(name)||!(error instanceof Error)||error.message!=='DEVICE_OFFLINE'||Date.now()+DEVICE_RECONNECT_RETRY_MS>until)throw error;
+   await new Promise<void>((resolve,reject)=>{const stop=()=>{clearTimeout(t);reject(error);};const t=setTimeout(()=>{signal.removeEventListener('abort',stop);resolve();},DEVICE_RECONNECT_RETRY_MS);signal.addEventListener('abort',stop,{once:true});if(signal.aborted)stop();});
+  }
+ }
+}
+/** The shape of a screen without its values: application, title and each control's identity, role and label. A chart's
+ *  live price or a clock changes the text and values, not this. */
+const structure=(s:ComputerState)=>JSON.stringify([s.application,s.windowTitle,s.controls.map(c=>[c.identity,c.role,c.label])]);
+/** The one approved application a command names, for a round that starts with a protected app in front and no target
+ *  from an earlier round: an app's name as a whole word, as it is cased (any case only for a name whose casing is
+ *  distinctive: an inner capital, a digit or several words, e.g. TradingView, not Maps), else its bundle id. Two apps
+ *  named, or one name inside another's match, picks the longer; still two is none. Structural: the device's own app
+ *  list, no word list. */
+export function namedApp(text:string,apps:readonly {id:string;name:string}[]):{id:string;name:string}|undefined{
+ const edge=(c:string)=>/[A-Za-z0-9]/.test(c)?'[A-Za-z0-9]':'[\\p{L}\\p{N}]';
+ const escape=(v:string)=>v.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+ const spans:Array<{app:{id:string;name:string};from:number;to:number}>=[];
+ for(const app of apps){
+  const name=app.name.trim();if(name.length<3||name.length>80)continue;
+  const distinctive=/[A-Z0-9]/.test(name.slice(1))||/\s/.test(name);
+  for(const [needle,flags] of [[name,'gu'],...(distinctive?[[name,'giu']]:[]),[app.id,'giu']] as Array<[string,string]>){
+   if(!needle||needle.length<3)continue;
+   const re=new RegExp(`(?<!${edge(needle[0]!)})${escape(needle)}(?!${edge(needle.at(-1)!)})`,flags);
+   let hit=false;for(const m of text.matchAll(re)){spans.push({app,from:m.index!,to:m.index!+m[0].length});hit=true;}
+   if(hit)break;
+  }
+ }
+ const kept=spans.filter(a=>!spans.some(b=>b!==a&&b.app.id!==a.app.id&&b.from<=a.from&&b.to>=a.to&&b.to-b.from>a.to-a.from));
+ const ids=new Set(kept.map(s=>s.app.id));
+ return ids.size===1?kept[0]!.app:undefined;
+}
 /** A high-impact action's exact target (kind, window, control and position), hashed: a yes covers only this. The vision
  * loop hashes a click on an Accessibility control as its press, so a yes carries over when a run falls back here. */
 export const confirmationTarget=(state:ComputerState,action:string,planned:Record<string,unknown>|undefined)=>{const control=state.controls.find(c=>c.ref===planned?.ref);return createHash('sha256').update(JSON.stringify([action.split(':')[0],identity(state,planned??{kind:action}),control?.identity,control?.bounds,control?.context])).digest('hex').slice(0,32);};
@@ -104,7 +169,7 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
  const reply=input.confirmation?input.confirmation.reply??await confirmationReply(input.confirmation.label,input.goal,deps,runSignal):undefined;
  if(reply)deps.confirmed?.(reply);
  // A yes to a goal's high-impact step resumes that goal, with a fresh step budget.
- if(reply==='YES')input={...input,goal:input.confirmation!.command,...(input.resumeGoal?{runToGoal:true,maxSteps:input.resumeGoal}:{})};
+ if(reply==='YES')input={...input,goal:input.confirmation!.command,...(input.resumeGoal?{runToGoal:true,maxSteps:input.resumeGoal===true?undefined:input.resumeGoal}:{})};
  // The resumed goal continues a run that already reached an action (the confirmed one):
  // its step count restarts here, but it is past its first decision.
  const resumed=reply==='YES'&&input.resumeGoal!==undefined;
@@ -132,6 +197,8 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
  // at again after a second, up to twice, before the command returns unexecuted.
  // Only while nothing of this command has run: a planned follow-up is never re-decided.
  let redecided=0;
+ // The screen's structure at the first WAIT of a run of WAITs (see `structure`).
+ let waitedOn:string|undefined;
  const settleDelay=()=>new Promise<void>((resolve,reject)=>{const stop=()=>{clearTimeout(t);reject(Error('CANCELLED'));};const t=setTimeout(()=>{runSignal.removeEventListener('abort',stop);resolve();},REDECIDE_DELAY_MS);runSignal.addEventListener('abort',stop,{once:true});});
  // The re-decided command is planned again from scratch: a plan made for the
  // rejected first input (remaining digits, Backspaces, a submit) must not resume.
@@ -143,6 +210,13 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
  // next step is decided afresh on a new observation, impact- and
  // confidence-gated, until DONE, a stop, or input.maxSteps actions.
  const goalRun=direct&&input.runToGoal;
+ // A goal run has no action limit; another run keeps its 30.
+ const stepCap=input.maxSteps??(goalRun?undefined:30);
+ // The page title (and application) before a fast path's address submit or navigation (see NAVIGATION_SETTLE_MS).
+ let navigationFrom:{title?:string;application:string}|undefined;
+ // A web address the goal names: a DONE is checked against the page in front (see urlShown).
+ const webAddress=goalRun?goalWebAddress(input.goal):undefined;let addressTyped=false,addressRetried=false;
+ let reactivated=false;
  // Fast paths match the whole command text, so they run only before the goal's
  // first model-decided action (or while their own plan continues): a later
  // step never re-runs the same grammar match.
@@ -178,7 +252,7 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
  const waitForCommand=(reason:string,extra:Partial<ComputerProgress>={})=>{emit('waiting',{reason,...extra});return result('needs_input','COMMAND_WAITING_INPUT');};
  const check=()=>{runSignal.throwIfAborted();if(!deps.authorized())throw Error('ACCESS_DENIED');};
  const update=()=>{const n=deps.latestGoal?.();if(n&&n.revision>goal.revision){satisfiedField=undefined;submitAfterType=undefined;previous=undefined;prematureDone=0;history.length=0;ineffective.clear();transitions.clear();consecutiveOpens=0;cycling=false;noProgress=0;goal=z.object({revision:z.number().int().positive(),goal:z.string().min(1).max(16000)}).parse(n);}};
- const call=async(name:string,args:Record<string,unknown>={})=>{check();return deps.call(name,{...args,...(lease?{lease_token:lease}:{})},runSignal);};
+ const call=async(name:string,args:Record<string,unknown>={})=>reconnecting(name,()=>{check();return deps.call(name,{...args,...(lease?{lease_token:lease}:{})},runSignal);},runSignal);
  const summary=(action:Record<string,unknown>,state=last):Partial<ComputerProgress>=>{const field=state?.controls.find(c=>c.ref===action.ref);return {targetGeneration:state?.generation,application:state?.application,...(typeof action.app_id==='string'?{appId:action.app_id}:{}),action:action.kind as ComputerProgress['action'],...(typeof action.key==='string'?{key:action.key}:{}),...(field?{ref:field.ref,role:field.role,focused:field.focused}:action.kind==='key'&&state?.focusedControl?{role:state.focusedControl.role,focused:true}:{})};};
  try{
   checkInterruption(deps.interruptSignal);
@@ -187,8 +261,8 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
   if(recovery.success){pending=recovery.data.operation_id;emit('reconciling',{operationId:pending,reason:'OWNER_REVIEW_REQUIRED'});return result('needs_reconciliation','COMPUTER_RECONCILIATION_REQUIRED');}
   lease=z.object({lease_token:z.string().min(1)}).parse(acquisition).lease_token;
   return await runLoop<ComputerState,{action:string;generation:string;revision:number;targets:Map<string,Record<string,unknown>>;literal?:string;submit?:boolean;observedContinuation?:boolean},ComputerUseResult>({
-   signal:runSignal,maxCycles:input.maxSteps*3+5,stageTimeoutMs:input.timeoutMs,
-   thinking:!direct&&deps.thinking?(r,s)=>interruptible(child=>deps.thinking!(r,child),s,deps.interruptSignal):undefined,maxThinkingCalls:input.maxSteps,thinkingTimeoutMs:60000,
+   signal:runSignal,maxCycles:stepCap?stepCap*3+5:Math.ceil(input.timeoutMs/MIN_CYCLE_MS)+5,stageTimeoutMs:input.timeoutMs,
+   thinking:!direct&&deps.thinking?(r,s)=>interruptible(child=>deps.thinking!(r,child),s,deps.interruptSignal):undefined,maxThinkingCalls:stepCap??Math.ceil(input.timeoutMs/MIN_THINKING_MS),thinkingTimeoutMs:60000,
    observe:async ctx=>{
     round=ctx.cycle+1;check();checkInterruption(deps.interruptSignal);update();emit('observing');const started=Date.now();const requested=standardRequest??(asIssued?standard:undefined);last=ComputerObservation.parse(await call('computer_observe',requested?{standard_command:requested}:{}));check();deps.observation?.(last);
     if(previous){
@@ -215,6 +289,15 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
    decide:async state=>{
     check();const revision=goal.revision;if(direct&&goal.revision!==input.revision)return {result:result('cancelled','REVISION_SUPERSEDED')};
     if(reply==='NO'){await capture();return {result:waitForCommand('CONFIRMATION_DECLINED')};}
+    // A protected app (GetPod, where the user typed) in front withholds the screen: the task's last approved target
+    // application is opened again first, once, before anything is decided on it. Pod-jinawong r10, task 457a4930: GetPod
+    // stayed in front, and the agent's next command worked in Chrome's Steam tab instead of TradingView.
+    // A task's first round has no earlier target: the app its command names, from this computer's approved apps.
+    const target=input.reactivate??(state.frontmostProtected===true?namedApp(goal.goal,state.apps):undefined);
+    if(target&&!reactivated&&state.frontmostProtected===true&&state.apps.some(app=>app.id===target.id)){
+     reactivated=true;const action={kind:'open',app_id:target.id};emit('decided',{...summary(action,state),reason:'REACTIVATE_TARGET'});
+     return {action:{action:'reactivate',generation:state.generation,revision,targets:new Map([['reactivate',action]]),observedContinuation:true}};
+    }
     // The agent's command reaches Jev on every path, so its impact is judged before any action.
     const fast=!input.agentCommand;
     const requestStandard=(command:string)=>{standardRequest=command;return {action:{action:'STANDARD_OBSERVE',generation:state.generation,revision,targets:new Map<string,Record<string,unknown>>()}};};
@@ -310,10 +393,13 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
      }
      const address=addressPending??(fastFailed?undefined:appThenAddress??(named&&(!named.app||browser)?named.address:undefined));
      appThenAddress=undefined;
+     // The browser's own address bar takes the address (address:focus) whenever the helper offers it: a field inside the
+     // page that looks like one is never guessed (pod-jinawong r10, task 457a4930: a URL typed into Steam's store search).
+     if(address&&!addressPending&&supports(state,'address:focus')){addressPending=address;return requestStandard('address:focus');}
      const fields=address&&!addressPending?addressFields(state):[];
      let bar=addressPending?focusedTextField(state):fields.length===1?fields[0]:undefined;
-     if(address&&!bar&&!addressPending&&supports(state,'address:focus')){addressPending=address;return requestStandard('address:focus');}
      if(addressPending&&!bar)fastFailed=true;
+     const focusedBar=!!addressPending&&!!bar;
      addressPending=undefined;
      if(address&&!bar&&fields.length>1){
       const criteria:Record<string,string>={NONE:'None of these fields is the browser address bar'};
@@ -325,7 +411,8 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
       if(picked.choice!=='NONE')bar=fields.find(f=>'field:'+f.ref===picked.choice);
      }
      if(address&&bar){
-      fastCommand=true;const action={kind:'type',ref:bar.ref};emit('decided',summary(action,state));
+      fastCommand=true;navigationFrom={title:state.windowTitle,application:state.application};addressTyped||=focusedBar;
+      const action={kind:'type',ref:bar.ref};emit('decided',summary(action,state));
       return {action:{action:'address',generation:state.generation,revision,targets:new Map([['address',action]]),literal:address,submit:true,observedContinuation:true}};
      }
     }
@@ -339,7 +426,7 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
     }
     const navigation=direct&&asIssued?standardNavigationCommand(goal.goal):undefined;
     if(navigation&&state.supportedActions?.includes(navigation)){
-     fastCommand=true;
+     fastCommand=true;navigationFrom={title:state.windowTitle,application:state.application};
      const action={kind:'navigate',direction:navigation.split(':')[1]};emit('decided',summary(action,state));
      return {action:{action:'navigate',generation:state.generation,revision,targets:new Map([['navigate',action]]),observedContinuation:true}};
     }
@@ -386,7 +473,8 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
       for(const area of state.scrollAreas)offer(id+':'+area.ref,JSON.stringify({operation:'Scroll '+direction,area,coordinates:'bounds are fractions of the observed window; x increases right, y increases down'}),{kind,direction,ref:area.ref});
      }else offer(id,kind==='scroll'?'Scroll the observed area '+direction:direction==='back'?'Go back to the previous location in the current application':'Go forward to the next location in the current application history',{kind,direction});
     }
-    if(cycling||noProgress>=3){await capture();return {result:result('needs_input','COMMAND_WAITING_INPUT')};}
+    // Three looks without a change, or a loop: the run pauses for the user (a goal round is not failed for it).
+    if(cycling||noProgress>=3){emit('waiting',{reason:'NO_PROGRESS'});await capture();return {result:result('needs_input','NO_PROGRESS')};}
     if(submitAfterType){
      const expected=submitAfterType;submitAfterType=undefined;
      const focus=state.controls.filter(c=>!c.sensitive&&(c.focused===true||c.ref===state.focusedControl?.ref));
@@ -416,9 +504,15 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
      // The screen was still changing: look again shortly and let Jev decide afresh.
      fastCommand=false;
      if(selected.action==='WAIT'){
+      waitedOn??=structure(state);
       if((steps===0||goalRun)&&redecided<REDECIDE_MAX){redecided++;await settleDelay();return {action:{action:'STANDARD_OBSERVE',generation:state.generation,revision,targets:new Map<string,Record<string,unknown>>()}};}
-      await capture();return {result:waitForCommand('UI_NOT_READY')};
+      // Nothing on the screen moved while it waited (its values may: a chart's price, a clock): there was no step it
+      // could take, as BLOCKED, and a goal round goes on from the screenshot (vision fallback). Pod-jinawong r11, task
+      // ec82ed05: three WAITs on a TradingView chart whose controls never changed ended as "the screen was still changing".
+      const still=waitedOn===structure(state);waitedOn=undefined;
+      await capture();return {result:waitForCommand(still?'NO_SUPPORTED_ACTION':'UI_NOT_READY',still&&input.yieldAfterInteraction&&input.readRequest?{decisionMode:mode()}:{})};
      }
+     waitedOn=undefined;
      // Jev gave up on a single direct command (decisionMode jev marks it): the gateway may hand it to the agent once.
      if(selected.action==='BLOCKED'||selected.action==='UNCLEAR'){await capture();return {result:waitForCommand(selected.action==='UNCLEAR'?'UNCLEAR':'NO_SUPPORTED_ACTION',input.yieldAfterInteraction&&input.readRequest?{decisionMode:mode()}:{})};}
      // No action: the gateway hands the command to the agent, which reads the screen.
@@ -479,12 +573,19 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
      emit('verifying');last=ComputerObservation.parse(await call('computer_observe'));check();deps.observation?.(last);await capture();checkInterruption(deps.interruptSignal);update();if(goal.revision!==d.revision)return direct?result('cancelled','REVISION_SUPERSEDED'):undefined;
      // A goal run's confident DONE ends the goal: the agent hears the result and
      // the session closes. It is the model's judgement from the screen, not a verification.
+     // A goal that names a web address is done in a browser only when the page in front shows that site, or this run
+     // put the address into the browser's own address bar. Pod-jinawong r10, task 457a4930 rev5: the URL went into
+     // Steam's store search and "Steam Search, 0 results" was judged done (0.95). The address bar takes it instead, once.
+     if(goalRun&&steps>0&&webAddress&&!addressTyped&&frontIsBrowser(last)&&!urlShown(last,webAddress)){
+      if(!addressRetried&&supports(last,'address:focus')){addressRetried=true;asIssued=true;addressPending=webAddress.address;standardRequest='address:focus';emit('waiting',{reason:'ADDRESS_NOT_SHOWN'});return;}
+      return waitForCommand('ADDRESS_NOT_SHOWN');
+     }
      if(last.truncated||!deps.verify)return goalRun&&steps>0?result('succeeded','GOAL_REACHED'):result('needs_verification','COMPLETION_CANDIDATE');
      const verified=await interruptible(verifySignal=>deps.verify!(last!,goal.goal,verifySignal),runSignal,deps.interruptSignal);check();checkInterruption(deps.interruptSignal);update();if(goal.revision!==d.revision)return direct?result('cancelled','REVISION_SUPERSEDED'):undefined;
      if(typeof verified!=='boolean')throw Error('INVALID_VERIFICATION');
      return result(verified?'succeeded':'needs_verification',verified?'VERIFIED':'VERIFICATION_FAILED');
     }
-    if(steps>=input.maxSteps)return result('blocked','ACTION_BUDGET');
+    if(stepCap!==undefined&&steps>=stepCap)return result('blocked','ACTION_BUDGET');
     const action={...d.targets.get(d.action)!};
     if(action.kind==='type'){
      const target=last?.controls.find(c=>c.ref===action.ref);
@@ -504,6 +605,10 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
      }
      // Direct voice/text commands follow jev-voice-browser's candidate-only
      // executor. Never invoke a generative writer or capture an image to do so.
+     // Pod-jinawong 2.0.21 (fa17f432): an agent goal run reached the shell with no
+     // text to type. As a bare COMMAND_WAITING_INPUT nobody was asked for it; name
+     // the field so the agent is asked for the value (gateway-tasks/computer.ts inspect).
+     if(goalRun&&prepared.length!==1&&literal===undefined&&target){await capture();return {...result('needs_input','FIELD_TEXT_REQUIRED'),fieldRequest:{label:target.label.slice(0,250)||'the selected field',...(last?.application?{application:last.application}:{}),...(last?.windowTitle?{windowTitle:last.windowTitle}:{}),role:target.role,reason:'missing'}};}
      if(direct&&prepared.length!==1&&literal===undefined)return waitForCommand('FIELD_TEXT_REQUIRED');
      if(prepared.length!==1&&literal===undefined&&!deps.thinking){await capture();return result('needs_input','FIELD_TEXT_REQUIRED');}
      if(prepared.length!==1&&literal===undefined){await capture();checkInterruption(deps.interruptSignal);emit('thinking',summary(action));}
@@ -543,13 +648,15 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
     pending=operationId;emit('acting',{...summary(action),operationId});const started=Date.now();
     const Receipt=z.object({state:z.enum(['completed','not_executed','unknown']),error:z.string().optional()});
     let receipt:z.infer<typeof Receipt>;let rejected:string|undefined;
-    try{receipt=Receipt.parse(await call('computer_action',{...action,generation:d.generation,operation_id:operationId}));}
+    // The helper stopped on an unconfirmed operation and takes the next command without replaying it (continuation_ready).
+    let continuable=false;const ready=(body:unknown)=>{continuable||=(body as {continuation_ready?:unknown}|undefined)?.continuation_ready===true;};
+    try{const body=await call('computer_action',{...action,generation:d.generation,operation_id:operationId});ready(body);receipt=Receipt.parse(body);}
     catch(error){receipt={state:'unknown'};if(error instanceof Error&&PRE_DISPATCH_REJECTIONS.has(error.message))rejected=error.message;}
     if(receipt.state==='unknown'){
      emit('reconciling',{...summary(action),operationId,reason:'CHECKING_RECORDED_RESULT'});
      // Read receipts only; never resend the action after a transport failure.
      for(let retry=0;retry<3&&receipt.state==='unknown';retry++){
-      check();const status=await deps.call('computer_operation_status',{operation_id:operationId},runSignal).catch(()=>undefined);
+      check();const status=await deps.call('computer_operation_status',{operation_id:operationId},runSignal).catch(()=>undefined);ready(status);
       const parsed=z.object({operation_id:z.literal(operationId),state:z.enum(['completed','not_executed','unknown']),error:z.string().optional(),owner_acknowledged:z.boolean().optional()}).safeParse(status);
       if(parsed.success){if(parsed.data.owner_acknowledged)return result('cancelled','OWNER_ACKNOWLEDGED_UNKNOWN');receipt=parsed.data;}
       // An explicit relay rejection with no recorded operation never reached the
@@ -564,6 +671,16 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
      // Preserve post-action evidence for review, never infer completion or replay
      // from an image. Capture failure must not replace the unresolved operation.
      try{last=ComputerObservation.parse(await call('computer_observe'));check();deps.observation?.(last);await capture();}catch{/* Keep the unknown outcome and operation ID. */}
+     // An open the helper could not confirm (APPLICATION_LAUNCH_UNCONFIRMED) whose application is in front now did
+     // what it was for: a goal (or the reopened target) goes on from this screen; the operation is never replayed.
+     // Pod-jinawong r10, task 457a4930 rev3: TradingView's open went unconfirmed and the round ended with 0 actions.
+     if(continuable&&action.kind==='open'&&(goalRun||d.action==='reactivate')&&last?.application===action.app_id&&last.frontmostProtected!==true){
+      pending=undefined;previous={state:structuredClone(last),signature:fingerprint(last),identity:identity(last,action),action};
+      emit('waiting',{reason:'OPEN_UNCONFIRMED_APP_IN_FRONT'});
+      if(d.action==='reactivate')return;
+      steps++;lastAction={kind:'open',appId:String(action.app_id),appName:last.apps.find(app=>app.id===action.app_id)?.name};asIssued=false;redecided=0;
+      return;
+     }
      return result('needs_reconciliation','OUTCOME_UNKNOWN');
     }
     pending=undefined;
@@ -583,8 +700,10 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
      return result('blocked',receipt.error&&/^[A-Z][A-Z_0-9]{0,79}$/.test(receipt.error)?receipt.error:'ACTION_REJECTED');
     }
     previous={state:structuredClone(last!),signature:fingerprint(last!),identity:identity(last!,action),action,field:last?.controls.find(c=>c.ref===action.ref)};
+    // Reopening the target is no step of the command: nothing it asked for has happened yet.
+    if(d.action==='reactivate'){emit('acted',{...summary(action),operationId,outcome:'completed',reason:'REACTIVATE_TARGET',elapsedMs:Date.now()-started});return;}
     steps++;emit('acted',{...summary(action),operationId,outcome:'completed',elapsedMs:Date.now()-started});
-    {const control=previous.field;lastAction={kind:erasing!==undefined?'erase':String(action.kind),...(control&&!control.sensitive?{label:control.label.slice(0,200),role:control.role}:{}),...(typeof action.key==='string'?{key:action.key}:{}),...(typeof action.direction==='string'?{direction:action.direction}:{}),...(typeof action.app_id==='string'?{appId:action.app_id}:{}),...(erasing!==undefined?{count:erasing}:{})};
+    {const control=previous.field;lastAction={kind:erasing!==undefined?'erase':String(action.kind),...(control&&!control.sensitive?{label:control.label.slice(0,200),role:control.role}:{}),...(typeof action.key==='string'?{key:action.key}:{}),...(typeof action.direction==='string'?{direction:action.direction}:{}),...(typeof action.app_id==='string'?{appId:action.app_id,...(last?.apps.find(app=>app.id===action.app_id)?{appName:last.apps.find(app=>app.id===action.app_id)!.name.slice(0,200)}:{})}:{}),...(erasing!==undefined?{count:erasing}:{})};
      if(d.action==='label'&&labelPlanned>1&&control){labelPressed.push(control.label.slice(0,20));lastAction={...lastAction,sequence:[...labelPressed],planned:labelPlanned};}}
     // Consume this command once. A preselected type-and-submit interaction has
     // one guarded Enter remaining; it never asks Jev to extend the command.
@@ -603,12 +722,28 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
      try{last=ComputerObservation.parse(await call('computer_observe'));observed=true;check();deps.observation?.(last);await capture();}
      catch(error){check();checkInterruption(deps.interruptSignal);if(!observed)last=undefined;emit('waiting',{reason:'GOAL_EVIDENCE_UNAVAILABLE'});}
     };
-    // A fast path matched the whole goal text: running it to its end reaches the goal.
-    if(goalRun&&!continuing&&fastCommand){await goalEvidence();return result('succeeded','GOAL_REACHED');}
+    // The page in front after an address submit or a navigation: looked at again until it is another page than before
+    // (title or application), at most NAVIGATION_SETTLE_MS. True once it changed or shows the goal's site. A read that
+    // fails is no evidence either way: as goalEvidence, it leaves the goal reached (a stale read is a changing page).
+    const navigated=async()=>{
+     const from=navigationFrom;navigationFrom=undefined;if(!from)return true;
+     for(const until=Date.now()+NAVIGATION_SETTLE_MS;;){
+      try{last=ComputerObservation.parse(await call('computer_observe'));check();deps.observation?.(last);if(last.windowTitle!==from.title||last.application!==from.application||webAddress&&urlShown(last,webAddress))return true;}
+      catch{check();checkInterruption(deps.interruptSignal);return true;}
+      if(Date.now()>=until)return false;
+      await new Promise<void>((resolve,reject)=>{const stop=()=>{clearTimeout(t);reject(Error('CANCELLED'));};const t=setTimeout(()=>{runSignal.removeEventListener('abort',stop);resolve();},NAVIGATION_POLL_MS);runSignal.addEventListener('abort',stop,{once:true});});
+     }
+    };
+    // A fast path matched the whole goal text: running it to its end reaches the goal, once the page it opened is in
+    // front. A page that did not change in time goes to the decision model, which sees it and decides (WAIT, DONE...).
+    if(goalRun&&!continuing&&fastCommand){
+     if(!(await navigated())){asIssued=false;fastCommand=false;redecided=0;emit('waiting',{reason:'NAVIGATION_PENDING'});return;}
+     await goalEvidence();return result('succeeded','GOAL_REACHED');
+    }
     if(goalRun&&!continuing){
      asIssued=false;redecided=0;
      // Out of budget before DONE: a stop the agent hears, not a wait for a command.
-     if(steps>=input.maxSteps){await goalEvidence();return result('blocked','STEP_LIMIT');}
+     if(stepCap!==undefined&&steps>=stepCap){await goalEvidence();return result('blocked','STEP_LIMIT');}
      return;
     }
     if(input.yieldAfterInteraction&&!continuing){last=undefined;return waitForCommand('ACTION_DISPATCHED');}

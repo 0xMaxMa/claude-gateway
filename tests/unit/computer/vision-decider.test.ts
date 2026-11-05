@@ -5,6 +5,7 @@ import {
 import { IMPACT_CRITERIA, IMPACT_QUESTION } from '../../../src/automation/computer-command';
 import { runComputerUse, type ComputerUseDependencies } from '../../../src/automation/computer-use';
 import { modelRequestBody, rejectsForcedToolChoice, validateComputerUseConfig } from '../../../src/automation/model-choice-evaluator';
+import { visionRequestProblems } from '../../helpers/vision-request-shape';
 
 const CAPS_RAW = { pointer: ['click', 'double_click', 'right_click', 'move', 'drag'], pointerModifiers: ['alt', 'cmd', 'ctrl', 'shift'], scrollAt: true, keyChord: true, typeFocused: true, screenshotGeometry: true };
 const caps = rawCapabilities({ capabilities: CAPS_RAW })!;
@@ -126,6 +127,30 @@ describe('request shape', () => {
     expect(events[0]).toMatchObject({ outcome: 'completed', images: 1, usage: { input_tokens: 10, output_tokens: 2 } });
     expect(JSON.stringify(events)).not.toContain(TOKEN);
   });
+
+  test('a non-OK response logs the provider error type and a bounded, redacted message, never the request', async () => {
+    const secret = 'sk-ant-api03-' + 'A'.repeat(40);
+    const message = `messages.4.content.0.tool_result: image blocks are not allowed when is_error is true ${secret} ` + 'x'.repeat(5000);
+    const fetch = (async () => new Response(JSON.stringify({ type: 'error', error: { type: 'invalid_request_error', message } }), { status: 400, headers: { 'content-type': 'application/json' } })) as unknown as typeof globalThis.fetch;
+    const events: any[] = [];
+    const decide = visionModelDecider({ model: 'claude-sonnet-5', timeoutMs: 2000, fetch, authorize: () => true, onDecision: e => events.push(e),
+      connection: async () => ({ baseUrl: 'https://proxy.example.test', apiKey: TOKEN, scheme: 'bearer' }) });
+    await expect(decide([{ role: 'user', content: [{ type: 'text', text: 'SCREEN-TEXT-MARKER' }] }], new AbortController().signal, { goal: 'x', state: { generation: 'g1' } as any, shot }))
+      .rejects.toMatchObject({ code: 'INVALID_REQUEST' });
+    expect(events[0]).toMatchObject({ outcome: 'failed', errorCode: 'INVALID_REQUEST', providerError: { type: 'invalid_request_error', message: expect.stringContaining('image blocks are not allowed when is_error is true') } });
+    expect(events[0].providerError.message.length).toBeLessThanOrEqual(300);
+    const logged = JSON.stringify(events);
+    for (const hidden of [secret, TOKEN, 'SCREEN-TEXT-MARKER']) expect(logged).not.toContain(hidden);
+  });
+
+  test('a non-JSON error body still fails with the status code only', async () => {
+    const fetch = (async () => new Response('<html>bad gateway</html>', { status: 502, headers: { 'content-type': 'text/html' } })) as unknown as typeof globalThis.fetch;
+    const events: any[] = [];
+    const decide = visionModelDecider({ model: 'claude-sonnet-5', timeoutMs: 2000, fetch, authorize: () => true, onDecision: e => events.push(e),
+      connection: async () => ({ baseUrl: 'https://proxy.example.test', apiKey: TOKEN, scheme: 'bearer' }) });
+    await expect(decide([], new AbortController().signal, { goal: 'x', state: { generation: 'g1' } as any, shot })).rejects.toMatchObject({ code: 'PROVIDER_UNAVAILABLE' });
+    expect(events[0]).not.toHaveProperty('providerError');
+  });
 });
 
 describe('shared evaluator', () => {
@@ -154,11 +179,11 @@ describe('config', () => {
 });
 
 /** A fake Mac: each observe returns a new generation; actions return queued receipts. */
-function device(options: { caps?: unknown; receipts?: Array<Record<string, unknown> | Error>; shotError?: string; controls?: unknown[]; text?: string[]; impact?: (command: string) => 'ROUTINE' | 'HIGH_IMPACT'; status?: (args: any) => unknown } = {}) {
+function device(options: { caps?: unknown; receipts?: Array<Record<string, unknown> | Error>; shotError?: string; controls?: unknown[]; text?: string[]; impact?: (command: string) => 'ROUTINE' | 'HIGH_IMPACT'; status?: (args: any) => unknown; at?: (generation: number) => Record<string, unknown> } = {}) {
   let generation = 0;
   const calls: Array<{ name: string; args: any }> = [], receipts = [...(options.receipts ?? [])], judged: any[] = [];
   const state = (g: number) => ({ generation: 'g' + g, application: 'com.google.Chrome', windowTitle: 'YouTube', controls: options.controls ?? [{ ref: 'r1', role: 'AXTextField', label: 'Search', bounds: { x: 0.25, y: 0.1, width: 0.5, height: 0.05 }, actions: ['type'] }], apps: [], truncated: false, screenshotAvailable: true,
-    ...(options.text ? { text: options.text } : {}), ...(options.caps === null ? {} : { capabilities: options.caps ?? CAPS_RAW }) });
+    ...(options.text ? { text: options.text } : {}), ...(options.caps === null ? {} : { capabilities: options.caps ?? CAPS_RAW }), ...(options.at?.(g) ?? {}) });
   // The impact judge (Jev or the model backend): routine unless the test says otherwise.
   const evaluate: VisionDependencies['evaluate'] = async request => {
     judged.push(request);
@@ -179,12 +204,13 @@ function device(options: { caps?: unknown; receipts?: Array<Record<string, unkno
   });
   return { calls, deps, judged, actions: () => calls.filter(c => c.name === 'computer_action').map(c => c.args), released: () => calls.some(c => c.name === 'computer_release') };
 }
-/** A scripted model: one tool_use per turn; records every request. */
+/** A scripted model: one tool_use per turn; records every request and rejects one the provider would answer with a 400. */
 function model(script: Array<{ name: string; input?: unknown; toolset?: boolean } | 'text'>) {
   const seen: unknown[][] = [];
   let n = 0;
   const decide = async (messages: unknown[]): Promise<VisionTurn> => {
     seen.push(structuredClone(messages));
+    expect(visionRequestProblems(messages)).toEqual([]);
     const step = script[n++];
     if (!step) throw Error('script exhausted');
     if (step === 'text') return { content: [{ type: 'text', text: 'Thinking out loud.' }], stopReason: 'end_turn' };
@@ -229,9 +255,23 @@ describe('vision loop', () => {
     const result = await runVisionComputerUse({ goal: 'click it' }, d.deps(m.decide), signal()) as any;
     expect(result).toMatchObject({ status: 'succeeded', reason: 'GOAL_REACHED', steps: 1 });
     expect(d.actions().map(a => a.generation)).toEqual(['g1', 'g2']);
-    const reply = lastUser(m.seen[1]).content[0];
-    expect(reply).toMatchObject({ is_error: true, toolset_name: 'computer' });
-    expect(reply.content[0].text).toContain(error);
+    // The error tool_result is text only; the new state and screenshot follow it in the same message.
+    const [reply, state, image, ...rest] = lastUser(m.seen[1]).content;
+    expect(reply).toMatchObject({ type: 'tool_result', is_error: true, toolset_name: 'computer', content: [{ type: 'text', text: expect.stringContaining(error) }] });
+    expect(reply.content).toHaveLength(1);
+    expect(state).toMatchObject({ type: 'text', text: expect.stringContaining('<screen_state>') });
+    expect(image).toMatchObject({ type: 'image', source: { data: '/9j/g2' } });
+    expect(rest).toEqual([]);
+  });
+
+  test('the request validator catches an image inside an is_error tool_result', () => {
+    const img = { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: '/9j/' } };
+    const ask = { role: 'assistant', content: [{ type: 'tool_use', id: 'u1', name: 'type', input: {} }] };
+    expect(visionRequestProblems([{ role: 'user', content: [img] }, ask, { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'u1', is_error: true, content: [{ type: 'text', text: 'FOCUS_REQUIRED' }, img] }] }]))
+      .toEqual(['messages.2.content.0: image inside an is_error tool_result']);
+    expect(visionRequestProblems([{ role: 'user', content: [img] }, ask, { role: 'user', content: [img, { type: 'tool_result', tool_use_id: 'u1', content: 'x' }] }]))
+      .toEqual(['messages.2: tool_result after another block', 'messages.2: answers [] for tool_use ["u1"]']);
+    expect(visionRequestProblems([{ role: 'user', content: [img] }, ask, { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'u1', is_error: true, content: [{ type: 'text', text: 'FOCUS_REQUIRED' }] }, img] }])).toEqual([]);
   });
 
   test('repeated refusals end the run instead of looping', async () => {
@@ -449,5 +489,67 @@ describe('raw input refused before dispatch', () => {
     expect(first.actions()).toHaveLength(1);
     const later = device({ receipts: [{ state: 'completed' }, Error('RAW_INPUT_DISABLED')], status: () => ({ state: 'not_found' }) });
     expect(await runVisionComputerUse({ goal: 'x' }, later.deps(model([1, 2].map(() => ({ name: 'left_click', input: { coordinate: [1, 1] } }))).decide), signal())).toMatchObject({ status: 'blocked', reason: 'RAW_INPUT_DISABLED', steps: 1 });
+  });
+});
+
+// The Accessibility fallback (gateway-tasks/computer.ts): a goal round that found no control continues here, and
+// still types only text its instruction holds, never text the screen shows (goalTextCandidates' rule).
+describe('literal text for an Accessibility fallback', () => {
+  test('screen-sourced text is refused, the instruction text is typed', async () => {
+    const d = device({ text: ['Recent searches: Paradise'] }), m = model([
+      { name: 'left_click', input: { coordinate: [640, 40] } }, { name: 'type', input: { text: 'Paradise' } }, { name: 'type', input: { text: 'bodyslam' } },
+      { name: 'key', input: { text: 'Return' } }, finish('done'),
+    ]);
+    const result = await runVisionComputerUse({ goal: 'play bodyslam on Spotify', maxSteps: 7, literalText: true }, d.deps(m.decide), signal()) as any;
+    expect(result).toMatchObject({ status: 'succeeded', reason: 'GOAL_REACHED', steps: 3 });
+    expect(d.actions().map(({ operation_id, lease_token, generation, ...a }) => a)).toEqual([
+      { kind: 'pointer', op: 'click', x: 640, y: 40 }, { kind: 'type_focused', text: 'bodyslam' }, { kind: 'key_chord', keys: ['enter'] },
+    ]);
+    expect(lastUser(m.seen[2]).content[0]).toMatchObject({ is_error: true, content: expect.stringContaining('TEXT_NOT_IN_GOAL') });
+  });
+  // A click that brought a protected app to the front (the helper withholds it: application "unapproved").
+  test('approvedOnly: no raw input into a withheld or unapproved front window', async () => {
+    for (const front of [{ application: 'unapproved' }, { application: 'ai.getpod.app', frontmostProtected: true }]) {
+      const d = device({ at: g => (g >= 2 ? front : {}) }), m = model([
+        { name: 'left_click', input: { coordinate: [640, 40] } }, { name: 'type', input: { text: 'bodyslam' } }, { name: 'type', input: { text: 'bodyslam' } }, { name: 'type', input: { text: 'bodyslam' } },
+      ]);
+      const result = await runVisionComputerUse({ goal: 'play bodyslam on Spotify', literalText: true, approvedOnly: true }, d.deps(m.decide), signal()) as any;
+      expect(d.actions()).toHaveLength(1);
+      expect(result).toMatchObject({ status: 'blocked', reason: 'VISION_APPLICATION_NOT_APPROVED', steps: 1 });
+    }
+  });
+  test('without literalText a primary vision run keeps its behavior', async () => {
+    const d = device(), m = model([{ name: 'type', input: { text: 'Paradise' } }, finish('done')]);
+    await runVisionComputerUse({ goal: 'play something on Spotify' }, d.deps(m.decide), signal());
+    expect(d.actions().map(a => a.text)).toEqual(['Paradise']);
+  });
+});
+
+// r11: no action limit for a goal; a run that stops moving pauses for the user (NO_PROGRESS) instead of spending its round.
+describe('vision no-progress (no action limit)', () => {
+  const click = (x: number) => ({ name: 'left_click', input: { coordinate: [x, 300] } });
+  test('without maxSteps a run keeps going past 8 actions to its finish', async () => {
+    const m = model([...Array.from({ length: 12 }, (_, i) => click(100 + i * 50)), finish('done')]);
+    expect(await runVisionComputerUse({ goal: 'x' }, device().deps(m.decide), signal())).toMatchObject({ status: 'succeeded', reason: 'GOAL_REACHED', steps: 12 });
+  });
+  test('three actions in a row that leave the window unchanged pause the run', async () => {
+    const d = device(), deps = d.deps(model([click(100), click(300), click(500), click(700)]).decide);
+    deps.screenshot = async s => ({ generation: s.generation, data: '/9j/SAME', width: 1280, height: 800 });
+    const result = await runVisionComputerUse({ goal: 'x' }, deps, signal());
+    expect(result).toMatchObject({ status: 'needs_input', reason: 'NO_PROGRESS', steps: 3 });
+    expect(result.trace.events.some(e => e.phase === 'waiting' && e.reason === 'NO_PROGRESS')).toBe(true);
+    expect(d.actions()).toHaveLength(3);
+  });
+  test('the same click on the same spot three times pauses even while the screen changes', async () => {
+    const result = await runVisionComputerUse({ goal: 'x' }, device().deps(model([click(400), click(401), click(402), click(700)]).decide), signal());
+    expect(result).toMatchObject({ status: 'needs_input', reason: 'NO_PROGRESS', steps: 3 });
+  });
+  test('scrolling the same way repeatedly is walking a list, not a loop', async () => {
+    const scroll = { name: 'scroll', input: { coordinate: [640, 400], scroll_direction: 'down', scroll_amount: 5 } };
+    expect(await runVisionComputerUse({ goal: 'x' }, device().deps(model([scroll, scroll, scroll, scroll, finish('done')]).decide), signal())).toMatchObject({ status: 'succeeded', steps: 4 });
+  });
+  test('the turn guard comes from the run time when there is no action limit', async () => {
+    const m = model(Array.from({ length: 50 }, () => ({ name: 'screenshot' })));
+    expect(await runVisionComputerUse({ goal: 'x', timeoutMs: 3000 }, device().deps(m.decide), signal())).toMatchObject({ status: 'blocked', reason: 'LOOP_CYCLE_BUDGET', evaluations: 3 + 5 });
   });
 });
