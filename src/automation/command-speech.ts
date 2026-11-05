@@ -1,6 +1,6 @@
-import type {ComputerTaskReport} from '../orchestration/types';
+import type {ComputerTaskReport,WorkerOutcome} from '../orchestration/types';
 import type {BrowserTaskReport} from '../jev/browser-contract';
-import {computerOutcomeText,UNKNOWN_PREFIX} from './computer-outcome';
+import {computerOutcomeText,computerRoundDone,UNKNOWN_PREFIX} from './computer-outcome';
 import {browserOutcomeText} from './browser-outcome';
 import {spokenCommand} from './direct-command';
 
@@ -89,6 +89,21 @@ export function agentHandoffRequested(outcome:{computerReport?:ComputerTaskRepor
   return !!waiting?.reason&&!NO_HANDOFF.has(waiting.reason);
  }
  return !!browser&&!browser.stepRun&&browser.reason==='COMMAND_WAITING_INPUT'&&browser.commandOutcome?.done===false&&!NO_HANDOFF.has(browser.commandOutcome.reason??'')&&!browser.lastConfirmedAction&&browser.lastAction?.outcome!=='unknown';
+}
+/**
+ * The agent's one command for a handed-off utterance ended without doing it and asks
+ * the user nothing: a typed utterance gets no spoken line, so the agent reports it
+ * (runtime reportHandoffNotDone). A question for the user (a high-impact action to
+ * confirm, a missing field value), a stop or superseded round, and an action whose
+ * outcome is unknown are not reported.
+ */
+export function handoffNotDone(outcome:WorkerOutcome):boolean{
+ if(outcome.type!=='paused'&&outcome.type!=='failed')return false;
+ const computer=outcome.computerReport,browser=outcome.browserReport;
+ if(computer)return !computer.fieldRequest&&!computer.lastAction?.confirm&&computer.reason!=='OUTCOME_UNKNOWN'
+  &&!(Array.isArray(computer.trace)?computer.trace:[]).some(e=>e.reason==='CONFIRMATION_REQUIRED')&&!computerRoundDone(computer);
+ return !!browser&&browser.commandOutcome?.reason!=='CONFIRMATION_REQUIRED'&&browser.lastAction?.outcome!=='unknown'
+  &&(outcome.type==='failed'||browser.commandOutcome?.done===false);
 }
 export function directCommandSpeech(outcome:{computerReport?:ComputerTaskReport;browserReport?:BrowserTaskReport},command:string,context:SpeechContext={}):{spoken:string;recorded:string}|undefined{
  // The agent speaks the answer itself.

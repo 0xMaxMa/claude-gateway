@@ -39,8 +39,8 @@ test('V6: the summary context keeps the revision 1 All Clear action after later 
    expect(context.actionLog[0].result).toContain('pressed "All Clear"');
    expect(context.actionLog.map((e:any)=>e.revision)).toEqual([1,2,3,4,5]);
    expect(context.actionLog[3]).toMatchObject({revision:4,command:'ห้า'});
-   // A recorded LOW_CONFIDENCE round (no longer produced for a direct command) stays not done.
-   expect(context.actionLog[3].result).toMatch(/^Not done: LOW_CONFIDENCE/);
+   // A recorded LOW_CONFIDENCE round (no longer produced for a direct command) stays not done, in words, not its code.
+   expect(context.actionLog[3].result).toMatch(/^Not done: the next step was unclear from the screen\./);
   }
  }finally{f.close();}
 });

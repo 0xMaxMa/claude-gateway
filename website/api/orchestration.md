@@ -33,6 +33,33 @@ Uploaded still images (PNG/JPEG/GIF/WebP) are supplied as native image content i
 
 Worker questions are presented by the Agent in natural separate messages. All ordinary replies, including platform Reply and voice transcripts, are interpreted before `task_answer` commits an answer. Consultation leaves work waiting. Contextual reminders require elapsed cooldown and new user messages; the Agent chooses whether they are useful, without reminder/mute buttons or recurring timer messages. Explicit answer commands and authenticated APIs remain available. See [task questions and reminders](./tasks.md#answer-a-task-question).
 
+## Computer activity for a relay grant
+
+`GET /api/v1/computer/activity?grant_id=<UUID>`
+
+The desktop overlay polls this endpoint for the run associated with its relay
+grant. Send an API key with `Authorization: Bearer <key>`. The key must be allowed
+to access the run's agent, and its principal must belong to the run's
+conversation. A grant ID alone does not grant access. The response has
+`Cache-Control: no-store` and contains the newest accessible run, or
+`{"run":null}` when none is accessible. A run has `taskId`, `phase` (`acting`,
+`thinking`, `waiting_for_user`, or `ended`), `label`, and `updatedAt` (Unix
+milliseconds); `sessionId`, `reason`, `step`, and `total` appear when applicable.
+`reason` on a user wait is one of `access`, `question`, `confirmation`, `paused`,
+`continue`, `check`, or `next_command`. An absent or malformed UUID returns
+`400`; missing or invalid API credentials use the shared `401`/`403` responses.
+
+```json
+{
+  "run": {
+    "taskId": "<task-id>", "sessionId": "<agent-session-id>",
+    "phase": "waiting_for_user", "reason": "question",
+    "label": "Answer the question in GetPod", "step": 2, "total": 4,
+    "updatedAt": 1788760000000
+  }
+}
+```
+
 ## Session activity {#session-activity}
 
 `GET /api/v1/agents/:agentId/sessions/:sessionId/activity?after=0`

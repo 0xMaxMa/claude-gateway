@@ -1,0 +1,2922 @@
+{
+ "source": "pod-jinawong r11 (gateway 3d370131), app 0.1.1-alpha.2.wincu.8 (dbc4dc3) on macOS 26.6.2, task ec82ed05 \"TradingView: draw a new BTC channel touching real peaks\". Round receipts (computer-requests), no screenshots; installed apps trimmed, account name replaced. The recorded apps list stops at 100 entries; TradingView (the app this task opened) is added back.",
+ "rev1": {
+  "command": "In TradingView BTCUSDT 1D chart: remove the existing parallel channel, turn on Magnet mode, then draw a new parallel channel on the current downtrend since early October, anchoring the first line exactly on the real swing highs (October peak ~87.5k and the next lower high) and dragging the parallel line to the real swing low, so candle wicks touch the lines",
+  "note": "GetPod was in front: the first observation came back withheld (application \"unapproved\"), and the model spent its first action reopening TradingView.",
+  "trace": [
+   {
+    "phase": "observing",
+    "sequence": 1,
+    "round": 1,
+    "at": 1793766438839,
+    "revision": 1,
+    "steps": 0,
+    "evaluations": 0
+   },
+   {
+    "elapsedMs": 688,
+    "phase": "observed",
+    "sequence": 2,
+    "round": 1,
+    "at": 1793766439539,
+    "revision": 1,
+    "steps": 0,
+    "evaluations": 0
+   },
+   {
+    "decisionMode": "model",
+    "phase": "evaluating",
+    "sequence": 3,
+    "round": 1,
+    "at": 1793766439555,
+    "revision": 1,
+    "steps": 0,
+    "evaluations": 0
+   },
+   {
+    "targetGeneration": "2E389F40-9AC3-4C88-BD60-2BA62AF82714",
+    "application": "unapproved",
+    "appId": "com.tradingview.tradingviewapp.desktop",
+    "action": "open",
+    "confidence": 0.95,
+    "elapsedMs": 1536,
+    "phase": "decided",
+    "sequence": 4,
+    "round": 1,
+    "at": 1793766441091,
+    "revision": 1,
+    "steps": 0,
+    "evaluations": 1
+   },
+   {
+    "targetGeneration": "2E389F40-9AC3-4C88-BD60-2BA62AF82714",
+    "application": "unapproved",
+    "appId": "com.tradingview.tradingviewapp.desktop",
+    "action": "open",
+    "operationId": "edabd540-5735-4e56-8591-937ef6da413a",
+    "phase": "acting",
+    "sequence": 5,
+    "round": 1,
+    "at": 1793766441108,
+    "revision": 1,
+    "steps": 0,
+    "evaluations": 1
+   },
+   {
+    "targetGeneration": "2E389F40-9AC3-4C88-BD60-2BA62AF82714",
+    "application": "unapproved",
+    "appId": "com.tradingview.tradingviewapp.desktop",
+    "action": "open",
+    "operationId": "edabd540-5735-4e56-8591-937ef6da413a",
+    "outcome": "completed",
+    "elapsedMs": 428,
+    "phase": "acted",
+    "sequence": 6,
+    "round": 1,
+    "at": 1793766441540,
+    "revision": 1,
+    "steps": 1,
+    "evaluations": 1
+   },
+   {
+    "phase": "observing",
+    "sequence": 7,
+    "round": 2,
+    "at": 1793766441548,
+    "revision": 1,
+    "steps": 1,
+    "evaluations": 1
+   },
+   {
+    "targetGeneration": "2E389F40-9AC3-4C88-BD60-2BA62AF82714",
+    "application": "unapproved",
+    "appId": "com.tradingview.tradingviewapp.desktop",
+    "action": "open",
+    "changed": true,
+    "elapsedMs": 741,
+    "phase": "observed",
+    "sequence": 8,
+    "round": 2,
+    "at": 1793766442293,
+    "revision": 1,
+    "steps": 1,
+    "evaluations": 1
+   }
+  ]
+ },
+ "rev3": {
+  "command": "Close the \"Time to upgrade?\" ad popup (Close ad button), then remove the old channel by pressing \"Undo create parallel channel\" in the top toolbar. Do NOT press the indicator legend \"Remove\" buttons (they delete CDC ActionZone / RSI indicators). Then continue: turn on Magnet mode and draw a new parallel channel on the downtrend since early October anchored on the real swing highs (October peak ~87.5k and the next lower high) with the parallel line on the real swing low.",
+  "reply": "ผมไม่เห็นนะ ลองใหม่",
+  "trace": [
+   {
+    "phase": "observing",
+    "sequence": 1,
+    "round": 1,
+    "at": 1793766634068,
+    "revision": 3,
+    "steps": 0,
+    "evaluations": 0
+   },
+   {
+    "elapsedMs": 1120,
+    "phase": "observed",
+    "sequence": 2,
+    "round": 1,
+    "at": 1793766635203,
+    "revision": 3,
+    "steps": 0,
+    "evaluations": 0
+   },
+   {
+    "decisionMode": "model",
+    "phase": "evaluating",
+    "sequence": 3,
+    "round": 1,
+    "at": 1793766635226,
+    "revision": 3,
+    "steps": 0,
+    "evaluations": 0
+   },
+   {
+    "confidence": 0.95,
+    "elapsedMs": 1972,
+    "phase": "decided",
+    "sequence": 4,
+    "round": 1,
+    "at": 1793766637198,
+    "revision": 3,
+    "steps": 0,
+    "evaluations": 1
+   },
+   {
+    "phase": "observing",
+    "sequence": 5,
+    "round": 2,
+    "at": 1793766638216,
+    "revision": 3,
+    "steps": 0,
+    "evaluations": 1
+   },
+   {
+    "elapsedMs": 975,
+    "phase": "observed",
+    "sequence": 6,
+    "round": 2,
+    "at": 1793766639204,
+    "revision": 3,
+    "steps": 0,
+    "evaluations": 1
+   },
+   {
+    "decisionMode": "model",
+    "phase": "evaluating",
+    "sequence": 7,
+    "round": 2,
+    "at": 1793766639220,
+    "revision": 3,
+    "steps": 0,
+    "evaluations": 1
+   },
+   {
+    "confidence": 0.85,
+    "elapsedMs": 2025,
+    "phase": "decided",
+    "sequence": 8,
+    "round": 2,
+    "at": 1793766641245,
+    "revision": 3,
+    "steps": 0,
+    "evaluations": 2
+   },
+   {
+    "phase": "observing",
+    "sequence": 9,
+    "round": 3,
+    "at": 1793766642262,
+    "revision": 3,
+    "steps": 0,
+    "evaluations": 2
+   },
+   {
+    "elapsedMs": 915,
+    "phase": "observed",
+    "sequence": 10,
+    "round": 3,
+    "at": 1793766643184,
+    "revision": 3,
+    "steps": 0,
+    "evaluations": 2
+   },
+   {
+    "decisionMode": "model",
+    "phase": "evaluating",
+    "sequence": 11,
+    "round": 3,
+    "at": 1793766643191,
+    "revision": 3,
+    "steps": 0,
+    "evaluations": 2
+   },
+   {
+    "confidence": 0.85,
+    "elapsedMs": 2019,
+    "phase": "decided",
+    "sequence": 12,
+    "round": 3,
+    "at": 1793766645210,
+    "revision": 3,
+    "steps": 0,
+    "evaluations": 3
+   },
+   {
+    "reason": "UI_NOT_READY",
+    "phase": "waiting",
+    "sequence": 13,
+    "round": 3,
+    "at": 1793766645649,
+    "revision": 3,
+    "steps": 0,
+    "evaluations": 3
+   },
+   {
+    "status": "needs_input",
+    "reason": "COMMAND_WAITING_INPUT",
+    "phase": "terminal",
+    "sequence": 14,
+    "round": 3,
+    "at": 1793766645654,
+    "revision": 3,
+    "steps": 0,
+    "evaluations": 3
+   }
+  ],
+  "state": {
+   "contractVersion": 1,
+   "capabilities": {
+    "standardCommands": [
+     "scroll:up",
+     "scroll:down",
+     "close:window",
+     "address:focus",
+     "app:quit",
+     "tab:close",
+     "tab:new"
+    ],
+    "keys": [
+     "backspace",
+     "down",
+     "enter",
+     "escape",
+     "left",
+     "right",
+     "tab",
+     "up"
+    ]
+   },
+   "scrollAreas": [
+    {
+     "ref": "s0",
+     "label": "Scrollable area",
+     "bounds": {
+      "x": 0,
+      "y": 0,
+      "width": 1,
+      "height": 1
+     }
+    }
+   ],
+   "supportedActions": [
+    "scroll:up",
+    "scroll:down"
+   ],
+   "observationStats": {
+    "visited": 1001,
+    "candidates": 159,
+    "exported": 150,
+    "incomplete": false
+   },
+   "application": "com.tradingview.tradingviewapp.desktop",
+   "windowTitle": "BTCUSDT / Unnamed",
+   "controls": [
+    {
+     "identity": "1280693F-90FD-435A-A5DB-3E54D5D22D80",
+     "bounds": {
+      "x": 0,
+      "y": 0,
+      "width": 1,
+      "height": 0.0392156862745098
+     },
+     "ref": "c0",
+     "label": "AXGroup",
+     "context": "Open new window · Main menu",
+     "role": "AXGroup",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "1BD615EF-8007-4957-9B52-BFA33C2C2838",
+     "bounds": {
+      "x": 0,
+      "y": 0,
+      "width": 1,
+      "height": 0.0392156862745098
+     },
+     "ref": "c1",
+     "label": "AXGroup",
+     "role": "AXGroup",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "24A1E680-68E1-4F87-BC03-CFC200C5D538",
+     "bounds": {
+      "x": 0,
+      "y": 0.0392156862745098,
+      "width": 1,
+      "height": 0.9607843137254902
+     },
+     "ref": "c2",
+     "label": "AXGroup",
+     "context": "11 · Logged in as user Active layout: Unnamed",
+     "role": "AXGroup",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "6219B84B-DEE1-4AF0-BD72-5CD0D784F8A7",
+     "bounds": {
+      "x": 0.05026455026455026,
+      "y": 0,
+      "width": 0.16203703703703703,
+      "height": 0.0392156862745098
+     },
+     "ref": "c3",
+     "label": "AXGroup",
+     "role": "AXGroup",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "A90E2559-9434-4B4A-B986-F9BFFDC7A4E4",
+     "bounds": {
+      "x": 0.9332010582010583,
+      "y": 0,
+      "width": 0.03306878306878307,
+      "height": 0.0392156862745098
+     },
+     "ref": "c4",
+     "label": "Open new window",
+     "context": "BTCUSDT · ▼ · 76,824.45 · −0.81% · /  · Unnamed · Main menu · New tab",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "DDA7817C-D8D6-48C1-B3E5-066C48D618E4",
+     "bounds": {
+      "x": 0.966931216931217,
+      "y": 0,
+      "width": 0.03306878306878307,
+      "height": 0.0392156862745098
+     },
+     "ref": "c5",
+     "label": "Main menu",
+     "context": "BTCUSDT · ▼ · 76,824.45 · −0.81% · /  · Unnamed · Open new window · New tab",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "4BDBAF00-1626-4304-B2F5-195BB11C60E8",
+     "bounds": {
+      "x": 0,
+      "y": 0.0392156862745098,
+      "width": 0.03439153439153439,
+      "height": 0.04382929642445214
+     },
+     "ref": "c6",
+     "label": "AXGroup",
+     "context": "11 · Logged in as user Active layout: Unnamed · Chart #1 · Hide Tab",
+     "role": "AXGroup",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "E9D1D9F6-44AA-42A1-98D0-EEC2AE83DE86",
+     "bounds": {
+      "x": 0.03439153439153439,
+      "y": 0.0392156862745098,
+      "width": 0.9656084656084656,
+      "height": 0.04382929642445214
+     },
+     "ref": "c7",
+     "label": "AXGroup",
+     "context": "11 · Logged in as user Active layout: Unnamed · Chart #1 · Hide Tab",
+     "role": "AXGroup",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "150CAB3A-757B-4C9B-8D98-BA078BA288E5",
+     "bounds": {
+      "x": 0,
+      "y": 0.08765859284890427,
+      "width": 0.03439153439153439,
+      "height": 0.9123414071510957
+     },
+     "ref": "c8",
+     "label": "AXGroup",
+     "context": "11 · Logged in as user Active layout: Unnamed · Chart #1 · Hide Tab",
+     "role": "AXGroup",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "AE252E09-E349-402C-9152-694881F12739",
+     "bounds": {
+      "x": 0.21626984126984128,
+      "y": 0.006920415224913495,
+      "width": 0.01455026455026455,
+      "height": 0.025374855824682813
+     },
+     "ref": "c9",
+     "label": "New tab",
+     "context": "BTCUSDT · ▼ · 76,824.45 · −0.81% · /  · Unnamed · Open new window · Main menu",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "953D97AA-0180-4B18-879F-17530C0029FE",
+     "bounds": {
+      "x": 0,
+      "y": 0.0392156862745098,
+      "width": 0.03439153439153439,
+      "height": 0.04382929642445214
+     },
+     "ref": "c10",
+     "label": "Logged in as user Active layout: Unnamed",
+     "context": "11",
+     "role": "AXPopUpButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "81B51569-5E34-4CEA-853B-8CA6FECBEACF",
+     "bounds": {
+      "x": 0.03439153439153439,
+      "y": 0.0392156862745098,
+      "width": 0.9656084656084656,
+      "height": 0.04382929642445214
+     },
+     "ref": "c11",
+     "label": "AXGroup",
+     "context": "Share your idea with the trade community",
+     "role": "AXGroup",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "6F74294F-5207-4595-AA11-78289D47CE18",
+     "bounds": {
+      "x": 0,
+      "y": 0.08765859284890427,
+      "width": 0.03439153439153439,
+      "height": 0.9123414071510957
+     },
+     "ref": "c12",
+     "label": "AXToolbar",
+     "context": "11 · Logged in as user Active layout: Unnamed · Chart #1 · Hide Tab",
+     "role": "AXToolbar",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "21865BD1-61C4-497A-A65C-02F27A24A19C",
+     "bounds": {
+      "x": 0.037037037037037035,
+      "y": 0.08765859284890427,
+      "width": 0.6970899470899471,
+      "height": 0.8708189158016147
+     },
+     "ref": "c13",
+     "label": "AXGroup",
+     "role": "AXGroup",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "FDDD3CED-79D2-4579-88E0-1410DA2EC4F2",
+     "bounds": {
+      "x": 0.037037037037037035,
+      "y": 0.9584775086505191,
+      "width": 0.6970899470899471,
+      "height": 0.04152249134948097
+     },
+     "ref": "c14",
+     "label": "AXGroup",
+     "role": "AXGroup",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "3EB108F6-0303-46DB-A2DE-32191343D559",
+     "bounds": {
+      "x": 0.9702380952380952,
+      "y": 0.08765859284890427,
+      "width": 0.02976190476190476,
+      "height": 0.9123414071510957
+     },
+     "ref": "c15",
+     "label": "AXGroup",
+     "context": "B · BTCUSDT · Hide Tab · Metrics · Add note · Settings",
+     "role": "AXGroup",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "578413B5-6A40-495C-96FC-7C3706A6E958",
+     "bounds": {
+      "x": 0.7347883597883598,
+      "y": 0.9054209919261822,
+      "width": 0.005952380952380952,
+      "height": 0.031141868512110725
+     },
+     "ref": "c16",
+     "label": "AXGroup",
+     "context": "B · BTCUSDT · Hide Tab · Metrics · Add note · Settings",
+     "role": "AXGroup",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "C4A1BB97-B276-4E30-9ECB-00C3E3591A37",
+     "bounds": {
+      "x": 0.037037037037037035,
+      "y": 0.08765859284890427,
+      "width": 0.6970899470899471,
+      "height": 0.8708189158016147
+     },
+     "ref": "c17",
+     "label": "Chart #1",
+     "context": "Chart for BINANCE:BTCUSDT, 1 day",
+     "role": "AXGroup",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "952104B7-CDD6-4C09-948D-4A6A17082A41",
+     "bounds": {
+      "x": 0.7347883597883598,
+      "y": 0.9054209919261822,
+      "width": 0.005952380952380952,
+      "height": 0.031141868512110725
+     },
+     "ref": "c18",
+     "label": "Hide Tab",
+     "context": "B · BTCUSDT · Metrics · Add note · Settings",
+     "role": "AXGroup",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "335702FB-EFD1-4D6C-8722-FB71DB5057ED",
+     "bounds": {
+      "x": 0.871031746031746,
+      "y": 0.0392156862745098,
+      "width": 0.025793650793650792,
+      "height": 0.04382929642445214
+     },
+     "ref": "c19",
+     "label": "Share your idea with the trade community",
+     "role": "AXPopUpButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "B7D8974C-EB79-4EE0-8555-A42867BF8331",
+     "bounds": {
+      "x": 0.037037037037037035,
+      "y": 0.08765859284890427,
+      "width": 0.6243386243386243,
+      "height": 0.8385236447520185
+     },
+     "ref": "c20",
+     "label": "AXGroup",
+     "context": "Chart for BINANCE:BTCUSDT, 1 day",
+     "role": "AXGroup",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "238417B8-5D8A-4040-9255-2569BFA29AD8",
+     "bounds": {
+      "x": 0.31216931216931215,
+      "y": 0.8869665513264129,
+      "width": 0.3386243386243386,
+      "height": 0.0392156862745098
+     },
+     "ref": "c21",
+     "label": "AXGroup",
+     "context": "Chart for BINANCE:BTCUSDT, 1 day",
+     "role": "AXGroup",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "AA68294C-80CC-43ED-B8F5-5227989BD0EF",
+     "bounds": {
+      "x": 0.042328042328042326,
+      "y": 0.9596309111880046,
+      "width": 0.0205026455026455,
+      "height": 0.040369088811995385
+     },
+     "ref": "c22",
+     "label": "1 day in 1 minute intervals",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "47643DC5-2EC8-4335-BCDF-AF7388D0065D",
+     "bounds": {
+      "x": 0.06283068783068783,
+      "y": 0.9596309111880046,
+      "width": 0.0205026455026455,
+      "height": 0.040369088811995385
+     },
+     "ref": "c23",
+     "label": "5 days in 5 minutes intervals",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "7EFA9CBF-E5BC-4950-A0F4-E924E404A4FB",
+     "bounds": {
+      "x": 0.08267195767195767,
+      "y": 0.9596309111880046,
+      "width": 0.022486772486772486,
+      "height": 0.040369088811995385
+     },
+     "ref": "c24",
+     "label": "1 month in 30 minutes intervals",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "67F3CE08-1B6A-40FF-8128-A13CC11B57A0",
+     "bounds": {
+      "x": 0.10449735449735449,
+      "y": 0.9596309111880046,
+      "width": 0.021825396825396824,
+      "height": 0.040369088811995385
+     },
+     "ref": "c25",
+     "label": "3 months in 1 hour intervals",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "3BA0A162-180C-490A-92E1-2013D2759A3E",
+     "bounds": {
+      "x": 0.12632275132275134,
+      "y": 0.9596309111880046,
+      "width": 0.021825396825396824,
+      "height": 0.040369088811995385
+     },
+     "ref": "c26",
+     "label": "6 months in 2 hours intervals",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "E6E728DA-D4A6-4BAB-BB51-1AD68B3D8BCF",
+     "bounds": {
+      "x": 0.14814814814814814,
+      "y": 0.9596309111880046,
+      "width": 0.026455026455026454,
+      "height": 0.040369088811995385
+     },
+     "ref": "c27",
+     "label": "Year to day in 1 day intervals",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "C04DEF5A-9836-4E4E-A733-2B8F6B4778AE",
+     "bounds": {
+      "x": 0.17394179894179895,
+      "y": 0.9596309111880046,
+      "width": 0.0205026455026455,
+      "height": 0.040369088811995385
+     },
+     "ref": "c28",
+     "label": "1 year in 1 day intervals",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "8E3B0430-8EAA-4124-BA0B-708FB0682EDC",
+     "bounds": {
+      "x": 0.19378306878306878,
+      "y": 0.9596309111880046,
+      "width": 0.01984126984126984,
+      "height": 0.040369088811995385
+     },
+     "ref": "c29",
+     "label": "5 years in 1 week intervals",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "213C2E8F-B537-41D1-B5B8-7D6AC1D1FDF3",
+     "bounds": {
+      "x": 0.21362433862433863,
+      "y": 0.9596309111880046,
+      "width": 0.018518518518518517,
+      "height": 0.040369088811995385
+     },
+     "ref": "c30",
+     "label": "All data in 1 month intervals",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "0938A5BC-9DDE-458C-A9D6-851A74854E1C",
+     "bounds": {
+      "x": 0.23809523809523808,
+      "y": 0.9596309111880046,
+      "width": 0.02513227513227513,
+      "height": 0.040369088811995385
+     },
+     "ref": "c31",
+     "label": "Go to",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "D0671F1B-6D3C-4A1C-8050-74AAFF957AF0",
+     "bounds": {
+      "x": 0.9702380952380952,
+      "y": 0.08765859284890427,
+      "width": 0.02976190476190476,
+      "height": 0.0011534025374855825
+     },
+     "ref": "c32",
+     "label": "AXGroup",
+     "role": "AXGroup",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "605E6F78-B2C8-48DC-A3FB-667946430C3A",
+     "bounds": {
+      "x": 0.7367724867724867,
+      "y": 0.08765859284890427,
+      "width": 0.2328042328042328,
+      "height": 0.05536332179930796
+     },
+     "ref": "c33",
+     "label": "AXGroup",
+     "context": "Add symbol · Advanced view · Settings · Symbol · Last · Chg · Chg% · Red list",
+     "role": "AXGroup",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "59D17168-3C83-4086-A87D-39EE402C53B3",
+     "bounds": {
+      "x": 0.7367724867724867,
+      "y": 0.14302191464821223,
+      "width": 0.2328042328042328,
+      "height": 0.4002306805074971
+     },
+     "ref": "c34",
+     "label": "AXGroup",
+     "context": "Add symbol · Advanced view · Settings · Symbol · Last · Chg · Chg% · Red list",
+     "role": "AXGroup",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "5F4F5778-748E-478D-ACE6-31FF9FB67087",
+     "bounds": {
+      "x": 0.7367724867724867,
+      "y": 0.5478662053056517,
+      "width": 0.2328042328042328,
+      "height": 0.05536332179930796
+     },
+     "ref": "c35",
+     "label": "AXGroup",
+     "role": "AXGroup",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "E308414E-404B-4D69-A1CB-AB09829C4DCF",
+     "bounds": {
+      "x": 0.7367724867724867,
+      "y": 0.6032295271049596,
+      "width": 0.2328042328042328,
+      "height": 0.39677047289504036
+     },
+     "ref": "c36",
+     "label": "AXGroup",
+     "role": "AXGroup",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "D0304F0A-DCA7-4340-A20A-62B37BAE13C4",
+     "bounds": {
+      "x": 0.12433862433862433,
+      "y": 0.0392156862745098,
+      "width": 0.02513227513227513,
+      "height": 0.04382929642445214
+     },
+     "ref": "c37",
+     "label": "Compare symbols",
+     "role": "AXPopUpButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "6616B0FC-7D2C-4A2F-86DC-B017FFA04AEF",
+     "bounds": {
+      "x": 0.21693121693121692,
+      "y": 0.0392156862745098,
+      "width": 0.08928571428571429,
+      "height": 0.04382929642445214
+     },
+     "ref": "c38",
+     "label": "AXGroup",
+     "role": "AXGroup",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "909DFCC7-BE2C-4258-B969-EE6F8A040590",
+     "bounds": {
+      "x": 0.31216931216931215,
+      "y": 0.0392156862745098,
+      "width": 0.051587301587301584,
+      "height": 0.04382929642445214
+     },
+     "ref": "c39",
+     "label": "Create alert",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "57729D6E-545C-477B-9DE6-88366DB75FBE",
+     "bounds": {
+      "x": 0.3637566137566138,
+      "y": 0.0392156862745098,
+      "width": 0.05952380952380952,
+      "height": 0.04382929642445214
+     },
+     "ref": "c40",
+     "label": "Bar replay",
+     "role": "AXCheckBox",
+     "value": "0",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "5EED56E6-59CB-47E9-A33F-E767C6DEE17E",
+     "bounds": {
+      "x": 0.6752645502645502,
+      "y": 0.0392156862745098,
+      "width": 0.025793650793650792,
+      "height": 0.04382929642445214
+     },
+     "ref": "c41",
+     "label": "Layout setup",
+     "role": "AXPopUpButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "C2DC4845-8EE4-4965-B689-336CB6766A91",
+     "bounds": {
+      "x": 0.7705026455026455,
+      "y": 0.0392156862745098,
+      "width": 0.025793650793650792,
+      "height": 0.04382929642445214
+     },
+     "ref": "c42",
+     "label": "Quick search",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "424FC486-B76D-490F-94D7-5DC931C191B5",
+     "bounds": {
+      "x": 0.7956349206349206,
+      "y": 0.0392156862745098,
+      "width": 0.025793650793650792,
+      "height": 0.04382929642445214
+     },
+     "ref": "c43",
+     "label": "Settings",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "C531DB2C-90FE-47A5-B43B-960920FD6C47",
+     "bounds": {
+      "x": 0.8207671957671958,
+      "y": 0.0392156862745098,
+      "width": 0.025793650793650792,
+      "height": 0.04382929642445214
+     },
+     "ref": "c44",
+     "label": "AXGroup",
+     "role": "AXGroup",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "D331D604-F21F-4D49-8FA3-884D6CE1B6A9",
+     "bounds": {
+      "x": 0.8458994708994709,
+      "y": 0.0392156862745098,
+      "width": 0.025793650793650792,
+      "height": 0.04382929642445214
+     },
+     "ref": "c45",
+     "label": "Take a snapshot",
+     "role": "AXPopUpButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "138BDA15-99E1-46B3-9E3E-1F4AC2FF57CF",
+     "bounds": {
+      "x": 0.8988095238095238,
+      "y": 0.04498269896193772,
+      "width": 0.04034391534391534,
+      "height": 0.03229527104959631
+     },
+     "ref": "c46",
+     "label": "Trade",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "E4C133E7-7DB6-4D53-97A7-F79C5425B4D8",
+     "bounds": {
+      "x": 0.9444444444444444,
+      "y": 0.04498269896193772,
+      "width": 0.05291005291005291,
+      "height": 0.03229527104959631
+     },
+     "ref": "c47",
+     "label": "Upgrade",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "EA10254E-AEFA-402C-9FB3-A32D080475D3",
+     "bounds": {
+      "x": 0,
+      "y": 0.4602076124567474,
+      "width": 0.03439153439153439,
+      "height": 0.04382929642445214
+     },
+     "ref": "c48",
+     "label": "Measure",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "DC8C93FA-08E4-40D2-8E4D-1E4A2D0983DB",
+     "bounds": {
+      "x": 0,
+      "y": 0.5040369088811996,
+      "width": 0.03439153439153439,
+      "height": 0.04382929642445214
+     },
+     "ref": "c49",
+     "label": "Zoom in",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "F2EFD7BD-EB71-4802-B381-9210C7AAC398",
+     "bounds": {
+      "x": 0,
+      "y": 0.6066897347174164,
+      "width": 0.03439153439153439,
+      "height": 0.04382929642445214
+     },
+     "ref": "c50",
+     "label": "Keep drawing",
+     "role": "AXCheckBox",
+     "value": "0",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "F2CF42D4-62F3-4EB5-9C05-DE1855CCCEBF",
+     "bounds": {
+      "x": 0.6514550264550265,
+      "y": 0.9596309111880046,
+      "width": 0.08002645502645503,
+      "height": 0.040369088811995385
+     },
+     "ref": "c51",
+     "label": "AXGroup",
+     "context": "11:30:41 UTC+7 · Timezone",
+     "role": "AXGroup",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "4F855C5E-1339-4120-B83C-0B5584416001",
+     "bounds": {
+      "x": 0.7473544973544973,
+      "y": 0.09342560553633218,
+      "width": 0.21164021164021163,
+      "height": 0.04382929642445214
+     },
+     "ref": "c52",
+     "label": "AXGroup",
+     "context": "Red list · Add symbol · Advanced view · Settings",
+     "role": "AXGroup",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "D6B532F7-EC5E-43EA-8EDD-8373A68247A4",
+     "bounds": {
+      "x": 0.8888888888888888,
+      "y": 0.5536332179930796,
+      "width": 0.02513227513227513,
+      "height": 0.04382929642445214
+     },
+     "ref": "c53",
+     "label": "Metrics",
+     "context": "B · BTCUSDT · Add note · Settings",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "73CEE9FA-962C-4FDA-BCBE-72441534CEE6",
+     "bounds": {
+      "x": 0.9140211640211641,
+      "y": 0.5536332179930796,
+      "width": 0.02513227513227513,
+      "height": 0.04382929642445214
+     },
+     "ref": "c54",
+     "label": "Add note",
+     "context": "B · BTCUSDT · Metrics · Settings",
+     "role": "AXGroup",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "7EBD80DC-DAFE-4F0F-805F-AFCBA1628783",
+     "bounds": {
+      "x": 0.9391534391534392,
+      "y": 0.5536332179930796,
+      "width": 0.02513227513227513,
+      "height": 0.04382929642445214
+     },
+     "ref": "c55",
+     "label": "Settings",
+     "context": "B · BTCUSDT · Metrics · Add note",
+     "role": "AXGroup",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "E6EB1D46-10E1-4B14-9461-6CA9145E04A1",
+     "bounds": {
+      "x": 0.037037037037037035,
+      "y": 0.04498269896193772,
+      "width": 0.08465608465608465,
+      "height": 0.03229527104959631
+     },
+     "ref": "c56",
+     "label": "BTCUSDT",
+     "context": "Switch data type",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "B405C189-6367-4366-ADD6-2481A046F9B9",
+     "bounds": {
+      "x": 0.10052910052910052,
+      "y": 0.04498269896193772,
+      "width": 0.021164021164021163,
+      "height": 0.03229527104959631
+     },
+     "ref": "c57",
+     "label": "Switch data type",
+     "context": "BTCUSDT",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "130C83D3-6485-4C6F-BD9F-A446EC1B4FEE",
+     "bounds": {
+      "x": 0.15542328042328044,
+      "y": 0.0392156862745098,
+      "width": 0.02447089947089947,
+      "height": 0.04382929642445214
+     },
+     "ref": "c58",
+     "label": "1 day",
+     "context": "D",
+     "role": "AXPopUpButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "114EC489-98AE-4242-ACFD-00E7CE500F2A",
+     "bounds": {
+      "x": 0.18584656084656084,
+      "y": 0.0392156862745098,
+      "width": 0.02513227513227513,
+      "height": 0.04382929642445214
+     },
+     "ref": "c59",
+     "label": "Candles",
+     "role": "AXPopUpButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "30FBC012-DB66-47A9-8944-502220AAA562",
+     "bounds": {
+      "x": 0.21693121693121692,
+      "y": 0.0392156862745098,
+      "width": 0.07341269841269842,
+      "height": 0.04382929642445214
+     },
+     "ref": "c60",
+     "label": "Indicators, metrics, and strategies",
+     "context": "Indicators · Favorite indicators and indicators templates",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "5EB0ADCA-8C78-45A5-9802-6BF8A2479534",
+     "bounds": {
+      "x": 0.42923280423280424,
+      "y": 0.0392156862745098,
+      "width": 0.02513227513227513,
+      "height": 0.04382929642445214
+     },
+     "ref": "c61",
+     "label": "Undo remove pane",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "334EC85E-2000-4C0A-9890-37425D1F0E44",
+     "bounds": {
+      "x": 0.7003968253968254,
+      "y": 0.0392156862745098,
+      "width": 0.04894179894179894,
+      "height": 0.04382929642445214
+     },
+     "ref": "c62",
+     "label": "Save all charts for all symbols and intervals on your layout",
+     "context": "Unnamed · Save · Manage layouts",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "E01D056C-2BC3-4E3C-8E5C-4D1624A5D615",
+     "bounds": {
+      "x": 0.8207671957671958,
+      "y": 0.0392156862745098,
+      "width": 0.025793650793650792,
+      "height": 0.04382929642445214
+     },
+     "ref": "c63",
+     "label": "Fullscreen mode",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "EA74A840-F48D-48E1-8A12-107AE3BF9C8F",
+     "bounds": {
+      "x": 0.03968253968253968,
+      "y": 0.0922722029988466,
+      "width": 0.6164021164021164,
+      "height": 0.13494809688581316
+     },
+     "ref": "c64",
+     "label": "AXGroup",
+     "role": "AXGroup",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "47CCFB7C-5D58-4D37-A831-973D9DC599D3",
+     "bounds": {
+      "x": 0.037037037037037035,
+      "y": 0.08765859284890427,
+      "width": 0.6243386243386243,
+      "height": 0.8385236447520185
+     },
+     "ref": "c65",
+     "label": "Chart for BINANCE:BTCUSDT, 1 day",
+     "role": "AXImage",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "1F56407F-2C5C-45DE-9615-7FDE4D8B2AB5",
+     "bounds": {
+      "x": 0.6514550264550265,
+      "y": 0.9596309111880046,
+      "width": 0.08002645502645503,
+      "height": 0.040369088811995385
+     },
+     "ref": "c66",
+     "label": "Timezone",
+     "context": "11:30:41 UTC+7",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "5AB77D78-4A58-4C25-82C9-E0928112F38F",
+     "bounds": {
+      "x": 0.8888888888888888,
+      "y": 0.09342560553633218,
+      "width": 0.02513227513227513,
+      "height": 0.04382929642445214
+     },
+     "ref": "c67",
+     "label": "Add symbol",
+     "context": "Red list · Advanced view · Settings",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "870A3080-6CF2-44D0-B1EF-50DB178F61A9",
+     "bounds": {
+      "x": 0.9140211640211641,
+      "y": 0.09342560553633218,
+      "width": 0.02513227513227513,
+      "height": 0.04382929642445214
+     },
+     "ref": "c68",
+     "label": "Advanced view",
+     "context": "Red list · Add symbol · Settings",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "EC251B41-CDDF-4B0B-9B12-BDFE6BCB627F",
+     "bounds": {
+      "x": 0.9391534391534392,
+      "y": 0.09342560553633218,
+      "width": 0.02513227513227513,
+      "height": 0.04382929642445214
+     },
+     "ref": "c69",
+     "label": "Settings",
+     "context": "Red list · Add symbol · Advanced view",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "19786838-8E60-41BC-B863-133649085274",
+     "bounds": {
+      "x": 0.7473544973544973,
+      "y": 0.14878892733564014,
+      "width": 0.032407407407407406,
+      "height": 0.020761245674740483
+     },
+     "ref": "c70",
+     "label": "Symbol",
+     "context": "Last · Chg · Chg%",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "DFD7FD2C-3AAD-4203-A9A2-F8E9FA494E2B",
+     "bounds": {
+      "x": 0.8392857142857143,
+      "y": 0.14878892733564014,
+      "width": 0.018518518518518517,
+      "height": 0.020761245674740483
+     },
+     "ref": "c71",
+     "label": "Last",
+     "context": "Symbol · Chg · Chg%",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "414B91F7-2439-4E8C-8F61-B17CC2E45E78",
+     "bounds": {
+      "x": 0.8941798941798942,
+      "y": 0.14878892733564014,
+      "width": 0.017857142857142856,
+      "height": 0.020761245674740483
+     },
+     "ref": "c72",
+     "label": "Chg",
+     "context": "Symbol · Last · Chg%",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "9196B829-7857-4CCC-83DF-BF8617A1D6CB",
+     "bounds": {
+      "x": 0.9332010582010583,
+      "y": 0.14878892733564014,
+      "width": 0.025793650793650792,
+      "height": 0.020761245674740483
+     },
+     "ref": "c73",
+     "label": "Chg%",
+     "context": "Symbol · Last · Chg",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "D8F59509-B629-4175-8389-ED99731F982D",
+     "bounds": {
+      "x": 0.29034391534391535,
+      "y": 0.0392156862745098,
+      "width": 0.015873015873015872,
+      "height": 0.04382929642445214
+     },
+     "ref": "c74",
+     "label": "Favorite indicators and indicators templates",
+     "context": "Indicators · Indicators, metrics, and strategies",
+     "role": "AXPopUpButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "06F45A19-4AAA-4C2B-82C6-BEDF4830A8E6",
+     "bounds": {
+      "x": 0.7486772486772487,
+      "y": 0.0392156862745098,
+      "width": 0.016534391534391533,
+      "height": 0.04382929642445214
+     },
+     "ref": "c75",
+     "label": "Manage layouts",
+     "context": "Unnamed · Save · Save all charts for all symbols and intervals on your layout",
+     "role": "AXPopUpButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "CF83B7B1-08B8-48B6-B346-333A5930081F",
+     "bounds": {
+      "x": 0,
+      "y": 0.09457900807381776,
+      "width": 0.03439153439153439,
+      "height": 0.04382929642445214
+     },
+     "ref": "c76",
+     "label": "Cross",
+     "context": "Cursors",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "1915B3CA-3AA8-45F6-9DFD-6618E8F9F6C1",
+     "bounds": {
+      "x": 0.027116402116402115,
+      "y": 0.09688581314878893,
+      "width": 0.007275132275132275,
+      "height": 0.0392156862745098
+     },
+     "ref": "c77",
+     "label": "Cursors",
+     "context": "Cross",
+     "role": "AXCheckBox",
+     "value": "1",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "7FEE50F5-25BD-4D02-B122-4C63C917F106",
+     "bounds": {
+      "x": 0,
+      "y": 0.1384083044982699,
+      "width": 0.03439153439153439,
+      "height": 0.04382929642445214
+     },
+     "ref": "c78",
+     "label": "Parallel channel",
+     "context": "Trend tools",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "4DD440A0-AD46-4DD5-B50F-43A21C9AD928",
+     "bounds": {
+      "x": 0.027116402116402115,
+      "y": 0.14071510957324107,
+      "width": 0.007275132275132275,
+      "height": 0.0392156862745098
+     },
+     "ref": "c79",
+     "label": "Trend tools",
+     "context": "Parallel channel",
+     "role": "AXCheckBox",
+     "value": "0",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "7CAA95AE-09B9-4240-802C-FB40DD0DA73C",
+     "bounds": {
+      "x": 0,
+      "y": 0.18223760092272204,
+      "width": 0.03439153439153439,
+      "height": 0.04382929642445214
+     },
+     "ref": "c80",
+     "label": "Fib retracement",
+     "context": "Gann and Fibonacci tools",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "EFFA6EF7-B9B2-47CF-AA96-E73FAEEE250E",
+     "bounds": {
+      "x": 0.027116402116402115,
+      "y": 0.1845444059976932,
+      "width": 0.007275132275132275,
+      "height": 0.0392156862745098
+     },
+     "ref": "c81",
+     "label": "Gann and Fibonacci tools",
+     "context": "Fib retracement",
+     "role": "AXCheckBox",
+     "value": "0",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "47962988-0EFF-4724-84AF-7551B0D6BDC0",
+     "bounds": {
+      "x": 0,
+      "y": 0.22606689734717417,
+      "width": 0.03439153439153439,
+      "height": 0.04382929642445214
+     },
+     "ref": "c82",
+     "label": "XABCD pattern",
+     "context": "Patterns",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "70297040-69FD-4236-A25A-003A3ABB8EB2",
+     "bounds": {
+      "x": 0.027116402116402115,
+      "y": 0.22837370242214533,
+      "width": 0.007275132275132275,
+      "height": 0.0392156862745098
+     },
+     "ref": "c83",
+     "label": "Patterns",
+     "context": "XABCD pattern",
+     "role": "AXCheckBox",
+     "value": "0",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "DB4492C8-5362-40B9-915B-02FAF10D01EA",
+     "bounds": {
+      "x": 0,
+      "y": 0.2698961937716263,
+      "width": 0.03439153439153439,
+      "height": 0.04382929642445214
+     },
+     "ref": "c84",
+     "label": "Long position",
+     "context": "Forecasting and measurement tools",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "5E3CB568-493F-43E3-BE22-15F547AAE386",
+     "bounds": {
+      "x": 0.027116402116402115,
+      "y": 0.2722029988465975,
+      "width": 0.007275132275132275,
+      "height": 0.0392156862745098
+     },
+     "ref": "c85",
+     "label": "Forecasting and measurement tools",
+     "context": "Long position",
+     "role": "AXCheckBox",
+     "value": "0",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "ABE45D2F-FA41-4863-AAE8-2387E60E2C86",
+     "bounds": {
+      "x": 0,
+      "y": 0.3137254901960784,
+      "width": 0.03439153439153439,
+      "height": 0.04382929642445214
+     },
+     "ref": "c86",
+     "label": "Brush",
+     "context": "Geometric shapes",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "21639BCA-3C4B-4547-8A25-AB861C48C957",
+     "bounds": {
+      "x": 0.027116402116402115,
+      "y": 0.3160322952710496,
+      "width": 0.007275132275132275,
+      "height": 0.0392156862745098
+     },
+     "ref": "c87",
+     "label": "Geometric shapes",
+     "context": "Brush",
+     "role": "AXCheckBox",
+     "value": "0",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "F8257F83-D844-4A16-960E-46A788D5F4E2",
+     "bounds": {
+      "x": 0,
+      "y": 0.3575547866205306,
+      "width": 0.03439153439153439,
+      "height": 0.04382929642445214
+     },
+     "ref": "c88",
+     "label": "Text",
+     "context": "Annotation tools",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "DC66C022-D399-49CB-BAFD-4EF62EB8AB7F",
+     "bounds": {
+      "x": 0.027116402116402115,
+      "y": 0.35986159169550175,
+      "width": 0.007275132275132275,
+      "height": 0.0392156862745098
+     },
+     "ref": "c89",
+     "label": "Annotation tools",
+     "context": "Text",
+     "role": "AXCheckBox",
+     "value": "0",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "55306758-2846-44C1-9645-5B37B9698F8A",
+     "bounds": {
+      "x": 0,
+      "y": 0.4013840830449827,
+      "width": 0.03439153439153439,
+      "height": 0.04382929642445214
+     },
+     "ref": "c90",
+     "label": "Icon",
+     "context": "Icons",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "0B189E0C-906F-4DDA-966A-911720928BDE",
+     "bounds": {
+      "x": 0.027116402116402115,
+      "y": 0.40369088811995385,
+      "width": 0.007275132275132275,
+      "height": 0.0392156862745098
+     },
+     "ref": "c91",
+     "label": "Icons",
+     "context": "Icon",
+     "role": "AXCheckBox",
+     "value": "0",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "2E7FD34C-93D8-4792-B41A-39196DC9DBC8",
+     "bounds": {
+      "x": 0,
+      "y": 0.6505190311418685,
+      "width": 0.03439153439153439,
+      "height": 0.04382929642445214
+     },
+     "ref": "c92",
+     "label": "Lock drawings and indicators",
+     "context": "Lock options",
+     "role": "AXCheckBox",
+     "value": "0",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "D722A0EE-7266-4356-A495-D392EBE5C0EA",
+     "bounds": {
+      "x": 0.027116402116402115,
+      "y": 0.6528258362168397,
+      "width": 0.007275132275132275,
+      "height": 0.0392156862745098
+     },
+     "ref": "c93",
+     "label": "Lock options",
+     "context": "Lock drawings and indicators",
+     "role": "AXCheckBox",
+     "value": "0",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "4CA8DFAA-5E44-4EC8-99D9-5AA80F1243D8",
+     "bounds": {
+      "x": 0,
+      "y": 0.6943483275663207,
+      "width": 0.03439153439153439,
+      "height": 0.04382929642445214
+     },
+     "ref": "c94",
+     "label": "Hide all drawings",
+     "context": "Hide options",
+     "role": "AXCheckBox",
+     "value": "0",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "BDFB62C7-8B28-4AC5-85BB-E5ECF4B18C29",
+     "bounds": {
+      "x": 0.027116402116402115,
+      "y": 0.6966551326412919,
+      "width": 0.007275132275132275,
+      "height": 0.0392156862745098
+     },
+     "ref": "c95",
+     "label": "Hide options",
+     "context": "Hide all drawings",
+     "role": "AXCheckBox",
+     "value": "0",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "3CAC9497-24A3-49A8-A412-B99A34ECC1BC",
+     "bounds": {
+      "x": 0,
+      "y": 0.7531718569780853,
+      "width": 0.03439153439153439,
+      "height": 0.04382929642445214
+     },
+     "ref": "c96",
+     "label": "Remove objects",
+     "context": "Remove options",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "4A930060-91F8-470E-B276-3DB00F7328CE",
+     "bounds": {
+      "x": 0.027116402116402115,
+      "y": 0.7554786620530565,
+      "width": 0.007275132275132275,
+      "height": 0.0392156862745098
+     },
+     "ref": "c97",
+     "label": "Remove options",
+     "context": "Remove objects",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "B24C167E-6144-4E8D-8137-C9DF578BA1C7",
+     "bounds": {
+      "x": 0.9708994708994709,
+      "y": 0.08996539792387544,
+      "width": 0.0291005291005291,
+      "height": 0.05074971164936563
+     },
+     "ref": "c98",
+     "label": "Watchlist, details, and news",
+     "role": "AXCheckBox",
+     "value": "1",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "434618D9-0C54-4CFA-AC59-9C1D7530E5AC",
+     "bounds": {
+      "x": 0.9708994708994709,
+      "y": 0.14302191464821223,
+      "width": 0.0291005291005291,
+      "height": 0.05074971164936563
+     },
+     "ref": "c99",
+     "label": "Alerts",
+     "role": "AXCheckBox",
+     "value": "0",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "6E538734-CF8A-4F45-A266-50E6D4E7391C",
+     "bounds": {
+      "x": 0.9708994708994709,
+      "y": 0.19607843137254902,
+      "width": 0.0291005291005291,
+      "height": 0.05074971164936563
+     },
+     "ref": "c100",
+     "label": "Object tree and data window",
+     "role": "AXCheckBox",
+     "value": "0",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "BCCD7B3E-A249-496E-889F-965161622D5B",
+     "bounds": {
+      "x": 0.9708994708994709,
+      "y": 0.566320645905421,
+      "width": 0.0291005291005291,
+      "height": 0.05074971164936563
+     },
+     "ref": "c101",
+     "label": "Screeners",
+     "role": "AXCheckBox",
+     "value": "0",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "76AB3040-AA7F-4673-A293-93F58BB7993E",
+     "bounds": {
+      "x": 0.9708994708994709,
+      "y": 0.6193771626297578,
+      "width": 0.0291005291005291,
+      "height": 0.05074971164936563
+     },
+     "ref": "c102",
+     "label": "Pine Editor",
+     "role": "AXCheckBox",
+     "value": "0",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "FC50D2C4-E8BE-461D-9506-6DE1B8B9E4F7",
+     "bounds": {
+      "x": 0.9708994708994709,
+      "y": 0.6724336793540946,
+      "width": 0.0291005291005291,
+      "height": 0.05074971164936563
+     },
+     "ref": "c103",
+     "label": "Calendars",
+     "role": "AXCheckBox",
+     "value": "0",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "D803D208-57C2-48EA-9969-0B06CF5C74F9",
+     "bounds": {
+      "x": 0.9708994708994709,
+      "y": 0.7254901960784313,
+      "width": 0.0291005291005291,
+      "height": 0.05074971164936563
+     },
+     "ref": "c104",
+     "label": "Community",
+     "role": "AXCheckBox",
+     "value": "0",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "F58A3011-6D71-4E75-A10E-FDE77F672966",
+     "bounds": {
+      "x": 0.9708994708994709,
+      "y": 0.7785467128027682,
+      "width": 0.0291005291005291,
+      "height": 0.05074971164936563
+     },
+     "ref": "c105",
+     "label": "Notifications",
+     "role": "AXCheckBox",
+     "value": "0",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "BDABCEDC-B1C4-4A71-BDED-B584CAE0CE6A",
+     "bounds": {
+      "x": 0.9708994708994709,
+      "y": 0.831603229527105,
+      "width": 0.0291005291005291,
+      "height": 0.05074971164936563
+     },
+     "ref": "c106",
+     "label": "Chats",
+     "role": "AXCheckBox",
+     "value": "0",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "79B00744-B26B-4095-ADBC-54DE6F562FCA",
+     "bounds": {
+      "x": 0.9708994708994709,
+      "y": 0.8846597462514417,
+      "width": 0.0291005291005291,
+      "height": 0.05074971164936563
+     },
+     "ref": "c107",
+     "label": "Products",
+     "role": "AXPopUpButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "6765B472-4B11-4483-B121-9C2A97ABA140",
+     "bounds": {
+      "x": 0.9708994708994709,
+      "y": 0.9504036908881199,
+      "width": 0.0291005291005291,
+      "height": 0.049596309111880045
+     },
+     "ref": "c108",
+     "label": "Help Center",
+     "role": "AXCheckBox",
+     "value": "0",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "0F765668-382C-4462-81C3-9C0F53AF422C",
+     "bounds": {
+      "x": 0.7420634920634921,
+      "y": 0.09573241061130335,
+      "width": 0.06878306878306878,
+      "height": 0.0392156862745098
+     },
+     "ref": "c109",
+     "label": "Red list",
+     "context": "Add symbol · Advanced view · Settings",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "C51B8A78-0674-45E4-B732-8B77F661D72D",
+     "bounds": {
+      "x": 0.7473544973544973,
+      "y": 0.839677047289504,
+      "width": 0.21164021164021163,
+      "height": 0.10380622837370242
+     },
+     "ref": "c110",
+     "label": "AXGroup",
+     "role": "AXGroup",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "791266FF-67C7-4952-805E-833895FDFA08",
+     "bounds": {
+      "x": 0,
+      "y": 0.5628604382929643,
+      "width": 0.03439153439153439,
+      "height": 0.04382929642445214
+     },
+     "ref": "c111",
+     "label": "Magnet mode snaps drawings placed near price bars to the closest OHLC value",
+     "context": "Magnets",
+     "role": "AXCheckBox",
+     "value": "1",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "158ABC6D-C6FE-424D-B3A0-09462819BB91",
+     "bounds": {
+      "x": 0.027116402116402115,
+      "y": 0.5651672433679354,
+      "width": 0.007275132275132275,
+      "height": 0.0392156862745098
+     },
+     "ref": "c112",
+     "label": "Magnets",
+     "context": "Magnet mode snaps drawings placed near price bars to the closest OHLC value",
+     "role": "AXCheckBox",
+     "value": "1",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "9107467B-B457-40F8-9E7F-47838203CD47",
+     "bounds": {
+      "x": 0.03968253968253968,
+      "y": 0.0922722029988466,
+      "width": 0.17526455026455026,
+      "height": 0.02768166089965398
+     },
+     "ref": "c113",
+     "label": "AXGroup",
+     "role": "AXGroup",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "962E9C89-AE77-4481-8108-8D87A1C4CAF6",
+     "bounds": {
+      "x": 0.2328042328042328,
+      "y": 0.0922722029988466,
+      "width": 0.032407407407407406,
+      "height": 0.02768166089965398
+     },
+     "ref": "c114",
+     "label": "AXGroup",
+     "role": "AXGroup",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "9E80BFF3-3C4E-400C-926F-D2A385AF5CEA",
+     "bounds": {
+      "x": 0.04298941798941799,
+      "y": 0.1245674740484429,
+      "width": 0.056878306878306875,
+      "height": 0.0392156862745098
+     },
+     "ref": "c115",
+     "label": "AXGroup",
+     "context": "76,828.36 · SELL · 0.01 · 76,828.37 · BUY",
+     "role": "AXGroup",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "88F4BF69-0D43-41D6-835B-C7691C7ECA78",
+     "bounds": {
+      "x": 0.125,
+      "y": 0.1245674740484429,
+      "width": 0.056216931216931214,
+      "height": 0.0392156862745098
+     },
+     "ref": "c116",
+     "label": "AXGroup",
+     "context": "76,828.36 · SELL · 0.01 · 76,828.37 · BUY",
+     "role": "AXGroup",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "AC73F7B7-E6DE-452A-8119-6BC481A0C334",
+     "bounds": {
+      "x": 0.04298941798941799,
+      "y": 0.19953863898500576,
+      "width": 0.01917989417989418,
+      "height": 0.02422145328719723
+     },
+     "ref": "c117",
+     "label": "Hide indicator legend",
+     "context": "Hide · Settings · Source code · Remove · More",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "1D5C91D4-A73A-4DE4-9B8A-1BE8F7CB1B91",
+     "bounds": {
+      "x": 0.9708994708994709,
+      "y": 0.5155709342560554,
+      "width": 0.0291005291005291,
+      "height": 0.05074971164936563
+     },
+     "ref": "c118",
+     "label": "AI Copilot",
+     "role": "AXCheckBox",
+     "value": "0",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "1099AE6F-3BB1-4BDC-B268-26D0DA8AE3B1",
+     "bounds": {
+      "x": 0.7473544973544973,
+      "y": 0.6055363321799307,
+      "width": 0.08068783068783068,
+      "height": 0.020761245674740483
+     },
+     "ref": "c119",
+     "label": "Bitcoin / TetherUS",
+     "context": "BINANCE",
+     "role": "AXLink",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "054CC26A-8E51-4243-9DE7-2CA304EE1F43",
+     "bounds": {
+      "x": 0.041005291005291,
+      "y": 0.09457900807381776,
+      "width": 0.10317460317460317,
+      "height": 0.02306805074971165
+     },
+     "ref": "c120",
+     "label": "Change symbol",
+     "context": "B · · · Binance · Change interval",
+     "role": "AXGroup",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "CB197069-A08C-46CA-8157-534B45C9F602",
+     "bounds": {
+      "x": 0.14351851851851852,
+      "y": 0.09457900807381776,
+      "width": 0.022486772486772486,
+      "height": 0.02306805074971165
+     },
+     "ref": "c121",
+     "label": "Change interval",
+     "context": "B · · · Binance · Change symbol",
+     "role": "AXGroup",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "03DFA15A-CF2B-468C-AA10-5A6D5B22E7BF",
+     "bounds": {
+      "x": 0.21428571428571427,
+      "y": 0.0922722029988466,
+      "width": 0.01917989417989418,
+      "height": 0.02768166089965398
+     },
+     "ref": "c122",
+     "label": "Unflag symbol",
+     "context": "More",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "985508F1-9785-4149-86D3-416D62F1DE52",
+     "bounds": {
+      "x": 0.2328042328042328,
+      "y": 0.0922722029988466,
+      "width": 0.01917989417989418,
+      "height": 0.02768166089965398
+     },
+     "ref": "c123",
+     "label": "More",
+     "context": "Unflag symbol",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "1DBB716C-960A-4E9A-9BF5-CA68B74203E7",
+     "bounds": {
+      "x": 0.03968253968253968,
+      "y": 0.16839677047289503,
+      "width": 0.20238095238095238,
+      "height": 0.02768166089965398
+     },
+     "ref": "c124",
+     "label": "AXGroup",
+     "role": "AXGroup",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "BDE3C85B-182E-4FA4-A5DF-3F2D7FDF5F73",
+     "bounds": {
+      "x": 0.057539682539682536,
+      "y": 0.09573241061130335,
+      "width": 0.08664021164021164,
+      "height": 0.02191464821222607
+     },
+     "ref": "c125",
+     "label": "Change symbol",
+     "context": "B",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "38E5EBC2-EC79-4FDA-A6E4-A953DE8803CC",
+     "bounds": {
+      "x": 0.15145502645502645,
+      "y": 0.09573241061130335,
+      "width": 0.01455026455026455,
+      "height": 0.02191464821222607
+     },
+     "ref": "c126",
+     "label": "Change interval",
+     "context": "·",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "595DDAE5-4670-4A1A-BFFD-287DDD984C27",
+     "bounds": {
+      "x": 0.21428571428571427,
+      "y": 0.0922722029988466,
+      "width": 0.01917989417989418,
+      "height": 0.02768166089965398
+     },
+     "ref": "c127",
+     "label": "AXGroup",
+     "context": "Unflag symbol · More",
+     "role": "AXGroup",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "71D9BA4F-120F-43C9-BBDE-EAFA43C8DE60",
+     "bounds": {
+      "x": 0.23544973544973544,
+      "y": 0.09573241061130335,
+      "width": 0.027116402116402115,
+      "height": 0.020761245674740483
+     },
+     "ref": "c128",
+     "label": "Market open · Data updates once per second",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "C92334FE-69EB-4B2A-A78F-F6416EBCC99D",
+     "bounds": {
+      "x": 0.24206349206349206,
+      "y": 0.16839677047289503,
+      "width": 0.018518518518518517,
+      "height": 0.02768166089965398
+     },
+     "ref": "c129",
+     "label": "Hide",
+     "context": "Settings · Source code · Remove · More",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "62263B6C-D21D-4320-AD4E-356FD63D5992",
+     "bounds": {
+      "x": 0.2605820105820106,
+      "y": 0.16839677047289503,
+      "width": 0.018518518518518517,
+      "height": 0.02768166089965398
+     },
+     "ref": "c130",
+     "label": "Settings",
+     "context": "Hide · Source code · Remove · More",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "C8CA02F4-D7D0-4AB6-B73F-011C372241EF",
+     "bounds": {
+      "x": 0.2791005291005291,
+      "y": 0.16839677047289503,
+      "width": 0.018518518518518517,
+      "height": 0.02768166089965398
+     },
+     "ref": "c131",
+     "label": "Source code",
+     "context": "Hide · Settings · Remove · More",
+     "role": "AXGroup",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "AB37107E-F6BE-47FB-83C0-D866E5654940",
+     "bounds": {
+      "x": 0.2976190476190476,
+      "y": 0.16839677047289503,
+      "width": 0.018518518518518517,
+      "height": 0.02768166089965398
+     },
+     "ref": "c132",
+     "label": "Remove",
+     "context": "Hide · Settings · Source code · More",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "4FC42BD6-EDD7-41F4-B98B-3FCAA12B0D52",
+     "bounds": {
+      "x": 0.31613756613756616,
+      "y": 0.16839677047289503,
+      "width": 0.018518518518518517,
+      "height": 0.02768166089965398
+     },
+     "ref": "c133",
+     "label": "More",
+     "context": "Hide · Settings · Source code · Remove",
+     "role": "AXButton",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "6736F637-C33C-4FC0-8680-D986EFDE0C9D",
+     "bounds": {
+      "x": 0.7367724867724867,
+      "y": 0.18223760092272204,
+      "width": 0.2328042328042328,
+      "height": 0.03575547866205306
+     },
+     "ref": "c134",
+     "label": "AXGroup",
+     "context": "B · BTCUSDT · −629.41 · −0.81%",
+     "role": "AXGroup",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "3E5F729F-F2AD-4F9F-A321-60B87AEF7523",
+     "bounds": {
+      "x": 0.7367724867724867,
+      "y": 0.21683967704728951,
+      "width": 0.2328042328042328,
+      "height": 0.03575547866205306
+     },
+     "ref": "c135",
+     "label": "AXGroup",
+     "context": "E · ETHUSDT · 2,261. · 56 · −13.21 · −0.58%",
+     "role": "AXGroup",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "86A303D6-B967-4A49-8B69-28818D03708F",
+     "bounds": {
+      "x": 0.7367724867724867,
+      "y": 0.25144175317185696,
+      "width": 0.2328042328042328,
+      "height": 0.03575547866205306
+     },
+     "ref": "c136",
+     "label": "AXGroup",
+     "context": "S · SOLUSDT · −1.24 · −1.34%",
+     "role": "AXGroup",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "D5C1080D-78D9-41D4-BCF8-8F4C03C4E485",
+     "bounds": {
+      "x": 0.7367724867724867,
+      "y": 0.28604382929642447,
+      "width": 0.2328042328042328,
+      "height": 0.03575547866205306
+     },
+     "ref": "c137",
+     "label": "AXGroup",
+     "context": "X · XRPUSDT · 1.264 · 2 · −0.0125 · −0.98%",
+     "role": "AXGroup",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "22C6FE8A-A67F-43A7-B05A-1DFBC597AD36",
+     "bounds": {
+      "x": 0.7367724867724867,
+      "y": 0.3206459054209919,
+      "width": 0.2328042328042328,
+      "height": 0.03575547866205306
+     },
+     "ref": "c138",
+     "label": "AXGroup",
+     "context": "A · ADAUSDT · 0.186 · 4 · −0.0035 · −1.84%",
+     "role": "AXGroup",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "F7CCD9B5-2593-45F2-B97B-873014CA58E6",
+     "bounds": {
+      "x": 0.7367724867724867,
+      "y": 0.3552479815455594,
+      "width": 0.2328042328042328,
+      "height": 0.03575547866205306
+     },
+     "ref": "c139",
+     "label": "AXGroup",
+     "context": "D · DOGEUSDT · 0.0736 · 4 · −0.00157 · −2.09%",
+     "role": "AXGroup",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "2C08588C-80B2-4BC5-ADD4-2CB6DA887CCE",
+     "bounds": {
+      "x": 0.7367724867724867,
+      "y": 0.38985005767012687,
+      "width": 0.2328042328042328,
+      "height": 0.03575547866205306
+     },
+     "ref": "c140",
+     "label": "AXGroup",
+     "context": "B · BNBUSDT · 689.0 · 2 · −9.12 · −1.31%",
+     "role": "AXGroup",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "6BE2F4F7-7980-4A8E-8515-0AF8FEA30FA3",
+     "bounds": {
+      "x": 0.7367724867724867,
+      "y": 0.4244521337946944,
+      "width": 0.2328042328042328,
+      "height": 0.03575547866205306
+     },
+     "ref": "c141",
+     "label": "AXGroup",
+     "context": "T · TRXUSDT · 0.321 · 1 · −0.0006 · −0.19%",
+     "role": "AXGroup",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "A8A2462B-3926-4DA6-8E5B-743F6CC6DAF6",
+     "bounds": {
+      "x": 0.7367724867724867,
+      "y": 0.4590542099192618,
+      "width": 0.2328042328042328,
+      "height": 0.03575547866205306
+     },
+     "ref": "c142",
+     "label": "AXGroup",
+     "context": "B · BCHUSDT · 268. · 4 · −6.2 · −2.26%",
+     "role": "AXGroup",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "9127B169-1381-4791-8F57-A52A92464A29",
+     "bounds": {
+      "x": 0.7367724867724867,
+      "y": 0.4936562860438293,
+      "width": 0.2328042328042328,
+      "height": 0.03575547866205306
+     },
+     "ref": "c143",
+     "label": "AXGroup",
+     "context": "L · LTCUSDT · 53.0 · 8 · −1.22 · −2.25%",
+     "role": "AXGroup",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "31247EBD-BA91-4D22-A6EA-B7B5DB925C81",
+     "bounds": {
+      "x": 0.7367724867724867,
+      "y": 0.5282583621683967,
+      "width": 0.2328042328042328,
+      "height": 0.014994232987312572
+     },
+     "ref": "c144",
+     "label": "AXGroup",
+     "context": "G · GNOUSDT · 106.0 · 0 · −1.43 · −1.33%",
+     "role": "AXGroup",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "1C044B3D-B4EB-4022-96DA-24BFF93857A3",
+     "bounds": {
+      "x": 0.7367724867724867,
+      "y": 0.18339100346020762,
+      "width": 0.00992063492063492,
+      "height": 0.03344867358708189
+     },
+     "ref": "c145",
+     "label": "AXGroup",
+     "context": "B · BTCUSDT · −629.41 · −0.81%",
+     "role": "AXGroup",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "F7B68DF5-90F5-4CFE-9E27-451B21B34B44",
+     "bounds": {
+      "x": 0.7367724867724867,
+      "y": 0.2179930795847751,
+      "width": 0.00992063492063492,
+      "height": 0.03344867358708189
+     },
+     "ref": "c146",
+     "label": "AXGroup",
+     "context": "E · ETHUSDT · 2,261. · 56 · −13.21 · −0.58%",
+     "role": "AXGroup",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "A3CE203C-6766-4C25-A58C-E30706EA0AF3",
+     "bounds": {
+      "x": 0.7367724867724867,
+      "y": 0.25259515570934254,
+      "width": 0.00992063492063492,
+      "height": 0.03344867358708189
+     },
+     "ref": "c147",
+     "label": "AXGroup",
+     "context": "S · SOLUSDT · −1.24 · −1.34%",
+     "role": "AXGroup",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "EF8CE1C9-7220-433C-B350-5AB6213E09E2",
+     "bounds": {
+      "x": 0.7367724867724867,
+      "y": 0.28719723183391005,
+      "width": 0.00992063492063492,
+      "height": 0.03344867358708189
+     },
+     "ref": "c148",
+     "label": "AXGroup",
+     "context": "X · XRPUSDT · 1.264 · 2 · −0.0125 · −0.98%",
+     "role": "AXGroup",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    },
+    {
+     "identity": "4BE90A9B-E896-40AC-8BE6-ADCF78FBBCEE",
+     "bounds": {
+      "x": 0.7367724867724867,
+      "y": 0.3217993079584775,
+      "width": 0.00992063492063492,
+      "height": 0.03344867358708189
+     },
+     "ref": "c149",
+     "label": "AXGroup",
+     "context": "A · ADAUSDT · 0.186 · 4 · −0.0035 · −1.84%",
+     "role": "AXGroup",
+     "focused": false,
+     "actions": [
+      "press"
+     ]
+    }
+   ],
+   "truncated": true,
+   "text": [
+    "BTCUSDT",
+    "▼",
+    "76,824.45",
+    "−0.81%",
+    "/ ",
+    "Unnamed",
+    "11",
+    "B",
+    "1D",
+    "5D",
+    "1M",
+    "3M",
+    "6M",
+    "YTD",
+    "1Y",
+    "5Y",
+    "All",
+    "Alert",
+    "Replay",
+    "Save",
+    "76,8",
+    "24.45",
+    "USDT",
+    "−629.41",
+    "Market open",
+    "Volume",
+    "‪4.38 K‬",
+    "Avg. volume (30D)",
+    "‪13.61 K‬",
+    "Key stats"
+   ],
+   "apps": [
+    {
+     "id": "com.apple.ActivityMonitor",
+     "name": "Activity Monitor"
+    },
+    {
+     "id": "com.apple.apps.launcher",
+     "name": "Apps"
+    },
+    {
+     "id": "com.apple.calculator",
+     "name": "Calculator"
+    },
+    {
+     "id": "com.google.Chrome",
+     "name": "Google Chrome"
+    },
+    {
+     "id": "com.apple.Maps",
+     "name": "Maps"
+    },
+    {
+     "id": "com.apple.Notes",
+     "name": "Notes"
+    },
+    {
+     "id": "com.apple.Safari",
+     "name": "Safari"
+    },
+    {
+     "id": "com.spotify.client",
+     "name": "Spotify"
+    },
+    {
+     "id": "com.tradingview.tradingviewapp.desktop",
+     "name": "TradingView"
+    }
+   ],
+   "screenshotAvailable": false
+  }
+ },
+ "rev4": {
+  "toolErrors": [
+   {
+    "tool": "computer_acquire",
+    "code": "DEVICE_OFFLINE",
+    "at": 1793766671390
+   }
+  ],
+  "trace": [
+   {
+    "status": "blocked",
+    "reason": "DEVICE_OFFLINE",
+    "phase": "terminal",
+    "sequence": 1,
+    "round": 0,
+    "at": 1793766671411,
+    "revision": 4,
+    "steps": 0,
+    "evaluations": 0
+   }
+  ],
+  "relay": "develop nginx: the app socket GET /computer 101 closed at 04:31:11Z; /v1/device/status polling paused 04:31:10Z-04:31:15Z (the app reconnects 3 s after a close). computer_acquire was waiting from 04:31:08.7Z."
+ }
+}

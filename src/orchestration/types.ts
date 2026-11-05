@@ -40,7 +40,13 @@ export interface InventoryRejection { kind: 'missing' | 'malformed' | 'unexpecte
 export interface TaskFailure { code: string; message: string; observedAt: number; provider?: import('./provider-admission').ProviderFailure; inventory?: InventoryRejection; providerRefusals?: import('../session/provider-refusal').ProviderRefusal[]; }
 export interface ComputerTaskReport {status:string;reason:string;steps:number;evaluations?:number;phase?:string;trace?:import('../automation/computer-use').ComputerProgress[];fieldRequest?:{label:string;application?:string;windowTitle?:string;role?:string;reason:'missing'};stepRun?:import('../automation/computer-steps').ComputerStepRun;lastAction?:import('../automation/computer-use').ComputerLastAction;
  /** The relay confirmed the device session ended with this round (a reached goal). */
- accessReleased?:boolean}
+ accessReleased?:boolean;
+ /** The round's last observation was withheld: a protected app (such as GetPod) was frontmost. */
+ screenWithheld?:boolean;
+ /** The last approved application the task worked in: the next round opens it again if a protected app is in front. */
+ targetApp?:{id:string;name:string};
+ /** How long the round ran, for "Paused after N minutes of work". */
+ durationMs?:number}
 export type WorkerOutcome = ({type: 'completed'; result: TaskResult} | {type: 'paused' | 'stopped' | 'failed' | 'unknown'; failure?: TaskFailure; providerRefusals?: import('../session/provider-refusal').ProviderRefusal[]}) & {computerReport?:ComputerTaskReport;browserReport?: import('../jev/browser-contract').BrowserTaskReport};
 export interface TaskResult {
   summary: string;
@@ -77,6 +83,11 @@ export interface TaskSnapshot {
   gatewayDispatch?: { requestId: string; submittedAt: number };
   /** End session on a settled computer round: device access still to revoke. The round's outcome stays as reported. */
   computerRevocation?: { requestId: string; requestedAt: number };
+  /** The idle settled round whose device session the gateway ended; the task stays open (GatewayTaskController). */
+  computerAccessReleased?: { requestId: string; releasedAt: number };
+  /** The spawning agent declared (task_spawn run_as_goal) that this revision needs judgment, such as
+   * a choice or answer from the screen: it runs as one goal on the agent's text, never as user steps. */
+  runAsGoal?: { revision: number };
 
   continueTaskId?: string;
   continuationPolicy?: 'after_success' | 'after_terminal';

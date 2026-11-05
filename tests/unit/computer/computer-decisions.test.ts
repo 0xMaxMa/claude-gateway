@@ -1,3 +1,4 @@
+import { validateComputerUseConfig } from '../../../src/automation/model-choice-evaluator';
 jest.mock('../../../src/config/claude-settings', () => ({ claudeSettingsEnv: jest.fn() }));
 import { claudeSettingsEnv } from '../../../src/config/claude-settings';
 import { configureLogging, resetLoggingForTests } from '../../../src/logger';
@@ -228,6 +229,22 @@ describe('computerVision', () => {
     expect(vision(undefined)).toBeUndefined();
     expect(vision(false, { mode: 'vision' })).toBeUndefined();
   });
+  // AX stays the primary path; a goal round with no Accessibility control continues on vision (gateway-tasks/computer.ts).
+  test('visionFallback: a vision decider only for the fallback, only in ax mode, revoked when switched off', async () => {
+    const config = gatewayConfig(undefined, undefined, true, { mode: 'ax', visionFallback: true }) as any;
+    const factory = computerVision(config, agentConfig(), () => true, jest.fn() as any);
+    expect(factory()).toBeUndefined();
+    const fallback = factory('fallback')!;
+    expect(fallback.mode).toBe('vision');
+    expect(computerVision(gatewayConfig(undefined, undefined, true, { mode: 'ax' }), agentConfig(), () => true)('fallback')).toBeUndefined();
+    // A primary vision mode needs no fallback.
+    expect(computerVision(gatewayConfig(undefined, undefined, true, { mode: 'hybrid', visionFallback: true }), agentConfig(), () => true)('fallback')).toBeUndefined();
+    // Switching it off revokes a decision in flight.
+    config.gateway.computerUse.visionFallback = false;
+    await expect(fallback.decide(task, () => true)([], new AbortController().signal, view)).rejects.toThrow();
+    expect(() => validateComputerUseConfig({ mode: 'ax', visionFallback: 'yes' })).toThrow('visionFallback must be a boolean');
+    expect(() => validateComputerUseConfig({ mode: 'ax', visionFallback: true })).not.toThrow();
+  });
   test('a model without the computer toolset falls back to ax with one warning', () => {
     const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
     const factory = computerVision(gatewayConfig(undefined, undefined, true, { mode: 'vision', visionModel: 'claude-haiku-4-5-20251001' }), agentConfig(), () => true);
@@ -273,5 +290,31 @@ describe('computerVision', () => {
     (config.gateway.computerUse as any).mode = 'ax';
     await expect(v.decide(task, () => true)([], new AbortController().signal, view)).rejects.toMatchObject({ code: 'ACCESS_DENIED' });
     expect(fetch).not.toHaveBeenCalled();
+  });
+  test('switching from model to Jev while vision fetch is in flight revokes its result', async () => {
+    jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const config = gatewayConfig(false, undefined, true, { mode: 'vision' });
+    const fetch = jest.fn(async () => {
+      (config.gateway as any).jev = { enabled: true, features: { computerTasks: { enabled: true } } };
+      return new Response(JSON.stringify({ content: [], stop_reason: 'end_turn' }), { headers: { 'content-type': 'application/json' } });
+    });
+    const v = computerVision(config, agentConfig(), () => true, fetch as any)()!;
+    await expect(v.decide(task, () => true)([], new AbortController().signal, view)).rejects.toMatchObject({ code: 'ACCESS_DENIED' });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+  test('enabling Jev images while a model vision fetch is in flight revokes its result', async () => {
+    jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const config = gatewayConfig(true, undefined, true, { mode: 'vision' }) as any;
+    config.gateway.jev.images = { enabled: false };
+    let enableImages = false;
+    const fetch = jest.fn(async () => {
+      if (enableImages) config.gateway.jev.images.enabled = true;
+      return new Response(JSON.stringify({ content: [], stop_reason: 'end_turn' }), { headers: { 'content-type': 'application/json' } });
+    });
+    const v = computerVision(config, agentConfig(), () => true, fetch as any)()!;
+    await expect(v.decide(task, () => true)([], new AbortController().signal, view)).resolves.toMatchObject({ stopReason: 'end_turn' });
+    enableImages = true;
+    await expect(v.decide(task, () => true)([], new AbortController().signal, view)).rejects.toMatchObject({ code: 'ACCESS_DENIED' });
+    expect(fetch).toHaveBeenCalledTimes(2);
   });
 });

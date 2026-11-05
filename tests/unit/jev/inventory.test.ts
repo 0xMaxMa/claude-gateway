@@ -3,11 +3,11 @@ import { resolve } from 'path';
 import { EventEmitter } from 'events';
 import { startProcessTurn } from '../../../src/orchestration/process-turn';
 import { containerTaskTools } from '../../../src/orchestration/container-tool-schemas';
-function listTools(role: 'agent' | 'worker', enabled: boolean): Promise<string[]> {
+function listTools(role: 'agent' | 'worker', enabled: boolean, computer = false): Promise<string[]> {
   return new Promise((resolveResult, reject) => {
     const child = spawn('bun', [resolve('mcp/server.ts')], { env: {
       PATH: process.env.PATH, HOME: process.env.HOME, GATEWAY_ORCHESTRATION_ROLE: role,
-      GATEWAY_ORCHESTRATION_TICKET_FILE: '/inventory-only-no-execution', GATEWAY_JEV_ENABLED: enabled ? 'true' : '',
+      GATEWAY_ORCHESTRATION_TICKET_FILE: '/inventory-only-no-execution', GATEWAY_JEV_ENABLED: enabled ? 'true' : '', GATEWAY_COMPUTER_ENABLED: computer ? 'true' : '',
       IMAGE_DISABLED: 'true', VIDEO_DISABLED: 'true',
     }, stdio: ['pipe','pipe','pipe'] });
     const timer = setTimeout(() => { child.kill(); reject(Error('MCP inventory timed out')); }, 10000);
@@ -30,6 +30,11 @@ function listTools(role: 'agent' | 'worker', enabled: boolean): Promise<string[]
 test.each(['agent','worker'] as const)('real host MCP %s inventory gates Jev for both native harnesses', async role => {
   expect(await listTools(role,false)).not.toContain('jev_evaluate');
   expect(await listTools(role,true)).toContain('jev_evaluate');
+});
+test('real host MCP declares device_shell only to an agent with Computer Use enabled', async () => {
+  expect(await listTools('agent',false)).not.toContain('device_shell');
+  expect(await listTools('agent',false,true)).toContain('device_shell');
+  expect(await listTools('worker',false,true)).not.toContain('device_shell');
 });
 test.each([false,true])('container init inventory validates captured Jev enablement=%s', async enabled => {
   class Process extends EventEmitter {

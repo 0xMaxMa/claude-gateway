@@ -96,7 +96,7 @@ export function describeVoiceError(error: unknown) {
     else if (/LANGUAGE_UNSUPPORTED|UNSUPPORTED_LANGUAGE/.test(code)) category = 'language';
     else if (/INVALID_VOICE_MODEL|UNKNOWN_TTS_PROVIDER|UNKNOWN_STT_PROVIDER|TTS_FILE_UNSUPPORTED/.test(code)) category = 'model';
     else if (httpStatus && httpStatus >= 400) category = 'invalid_request';
-    else if (/STT_CONNECTION_CLOSED|PROVIDER_CONNECTION|PROVIDER_SEND|fetch failed|ECONN|ENOTFOUND/.test(code)) category = 'network';
+    else if (/STT_CONNECTION_CLOSED|PROVIDER_CONNECTION|PROVIDER_DNS|PROVIDER_TLS|PROVIDER_SEND|fetch failed|ECONN|ENOTFOUND/.test(code)) category = 'network';
     else if (/PROVIDER_ABORTED|AbortError/.test(code)) category = 'cancelled';
     else if (/INVALID_SPEECH_AUDIO|INCOMPLETE|INVALID_RESPONSE|INVALID_PROVIDER_MESSAGE|DECODE|UNSUPPORTED_AUDIO_FORMAT|No audio/.test(code)) category = 'invalid_response';
   }

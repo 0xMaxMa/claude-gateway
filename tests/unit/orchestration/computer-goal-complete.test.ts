@@ -75,6 +75,8 @@ test('a failed agent goal run reaches the agent although the user controls the s
   const failed=f.finish({type:'failed',failure:{code:'COMPUTER_UNSUPPORTED_ACTION',message:'Computer work stopped: UNSUPPORTED_ACTION.',observedAt:Date.now()},computerReport:{...report,steps:1,status:'blocked',reason:'UNSUPPORTED_ACTION'}});
   expect(failed.state).toBe('failed');expect(failed.automationController).toBe('user');
   expect(f.notified()).toBe(1);expect(f.delivered()).toBe(1);
+  // The card ends on the round's own stop, not the running progress it stopped at.
+  expect(failed.latestProgress?.text).toBe('Stopped after 1 action. The computer does not support that kind of action.');
  }finally{f.close();}
 });
 
@@ -182,9 +184,98 @@ test('a browser step run that waits on a missing field value stays silent',()=>{
 
 test('the user\'s own step command that finishes all steps stays silent',()=>{
  const f=fixture();try{
+  // The agent's goal run parks first: the agent hears that (one notification).
   f.finish({type:'paused',computerReport:{...report,steps:0,status:'needs_input',reason:'COMMAND_WAITING_INPUT'}});
+  expect(f.notified()).toBe(1);
   f.tasks.controlByUser(f.task.conversationId,'u',f.task.taskId,{id:'00000000-0000-4000-8000-000000000002',action:'revise',expectedRevision:1,text:'click search'});
   f.finish({type:'paused',computerReport:stepRun('ALL_STEPS_DONE')});
+  expect(f.notified()).toBe(1);expect(f.delivered()).toBe(0);
+ }finally{f.close();}
+});
+
+// Pod-jinawong 2.0.21, task fa17f432: the agent's goal loop (no step run) opened
+// Terminal, then parked in waiting_input (COMMAND_WAITING_INPUT) without typing.
+// PR #592 notified only step runs (report.stepRun), so the agent never heard and
+// the chat hung until the user asked again.
+const goalLoop=(reason:string,extra:object={})=>({...report,steps:1,status:'needs_input' as const,reason,lastAction:{kind:'open',appId:'com.apple.Terminal'},...extra});
+test.each(['COMMAND_WAITING_INPUT','COMPLETION_CANDIDATE','VERIFICATION_FAILED'])('an agent goal loop that parks with %s and no step run reaches the agent',reason=>{
+ const f=fixture();try{
+  const waiting=f.finish({type:'paused',computerReport:goalLoop(reason,{trace:[{phase:'waiting',reason:'LOW_CONFIDENCE',sequence:1,round:2,at:1,revision:1,steps:1,evaluations:2}]})});
+  expect(waiting.state).toBe('waiting_input');expect(waiting.automationController).toBe('user');
+  expect(f.notified()).toBe(1);expect(f.delivered()).toBe(1);
+  expect(acceptsDirectCommand(f.store.task(f.task.taskId)!)).toBe(true);
+ }finally{f.close();}
+});
+
+test('an agent browser goal loop that parks with no step run reaches the agent',()=>{
+ const f=fixture('browser');try{
+  f.finish({type:'paused',browserReport:{status:'needs_verification',reason:'COMMAND_WAITING_INPUT',steps:2,evaluations:2}});
+  expect(f.notified()).toBe(1);expect(f.delivered()).toBe(1);
+ }finally{f.close();}
+});
+
+test.each([
+ ['a high-impact action awaiting yes or no',{lastAction:{kind:'press',label:'Delete',blocked:true,confirm:true}}],
+ ['a confirmation recorded only in the trace',{trace:[{phase:'waiting',reason:'CONFIRMATION_REQUIRED',sequence:1,round:2,at:1,revision:1,steps:1,evaluations:2}]}],
+ ['a missing field value',{fieldRequest:{label:'shell',application:'com.apple.Terminal',role:'AXTextArea',reason:'missing' as const}}],
+])('an agent goal loop that waits on a question for the owner (%s) stays silent',(_name,question)=>{
+ const f=fixture();try{
+  f.finish({type:'paused',computerReport:goalLoop('COMMAND_WAITING_INPUT',question)});
   expect(f.notified()).toBe(0);expect(f.delivered()).toBe(0);
+ }finally{f.close();}
+});
+
+test('an agent browser goal loop that waits on a confirmation stays silent',()=>{
+ const f=fixture('browser');try{
+  f.finish({type:'paused',browserReport:{status:'needs_verification',reason:'COMMAND_WAITING_INPUT',steps:1,evaluations:1,commandOutcome:{done:false,reason:'CONFIRMATION_REQUIRED'}}});
+  expect(f.notified()).toBe(0);expect(f.delivered()).toBe(0);
+ }finally{f.close();}
+});
+
+test('a user pause of the agent goal loop stays silent',()=>{
+ const f=fixture();try{
+  const attempt=f.tasks.claim(f.task.taskId)!;f.tasks.started(attempt.attemptId,attempt.generation);
+  const current=f.store.task(f.task.taskId)!;current.gatewayDispatch={requestId:'task-'+attempt.attemptId,submittedAt:Date.now()};
+  current.executionControl={id:'00000000-0000-4000-8000-000000000003',action:'pause',revision:2,phase:'paused',requestedAt:Date.now()} as any;
+  f.store.transaction(()=>f.store.saveTask(current,current.stateVersion));
+  f.tasks.finish(attempt.attemptId,attempt.generation,{type:'paused',computerReport:goalLoop('COMMAND_WAITING_INPUT')});
+  expect(f.notified()).toBe(0);expect(f.delivered()).toBe(0);
+ }finally{f.close();}
+});
+
+test('the user\'s own revision-2 goal command that parks stays silent',()=>{
+ const f=fixture();try{
+  f.finish({type:'failed',failure:{code:'COMPUTER_UNSUPPORTED_ACTION',message:'stopped',observedAt:Date.now()},computerReport:{...report,steps:1,status:'blocked',reason:'UNSUPPORTED_ACTION'}});
+  const before=f.notified();
+  f.tasks.controlByUser(f.task.conversationId,'u',f.task.taskId,{id:'00000000-0000-4000-8000-000000000004',action:'revise',expectedRevision:1,text:'run which htop'});
+  expect(f.store.task(f.task.taskId)!.revision).toBe(2);
+  f.finish({type:'paused',computerReport:goalLoop('COMMAND_WAITING_INPUT')});
+  expect(f.notified()).toBe(before);expect(f.delivered()).toBe(0);
+ }finally{f.close();}
+});
+
+// r11 G4: a goal round that paused on its own (no progress, out of round time) waits for the user, who decides whether
+// it goes on (there is no action limit). The card says why in plain words; the agent is not woken to send another round.
+test.each([['NO_PROGRESS',"Paused: the last 3 actions didn't change the screen. Reply to continue."],['ROUND_TIME_LIMIT','Paused after 7 minutes of work. Reply to continue.']])('a goal round paused for %s waits for the user with plain card copy',(reason,line)=>{
+ const f=fixture();try{
+  const paused=f.finish({type:'paused',computerReport:{...report,steps:6,status:'needs_input',reason,durationMs:7*60_000+5_000}});
+  expect(paused.state).toBe('waiting_input');expect(paused.latestProgress?.text).toBe(line);
+  expect(paused.latestProgress?.text).not.toMatch(/[A-Z_]{10,}/);
+  expect(f.delivered()).toBe(0);
+  expect(acceptsDirectCommand(paused)).toBe(true);
+ }finally{f.close();}
+});
+
+// r11 F4: an automatic report that ends with a question for the user (follow_up asks_user) says so on response.completed,
+// so a client knows a real answer is awaited (the activity view reads it as a question).
+test('the report\'s follow_up goes with response.completed',()=>{
+ const f=fixture();try{
+  const input=f.store.acceptInput({scope:{agentId:'a',agentSessionId:'s',source:'api',accountId:'u',chatId:'c',threadKey:'',principalId:'u'},text:'next',capabilities:{execute:true,writeMemory:false}});
+  const decision=f.decisions.begin(input.conversationId,'u',[input.inputId]);
+  f.decisions.finish(decision,'Shall I keep going?','completed',undefined,true,'asks_user');
+  const events=f.store.all("SELECT payload_json FROM conversation_events WHERE conversation_id=? AND type='response.completed' ORDER BY seq",input.conversationId).map(r=>JSON.parse(String(r.payload_json)).payload);
+  expect(events.at(-1)).toMatchObject({responseId:decision.responseId,followUp:'asks_user'});
+  // A turn without one adds nothing.
+  expect(events[0].followUp).toBeUndefined();
  }finally{f.close();}
 });

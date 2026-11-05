@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import {parseComputerSteps,runComputerSteps} from '../../../src/automation/computer-steps';
+import {parseComputerSteps,runComputerSteps,stepParts} from '../../../src/automation/computer-steps';
+import {withoutComputerUseDirective} from '../../../src/automation/command-steps';
 import {standardNavigationCommand} from '../../../src/automation/computer-command';
 import {validateJevRequest} from '../../../src/jev/validation';
 import type {ComputerUseDependencies} from '../../../src/automation/computer-use';
@@ -314,5 +315,62 @@ describe('step lists and READ_REQUEST',()=>{
   expect(d.questions.length).toBeGreaterThan(0);
   for(const q of d.questions)expect(Object.keys(q.questions.action.criteria)).not.toContain('READ_REQUEST');
   expect(r.stepRun).toMatchObject({total:2,completed:2});
+ });
+});
+
+// getpod-app #25/#27: a message sent with the composer's Computer Use tag opens with a paragraph
+// of agent instructions. Its commas and "start a Computer Use task" were split into fake steps.
+describe('the GetPod Desktop Computer Use directive is not part of the user steps',()=>{
+ const directive=(device:'Mac'|'PC',name:string)=>`[Computer Use] Do this on my ${device} "${name}" (the computer connected through GetPod Desktop), not on the pod VM. `
+  +'Find it with capabilities_list scope=computer. '
+  +(device==='PC'?'device_shell is not available on Windows yet; do not run commands on the pod instead. ':'For a command whose output I want, use device_shell on that Mac when it is available. ')
+  +`For anything I ask to see or do in an app ${device==='PC'?'(for example "open Notepad and type hello")':'(for example "run htop in Terminal")'}, `
+  +`start a Computer Use task on that ${device}: task_spawn target_profile=gateway-managed, gateway_target adapter=computer. `
+  +"Do not use the pod's own shell, terminal or browser for this.";
+ test.each([['PC','Jisack-PC'],['Mac',"Jane's MacBook"]] as const)('%s: one command after the directive is one goal, not a step list',(device,name)=>{
+  const text=`${directive(device,name)}\n\nฝากคุณเปิด chrome ให้หน่อย`;
+  expect(withoutComputerUseDirective(text)).toBe('ฝากคุณเปิด chrome ให้หน่อย');
+  // A single command stays on the normal goal path: no fake steps from the directive.
+  expect(parseComputerSteps(text)).toBeUndefined();
+  expect(parseComputerSteps('ฝากคุณเปิด chrome ให้หน่อย')).toBeUndefined();
+ });
+ // The Mac directive's "when it is available" also made every step list conditional, so none ran as steps.
+ test.each(['PC','Mac'] as const)('%s: a step list after the directive yields exactly its own steps',device=>{
+  expect(parseComputerSteps(`${directive(device,device)}\n\n1. Open Chrome\n2. Open youtube.com`)).toEqual(['Open Chrome','Open youtube.com']);
+ });
+ test('the directive alone, or text that only mentions it later, is handled structurally',()=>{
+  expect(withoutComputerUseDirective(directive('Mac','Mac'))).toBe('');
+  expect(parseComputerSteps(directive('Mac','Mac'))).toBeUndefined();
+  const quoted='Open Notes, then type [Computer Use] Do this on my Mac';
+  expect(withoutComputerUseDirective(quoted)).toBe(quoted);
+ });
+});
+
+// Pod-jinawong, task 59e5ce4f: "เปิด Chrome เปิด Steam แล้วเลือกมาซักเกมให้ผม" parsed into
+// ["เปิด Chrome เปิด Steam", "เลือกมาซักเกมให้ผม"], and step 1 was marked done after Chrome alone.
+describe('a step that repeats its own first word runs each command, and is done only after all of them',()=>{
+ const SENTENCE='เปิด Chrome เปิด Steam แล้วเลือกมาซักเกมให้ผม';
+ test('the exact failing sentence: step 1 has two commands',()=>{
+  const steps=parseComputerSteps(SENTENCE)!;
+  expect(steps).toEqual(['เปิด Chrome เปิด Steam','เลือกมาซักเกมให้ผม']);
+  expect(stepParts(steps[0])).toEqual(['เปิด Chrome','เปิด Steam']);
+ });
+ test.each([
+  ['เปิด Chrome เปิด Steam',['เปิด Chrome','เปิด Steam']],
+  ['open Chrome open Steam',['open Chrome','open Steam']],
+  ['Open Chrome open Steam then open Discord',['Open Chrome','open Steam','open Discord']],
+  ['เปิด Chrome เปิด Steam เปิด Discord',['เปิด Chrome','เปิด Steam','เปิด Discord']],
+ ])('%s',(step,parts)=>expect(stepParts(step)).toEqual(parts));
+ test.each([
+  ['a single command','เปิด Chrome'],
+  ['no repeated first word','open the Steam store page'],
+  ['repetition inside quotes','พิมพ์ "พิมพ์ hello" ตอนนี้'],
+  ['a repeat that would leave a one-word part','click Save click'],
+ ])('kept whole: %s',(_name,step)=>expect(stepParts(step)).toEqual([step]));
+ test('Chrome alone does not complete "เปิด Chrome เปิด Steam"',async()=>{
+  const f=desktop((command,req)=>command==='เปิด Chrome'?answer(req,'press:newtab'):answer(req,'BLOCKED'));
+  const r=await run(['เปิด Chrome เปิด Steam','เลือกมาซักเกมให้ผม'],f.deps);
+  expect(r.stepRun).toMatchObject({completed:0,stoppedAt:1,stopReason:'STEP_NOT_EXECUTED',doneParts:['เปิด Chrome'],remaining:['เปิด Chrome เปิด Steam','เลือกมาซักเกมให้ผม']});
+  expect(f.actions()).toHaveLength(1);
  });
 });

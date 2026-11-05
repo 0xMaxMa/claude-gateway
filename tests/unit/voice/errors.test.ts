@@ -38,6 +38,31 @@ test('WebSocket handshake billing failures keep their HTTP status', async () => 
   } finally { await new Promise<void>(resolve=>server.close(()=>resolve())); }
 });
 
+test('WebSocket connection refusal has a safe handshake code', async () => {
+  const { createServer } = await import('http');
+  const { openProviderSocket } = await import('../../../src/voice/providers/socket');
+  const server = createServer();
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const port = (server.address() as { port: number }).port;
+  await new Promise<void>(resolve => server.close(() => resolve()));
+  await expect(openProviderSocket(`ws://127.0.0.1:${port}/private`, { Authorization: 'secret' }, AbortSignal.timeout(5000)))
+    .rejects.toMatchObject({ code: 'PROVIDER_CONNECTION_REFUSED' });
+});
+
+test('a stalled WebSocket handshake reports a timeout without raw connection details', async () => {
+  const { createServer } = await import('http');
+  const { openProviderSocket } = await import('../../../src/voice/providers/socket');
+  const server = createServer();
+  const sockets: Array<import('stream').Duplex> = [];
+  server.on('upgrade', (_request, socket) => { sockets.push(socket); /* Keep the handshake open until the provider timeout. */ });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const port = (server.address() as { port: number }).port;
+    await expect(openProviderSocket(`ws://127.0.0.1:${port}/private`, { Authorization: 'secret' }, new AbortController().signal))
+      .rejects.toMatchObject({ code: 'PROVIDER_HANDSHAKE_TIMEOUT' });
+  } finally { for (const socket of sockets) socket.destroy(); await new Promise<void>(resolve => server.close(() => resolve())); }
+}, 15000);
+
 test('daily quota needs structured per-day evidence, not a generic RESOURCE_EXHAUSTED or retry delay', () => {
   const payload = (quotaId: string) => ({ error: { status: 'RESOURCE_EXHAUSTED', details: [{ '@type': 'type.googleapis.com/google.rpc.QuotaFailure', violations: [{ quotaId }] }, { '@type': 'type.googleapis.com/google.rpc.RetryInfo', retryDelay: '19s' }] } });
   expect(describeVoiceError(providerVoiceError('TTS', 429, payload('GenerateRequestsPerDayPerProjectPerModel-FreeTier')))).toMatchObject({ category: 'daily_quota', retryable: false });

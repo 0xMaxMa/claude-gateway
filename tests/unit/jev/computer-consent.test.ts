@@ -290,12 +290,13 @@ test('app_query sent to the helper is capped at 4000 characters without splittin
  }finally{await adapter.close();rmSync(root,{recursive:true,force:true});}
 });
 
-// The device reports a protected frontmost app only as the APPLICATION_PROTECTED tool
-// error above; ComputerObservation has no such field, so an observation never names it.
-test('only the device APPLICATION_PROTECTED error names a protected app, never an observation',async()=>{
+// A refused tool call reports APPLICATION_PROTECTED (above). A withheld observation (getpod-app #18:
+// frontmostProtected) is not a tool error: it is named as a withheld screen, never as that error code.
+// Pod-jinawong r7, task 2f65b7cf: dropping the field made the agent say "Spotify is not approved".
+test('a withheld observation is named as a withheld screen, not as the APPLICATION_PROTECTED tool error',async()=>{
  const {ComputerObservation}=jest.requireActual('../../../src/automation/computer-use');
  const parsed=ComputerObservation.parse({generation:'g',application:'unapproved',controls:[],truncated:false,apps:[],frontmostProtected:true});
- expect(parsed).not.toHaveProperty('frontmostProtected');
+ expect(parsed.frontmostProtected).toBe(true);
  const root=mkdtempSync(join(tmpdir(),'computer-protected-obs-'));
  const callTool=jest.fn(async({name}:any)=>({content:[{type:'text',text:JSON.stringify(name==='computer_request_access'?{state:'approved'}:{})}]}));
  jest.mocked(withComputerConnection).mockImplementation(async(_c,fn)=>fn({callTool} as any));
@@ -306,5 +307,7 @@ test('only the device APPLICATION_PROTECTED error names a protected app, never a
   expect(outcome.failure.code).toBe('COMPUTER_NO_SUPPORTED_ACTION');
   expect(outcome.failure.message).not.toContain('APPLICATION_PROTECTED');
   expect(outcome.failure.message).not.toContain('Device tool errors');
+  expect(outcome.failure.message).toContain('The screen is withheld because a protected app');
+  expect(outcome.computerReport.screenWithheld).toBe(true);
  }finally{await adapter.close();rmSync(root,{recursive:true,force:true});}
 });

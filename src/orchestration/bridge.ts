@@ -1,5 +1,6 @@
 import {summarizeBrowserEvidence} from '../jev/browser-evidence-summary';
-import {parentVerifiableBrowserResult} from '../jev/browser-contract';
+import {parentVerifiableBrowserResult,parkedVerifiableBrowserResult} from '../jev/browser-contract';
+import {agentGoalRunParked} from './tasks/automation-session';
 import { JevError } from '../jev/types';
 import type { GatewayTaskAdapter } from './gateway-tasks/controller';
 import { CRON_TOOLS } from '../cron/tool-schemas';
@@ -233,7 +234,7 @@ export class TaskBridge {
                 // readiness immediately before the synchronous task transaction.
                 await scope.beforeMutation?.(command.tool, a, context.actionId);
                 if(this.scopes.get(token!)!==scope)deny('TICKET_INVALID_OR_REVOKED');
-                const task = this.tasks.spawn(context, { cwd, title: a.title, instructions: a.instructions, computerInputs:a.computer_inputs, targetProfile: a.target_profile, gatewayTarget, browserFields:a.browser_fields, workingDirectory: a.working_directory, contextRefs: a.context_refs, continueTaskId: a.continue_task_id, continuationPolicy: a.continuation_policy, ...(model ? { model, requestedModel: a.model } : {}), ...(a.effort ? { effort: a.effort } : {}), ...(skill ? { skill } : {}) });
+                const task = this.tasks.spawn(context, { cwd, title: a.title, instructions: a.instructions, computerInputs:a.computer_inputs, ...(a.run_as_goal !== undefined ? { runAsGoal: a.run_as_goal } : {}), targetProfile: a.target_profile, gatewayTarget, browserFields:a.browser_fields, workingDirectory: a.working_directory, contextRefs: a.context_refs, continueTaskId: a.continue_task_id, continuationPolicy: a.continuation_policy, ...(model ? { model, requestedModel: a.model } : {}), ...(a.effort ? { effort: a.effort } : {}), ...(skill ? { skill } : {}) });
                 scope.onTaskQueued?.(spoken);
                 result = task;
                 break;
@@ -247,7 +248,7 @@ export class TaskBridge {
                   if(task.ownerPrincipalId!==context.principalId||task.gatewayTarget?.adapter!=='computer'||!adapter?.computerEvidence)throw new OrchestrationError('ACCESS_DENIED');
                   const evidence=await adapter.computerEvidence(task,a.computer_evidence,this.cancellations.get(token!)?.signal);
                   if(this.scopes.get(token!)!==scope)deny('TICKET_INVALID_OR_REVOKED');this.tasks.store.assertMember(context.conversationId,context.principalId);
-                  const {screenshot,...computerEvidence}=evidence;result={tasks:rows,computerEvidence,...(evidence.evidenceId&&task.computerReport?.status==='needs_verification'?{verification:{tool:'task_update',arguments:{task_id:task.taskId,expected_revision:task.revision,mode:'verify_computer',expected_request_id:evidence.requestId,evidence_id:evidence.evidenceId},instruction:'If this fresh evidence proves the complete goal, supply the concrete visible facts in instruction. Otherwise continue the SAME task with an updated plan; never ask the user to do the work themselves.'}}:{}),...(screenshot?{screenshot}:{})};
+                  const {screenshot,...computerEvidence}=evidence;result={tasks:rows,computerEvidence,...(evidence.evidenceId&&(task.computerReport?.status==='needs_verification'||agentGoalRunParked(task))?{verification:{tool:'task_update',arguments:{task_id:task.taskId,expected_revision:task.revision,mode:'verify_computer',expected_request_id:evidence.requestId,evidence_id:evidence.evidenceId},instruction:agentGoalRunParked(task)?'If this fresh evidence shows the goal is done, call this verification first with the concrete visible facts in instruction, then answer the user; it completes the task and ends the device session. Otherwise follow the parked-run note.':'If this fresh evidence proves the complete goal, supply the concrete visible facts in instruction. Otherwise continue the SAME task with an updated plan; never ask the user to do the work themselves.'}}:{}),...(screenshot?{screenshot}:{})};
                 }else if(a.computer_trace_offset!==undefined){
                   if(!a.task_id||a.browser_evidence!==undefined||!Number.isSafeInteger(a.computer_trace_offset)||a.computer_trace_offset<0)throw new OrchestrationError('INVALID_INPUT');
                   const task=this.tasks.status(context.conversationId,context.principalId,a.task_id)[0],adapter=this.gatewayAdapters.get('computer');
@@ -272,7 +273,7 @@ export class TaskBridge {
                   const current=this.tasks.status(context.conversationId,context.principalId,a.task_id)[0];
                   if(fieldSnapshot&&(current.state!=='waiting_input'||current.revision!==task.revision||current.pendingQuestion?.questionId!==task.pendingQuestion?.questionId))throw new OrchestrationError('STALE_QUESTION');
                   result={
-                    ...(evidence.evidenceId && parentVerifiableBrowserResult(task.browserReport) ? {verification:{
+                    ...(evidence.evidenceId && (parentVerifiableBrowserResult(task.browserReport) || agentGoalRunParked(task) && parkedVerifiableBrowserResult(task.browserReport)) ? {verification:{
                       instruction:'If this fresh observation independently proves the current goal, call task_update with these exact fields plus your concrete evidence in instruction. Do not run the task again merely to report the observed result.',
                       tool:'task_update',arguments:{task_id:task.taskId,expected_revision:task.revision,mode:'verify_browser',expected_request_id:evidence.requestId,evidence_id:evidence.evidenceId}
                     }} : {}),browserEvidence:summarizeBrowserEvidence(evidence),untrustedPageContent:true,tasks:rows.map(t=>({taskId:t.taskId,state:t.state,revision:t.revision,pendingQuestion:t.pendingQuestion,automationSession:t.automationSession,currentInstructions:'currentInstructions' in t?t.currentInstructions:undefined})),
@@ -297,7 +298,7 @@ export class TaskBridge {
                   const task=this.tasks.status(context.conversationId,context.principalId,a.task_id)[0];
                   const adapter=this.gatewayAdapters.get('browser');
                   if(!adapter?.verifyEvidence)throw new OrchestrationError('BROWSER_VERIFICATION_UNAVAILABLE');
-                  result=this.tasks.verifyBrowser(context,a.task_id,a.expected_revision,a.expected_request_id,a.evidence_id,a.instruction,()=>adapter.verifyEvidence!(task,a.expected_request_id,a.evidence_id));
+                  result=this.tasks.verifyBrowser(context,a.task_id,a.expected_revision,a.expected_request_id,a.evidence_id,a.instruction,()=>adapter.verifyEvidence!(task,a.expected_request_id,a.evidence_id,agentGoalRunParked(task)));
                 }else result=this.tasks.update(context,a.task_id,a.expected_revision,a.instruction,a.mode as ChangeMode,a.browser_fields,a.computer_inputs,a.start_url);
                 if(a.mode==='when_ready' && result && typeof result==='object' && 'gatewayTarget' in result && ['browser','computer'].includes((result as any).gatewayTarget?.adapter)) {
                   result={...result,controlHandoff:{endTurn:true,next:'End this turn now. Do not poll or send another command. The next action result schedules a fresh notification with authority for the next step.'}};
@@ -315,6 +316,17 @@ export class TaskBridge {
                 if(field&&(typeof a.field_text!=='string'||!a.field_text.trim()||a.field_text.length>2000))throw new OrchestrationError('FIELD_TEXT_REQUIRED','Supply field_text containing ONLY the exact literal text to type into the pending field. Put explanations in answer, never field_text. Inspect the pending question and screenshot first. No browser action was started.');
                 if(!field&&a.field_text!==undefined)throw new OrchestrationError('INVALID_INPUT','field_text is only for a pending missing-field question.');
                 result=this.tasks.answer(context,a.task_id,a.question_id,field?a.field_text:a.answer,a.browser_fields,a.computer_inputs);break;
+              }
+              case 'device_shell': {
+                this.tasks.store.assertMember(context.conversationId, context.principalId);
+                if (!context.execute) deny('READ_ONLY_TURN');
+                const adapter = this.gatewayAdapters.get('computer');
+                if (this.container || !this.computerEnabled?.() || !adapter?.shell) throw new OrchestrationError('COMPUTER_NOT_ALLOWED');
+                const cancelled = this.cancellations.get(token!);
+                if (!cancelled) deny('TICKET_INVALID_OR_REVOKED');
+                result = await this.cancelOnDisconnect(response, cancelled.signal, signal => adapter.shell!(context, a, signal));
+                if (this.scopes.get(token!) !== scope) deny('TICKET_INVALID_OR_REVOKED');
+                this.tasks.store.assertMember(context.conversationId, context.principalId); break;
               }
               default: throw new OrchestrationError('TOOL_DENIED');
             }
@@ -457,10 +469,13 @@ export class TaskBridge {
     const workerMemory = Boolean(worker?.task.capabilities.writeMemory && worker.conversation.source !== 'api');
     const jevEnabled = Boolean(this.jevEnabled?.());
     const browserEnabled = Boolean(this.browserEnabled?.());
+    const deviceShellEnabled = scope.role === 'agent' && !this.container && Boolean(this.computerEnabled?.()) && Boolean(this.gatewayAdapters.get('computer')?.shell);
     writeFileSync(ticketPath, JSON.stringify({ url: this.url, token, ...(this.container ? { socket: this.url, tools: containerTaskTools(scope.role, jevEnabled, browserEnabled, Boolean(this.computerEnabled?.())) } : {}) }), { mode: 0o600, flag: 'wx' });
     writeFileSync(mcpConfigPath, JSON.stringify({ mcpServers: { gateway: { command: 'bun', args: [resolve(__dirname, '../../mcp/server.ts')], env: {
       GATEWAY_JEV_ENABLED: jevEnabled ? 'true' : '',
       GATEWAY_CAPABILITY_CATALOG: scope.role === 'agent' && scope.capabilities ? 'true' : '',
+      // device_shell is declared only when Computer Use is allowed; fixed for this MCP process (cached tool prefix).
+      GATEWAY_COMPUTER_ENABLED: deviceShellEnabled ? 'true' : '',
       GATEWAY_ORCHESTRATION_ROLE: scope.role, GATEWAY_ORCHESTRATION_TICKET_FILE: ticketPath,
       GATEWAY_WORKSPACE_DIR: workspace, GATEWAY_SHARED_KB_DIR: sharedKbDir, GATEWAY_ISOLATE_MEMORY: this.isolateMemory() ? '1' : '', GATEWAY_DISABLE_ARCHIVE: this.disableArchive() ? '1' : '',
       GATEWAY_RECORD_RETRIEVALS: this.recordRetrievals ? '1' : '',
@@ -492,7 +507,7 @@ export class TaskBridge {
     const writeMemory = workerMemory || (scope.role === 'agent' && scope.context.writeMemory && this.tasks.store.get('SELECT source FROM conversations WHERE id=?', scope.context.conversationId)?.source !== 'api');
     const personaContext = scope.role === 'agent' && !this.isolateMemory() ? `This agent persona workspace: ${JSON.stringify(this.container ? '/workspace' : workspace)}.` : '';
     const sourceRules = `${personaContext}\n${writeMemory ? `Channel memory updates use scoped memory tools. ${SECRET_RULES}` : API_SOURCE_RULES}\n${this.isolateMemory() ? SHARED_PERSONA_RULES : IDENTITY_EDIT_RULES}`;
-    return { profile: { role: scope.role, jevEnabled, browserEnabled, checkpointCommand, containerExecution: Boolean(this.container), mcpConfigPath, overlay: `${scope.role === 'agent' ? AGENT_OVERLAY : WORKER_OVERLAY}\n\n${sourceRules}` },
+    return { profile: { role: scope.role, jevEnabled, browserEnabled, deviceShellEnabled, checkpointCommand, containerExecution: Boolean(this.container), mcpConfigPath, overlay: `${scope.role === 'agent' ? AGENT_OVERLAY : WORKER_OVERLAY}\n\n${sourceRules}` },
       revoke: () => { this.cancellations.get(token)?.abort(); this.cancellations.delete(token); this.scopes.delete(token); if (scope.role === 'worker') this.files?.releaseCaptured(scope.attemptId); } };
   }
   async close(): Promise<void> {

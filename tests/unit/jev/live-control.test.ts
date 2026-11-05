@@ -210,13 +210,17 @@ test.each(['THINKING_WAITING_INPUT','COMMAND_WAITING_INPUT'])('%s is idle and ac
  }finally{await f.close();}
 });
 
-test('user control remains open after long idle and ends only on explicit stop',async()=>{
+test('user control stays open while idle and expires after the idle timeout like any session',async()=>{
  const f=fixture();try{
   await f.pump();f.control('revise','Read current page');await f.pump();
   const t=f.store.task(f.task.taskId)!;
-  f.store.transaction(()=>{t.automationController='user';t.automationSession!.idleSince=Date.now()-86400000;f.store.saveTask(t,t.stateVersion);});
+  f.store.transaction(()=>{t.automationController='user';t.automationSession!.idleSince=Date.now()-29*60000;f.store.saveTask(t,t.stateVersion);});
   expect(f.tasks.status(f.accepted.conversationId,'u',t.taskId)[0].automationSession?.status).toBe('idle');
   f.control('revise','Read the new page');await f.pump();expect(f.calls).toHaveLength(3);
+  // A user-driven session no longer stays open forever: it would hold the device.
+  const idle=f.store.task(f.task.taskId)!;
+  f.store.transaction(()=>{idle.automationSession!.idleSince=Date.now()-31*60000;f.store.saveTask(idle,idle.stateVersion);});
+  expect(f.tasks.status(f.accepted.conversationId,'u',idle.taskId)[0].automationSession).toMatchObject({status:'closed',closedReason:'idle_timeout'});
  }finally{await f.close();}
 });
 

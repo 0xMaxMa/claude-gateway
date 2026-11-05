@@ -1,5 +1,5 @@
 import {mkdtempSync,rmSync} from 'fs';import {tmpdir} from 'os';import {join} from 'path';
-import {ComputerTaskAdapter,COMPUTER_GOAL_MAX_STEPS} from '../../../src/orchestration/gateway-tasks/computer';
+import {ComputerTaskAdapter} from '../../../src/orchestration/gateway-tasks/computer';
 import {withComputerConnection} from '../../../src/jev/computer-connector';
 jest.mock('../../../src/jev/computer-connector',()=>({withComputerConnection:jest.fn()}));
 jest.mock('../../../src/automation/computer-use',()=>({runComputerUse:jest.fn(),confirmationReply:jest.fn()}));
@@ -27,7 +27,7 @@ test('ax mode (no vision factory, or the factory says ax) runs the Accessibility
    runComputerUse.mockImplementationOnce(async()=>reached);
    expect((await f.run('r1','open YouTube')).type).toBe('completed');
    expect(runVisionComputerUse).not.toHaveBeenCalled();
-   expect(runComputerUse.mock.calls[0][0]).toMatchObject({goal:'open YouTube',runToGoal:true,maxSteps:COMPUTER_GOAL_MAX_STEPS});
+   expect(runComputerUse.mock.calls[0][0]).toMatchObject({goal:'open YouTube',runToGoal:true});expect(runComputerUse.mock.calls[0][0].maxSteps).toBeUndefined();
   }finally{await f.close();}
  }
 });
@@ -36,8 +36,10 @@ test('vision mode decides the goal from screenshots sized by the helper and neve
  let f:ReturnType<typeof fixture>|undefined;
  f=fixture(()=>({mode:'hybrid',decide:()=>f!.decide}));try{
   runVisionComputerUse.mockImplementationOnce(async(input:any,deps:any)=>{
-   expect(input).toMatchObject({goal:'search YouTube for lofi and play it',revision:1,maxSteps:COMPUTER_GOAL_MAX_STEPS});
-   expect(deps.mode).toBe('hybrid');expect(deps.decide).toBe(f!.decide);
+   expect(input).toMatchObject({goal:'search YouTube for lofi and play it',revision:1});expect(input.maxSteps).toBeUndefined();
+   // The configured decider makes every decision; the adapter only counts each request's size for the round's log line.
+   expect(deps.mode).toBe('hybrid');f!.decide.mockResolvedValueOnce({content:[]});
+   const signal=new AbortController().signal;await deps.decide([{role:'user',content:[]}],signal,{goal:'g'});expect(f!.decide).toHaveBeenCalledWith([{role:'user',content:[]}],signal,{goal:'g'});
    await deps.call('computer_acquire',{});
    expect(await deps.screenshot({generation:'g1'},new AbortController().signal)).toEqual({generation:'g1',data:'/9j/AAAA',width:1280,height:800});
    return reached;
@@ -103,7 +105,7 @@ test('the user\'s yes to a vision question resumes the goal in vision, bound to 
   await f.run('r2','yes please');
   expect(confirmationReply.mock.calls[0].slice(0,2)).toEqual(['Buy now','yes please']);
   expect(runVisionComputerUse).toHaveBeenCalledTimes(2);
-  expect(runVisionComputerUse.mock.calls[1][0]).toMatchObject({goal:'buy the blue mug',confirmedTarget:'a'.repeat(32),impact:true,yieldAfterAction:false,maxSteps:COMPUTER_GOAL_MAX_STEPS});
+  expect(runVisionComputerUse.mock.calls[1][0]).toMatchObject({goal:'buy the blue mug',confirmedTarget:'a'.repeat(32),impact:true,yieldAfterAction:false});expect(runVisionComputerUse.mock.calls[1][0].maxSteps).toBeUndefined();
   expect(runComputerUse).not.toHaveBeenCalled();
  }finally{await f.close();}
 });

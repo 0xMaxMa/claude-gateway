@@ -139,6 +139,16 @@ export function addressCommand(command:string):string|undefined {
  const url=literalTextCandidates(target);
  return url.length===1&&url[0]===target&&/^(?:https?:\/\/|www\.)|\.[a-z]{2,}(?:\/|$)/iu.test(target)?target:undefined;
 }
+/** The first web address a goal names anywhere in its text ("open tradingview.com/chart/?symbol=X in Chrome"), with
+ * its host and the host's longest label below the top-level domain (store.steampowered.com → steampowered), which a
+ * page title of that site usually shows. Undefined for a goal that names none. */
+export function goalWebAddress(goal:string):{address:string;host:string;label:string}|undefined {
+ const address=literalTextCandidates(goal).find(value=>!/\s/u.test(value)&&/^(?:https?:\/\/|www\.)|\.[a-z]{2,}(?:\/|$)/iu.test(value));
+ const host=address?.replace(/^https?:\/\//iu,'').split(/[/?#:]/u)[0].replace(/^www\./iu,'').toLocaleLowerCase();
+ if(!address||!host?.includes('.'))return;
+ const label=host.split('.').slice(0,-1).sort((a,b)=>b.length-a.length)[0];
+ return label?{address,host,label}:undefined;
+}
 /**
  * "open youtube in chrome", "เปิด youtube ใน chrome", or a bare address: the
  * address plus the browser named for it, if any. One address and one app word

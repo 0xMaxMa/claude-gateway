@@ -17,7 +17,8 @@ export const WORKER_REPORT_TOOLS: McpToolDefinition[] = [
 ];
 
 // subagent_wait (and a foreground subagent_spawn) answers when the subagent finishes, as native `Agent` does.
-const LONG_RUNNING_TOOLS = new Set(['narrate', 'subagent_wait', 'subagent_spawn']);
+// device_shell waits for the owner's approval and then for the command (up to 5 minutes).
+const LONG_RUNNING_TOOLS = new Set(['narrate', 'subagent_wait', 'subagent_spawn', 'device_shell']);
 export const LONG_RUNNING_MAX_MS = 2 * 60 * 60 * 1000;
 export async function callTaskBridge(tool: string, args: Record<string, unknown>, requestId: string, signal: AbortSignal): Promise<McpToolResult> {
   // Rotated by the gateway at each decision/attempt boundary. A loaded token is
