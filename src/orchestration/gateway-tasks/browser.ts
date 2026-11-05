@@ -1,5 +1,5 @@
 import {TraceEvent, type BrowserTrace} from '../../automation/browser-trace';
-import { parentVerifiableBrowserResult } from '../../jev/browser-contract';
+import { parentVerifiableBrowserResult, parkedVerifiableBrowserResult } from '../../jev/browser-contract';
 import type { BrowserExecutionContext, BrowserExecutionResult, BrowserProgress, BrowserEvidence, BrowserMutationCheckpoint } from '../../jev/browser-contract';
 import { createHash, randomUUID } from 'crypto';
 import { mkdirSync, readFileSync, writeFileSync, renameSync, openSync, closeSync, fsyncSync, unlinkSync } from 'fs';
@@ -110,7 +110,8 @@ export class BrowserTaskAdapter implements GatewayTaskAdapter {
     // The user's next command answers that question (Jev reads yes or no).
     const asked=!agentHandoff?previousContext?.interaction?.confirm:undefined;
     const confirmation=asked&&typeof previousContext?.command==='string'?{command:previousContext.command,label:asked.label}:undefined;
-    const stepMode=command&&!agentHandoff&&this.options.stepMode?.()===true&&!answers?.length;
+    // The spawning agent declared this revision needs judgment (run_as_goal): one goal on its text, no step list.
+    const stepMode=command&&!agentHandoff&&task.runAsGoal?.revision!==task.revision&&this.options.stepMode?.()===true&&!answers?.length;
     const userText=stepMode?this.options.userSteps?.(task):undefined;
     const steps=stepMode?(userText?parseCommandSteps(userText):undefined)??parseCommandSteps(instructions):undefined;
     // Durable receipt precedes any side effect; restart never replays this request.
@@ -242,11 +243,11 @@ export class BrowserTaskAdapter implements GatewayTaskAdapter {
     }
     return evidence;
   }
-  verifyEvidence(task:TaskSnapshot,requestId:string,evidenceId:string):void {
+  verifyEvidence(task:TaskSnapshot,requestId:string,evidenceId:string,parkedGoalRun=false):void {
     this.assertTask(task);if(this.options.allowedEvidence?.(task)===false)throw new OrchestrationError('ACCESS_DENIED');this.binding(task.gatewayTarget!.sessionId,task.ownerPrincipalId,task.conversationId);
     if(task.gatewayDispatch?.requestId!==requestId || this.running.has(this.key(task,requestId)))throw new OrchestrationError('STALE_BROWSER_EVIDENCE');
     const receipt=this.read(task,requestId), result=receipt?.browserResult;
-    if(receipt?.status!=='ended' || !receipt.inspection || receipt.inspection.id!==evidenceId || Date.now()-receipt.inspection.at>300000 || !parentVerifiableBrowserResult(result))throw new OrchestrationError('BROWSER_VERIFICATION_UNAVAILABLE');
+    if(receipt?.status!=='ended' || !receipt.inspection || receipt.inspection.id!==evidenceId || Date.now()-receipt.inspection.at>300000 || !(parkedGoalRun ? parkedVerifiableBrowserResult(result) : parentVerifiableBrowserResult(result)))throw new OrchestrationError('BROWSER_VERIFICATION_UNAVAILABLE');
   }
   reconcileEvidence(task:TaskSnapshot,requestId:string,evidenceId:string):string {
     this.assertTask(task);

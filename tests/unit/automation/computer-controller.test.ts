@@ -232,7 +232,9 @@ test('alternating navigation and clicks are detected despite volatile page text'
  f.deps.evaluate=async req=>({answers:{action:choiceFor(req.questions.action.criteria,n++%2===0?'press:c1':'navigate:back')}});
  (f.deps as any).decideAction=async()=>{thinking++;return {action:null,text:null};};
  const r=await runComputerUse({goal:'Find the requested result'},f.deps,new AbortController().signal);
- assert.equal(r.steps,4);assert.equal(thinking,0);assert.equal(r.reason,'COMMAND_WAITING_INPUT');
+ assert.equal(r.steps,4);assert.equal(thinking,0);
+ // The loop is a stop for no progress (r11): the round pauses for the user under its own reason.
+ assert.equal(r.status,'needs_input');assert.equal(r.reason,'NO_PROGRESS');assert.ok(r.trace.events.some(e=>e.phase==='waiting'&&e.reason==='NO_PROGRESS'));
 });
 test('follow-up Enter uses one key action and shares continuation semantics with both questions',async()=>{
  const f=fixture(['key:enter','DONE']);const evaluate=f.deps.evaluate;
@@ -507,6 +509,15 @@ for(const mode of ['settles','continuous','revoked'])test('post-action stale scr
  else{assert.equal(r.reason,'COMMAND_WAITING_INPUT');assert.equal(captures,mode==='settles'?2:3);assert.equal(Boolean(r.observation),mode==='settles');assert(r.trace.events.some(e=>e.reason==='POST_ACTION_EVIDENCE_STALE'));}
 });
 
+// Pod-jinawong 2.0.21 (fa17f432): the command came in backticks and was never offered.
+test('literal text candidates include code spans, ranked ahead of quoted text',()=>{
+ assert.deepEqual(literalTextCandidates('Open Terminal.app on this Mac (use Spotlight search with Cmd+Space, type "Terminal", press Enter if needed) and run the command `which htop` (or `command -v htop`) to check if htop is installed.'),
+  ['which htop','command -v htop','Terminal','Terminal.app']);
+ assert.deepEqual(literalTextCandidates('run:\n```sh\nls -la\n```'),['ls -la']);
+ assert.deepEqual(literalTextCandidates('```\necho hi\n```'),['echo hi']);
+ assert.deepEqual(literalTextCandidates('พิมพ์`ls`ใน Terminal'),['ls']);
+ assert.deepEqual(literalTextCandidates('open `Notes` then type "hello"'),['Notes','hello']);
+});
 test('literal text candidates preserve exact quoted content and never invent domains',()=>{
  assert.deepEqual(literalTextCandidates('พิมพ์ "New  York"'),['New  York']);
  assert.deepEqual(literalTextCandidates('เข้า google.com'),['google.com']);

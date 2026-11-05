@@ -12,11 +12,14 @@ const finder=()=>({application:'com.apple.finder',windowTitle:'Recents',truncate
 const chrome=(value='')=>({application:'com.google.Chrome',windowTitle:'New Tab - Google Chrome',truncated:false,apps:APPS,
  focusedControl:{ref:'c0',role:'AXTextField',label:'Address and search bar'},
  controls:[{ref:'c0',identity:'11111111-1111-4111-8111-111111111111',role:'AXTextField',label:'Address and search bar',value,focused:true,actions:['press','type']},...menu(['File → New Tab'])]});
+// The page Enter opened: its title changed (computer-use.ts waits for that before GOAL_REACHED).
+const youtube=()=>({...chrome('youtube.com'),windowTitle:'YouTube - Google Chrome'});
 const notes=(count:number)=>({application:'com.apple.Notes',windowTitle:`Notes (${count})`,truncated:false,apps:APPS,text:[`${count} notes`],
  controls:[{ref:'c8',role:'AXButton',label:'New Note',actions:['press']},{ref:'c9',role:'AXButton',label:'Delete',actions:['press']},{ref:'c10',role:'AXButton',label:'Share',actions:['press']}]});
 
 const choice=(criteria:Record<string,unknown>,chosen:string,confidence:number)=>({choice:chosen,confidence,probabilities:Object.fromEntries(Object.keys(criteria).map(k=>[k,k===chosen?confidence:(1-confidence)/(Object.keys(criteria).length-1||1)]))});
-type Step={pick:string;confidence?:number;impact?:'ROUTINE'|'HIGH_IMPACT';text?:string};
+// `text` may pick by value: it gets the offered TEXT criteria and returns a choice.
+type Step={pick:string;confidence?:number;impact?:'ROUTINE'|'HIGH_IMPACT';text?:string|((criteria:Record<string,string>)=>string)};
 /** A desktop that shows `screens[i]` after i completed actions, and a model that answers `plan` in order. */
 function fixture(screens:Array<()=>any>,plan:Step[]=[]){
  let shown=0,asked=0;const calls:any[]=[],requests:any[]=[];
@@ -31,7 +34,7 @@ function fixture(screens:Array<()=>any>,plan:Step[]=[]){
   evaluate:async req=>{
    requests.push(req);const step=plan[asked++]??{pick:'DONE'};const kind=step.pick.includes(':')?step.pick.split(':')[0]:step.pick;
    return {answers:Object.fromEntries(Object.entries(req.questions).map(([name,q])=>[name,choice(q.criteria as any,
-    name==='action'?kind:name==='target_'+kind?step.pick:name==='impact'?step.impact??'ROUTINE':name==='text'?step.text??'NONE':'BLOCKED',name==='impact'?0.95:step.confidence??0.95)]))};
+    name==='action'?kind:name==='target_'+kind?step.pick:name==='impact'?step.impact??'ROUTINE':name==='text'?(typeof step.text==='function'?step.text(q.criteria as any):step.text??'NONE'):'BLOCKED',name==='impact'?0.95:step.confidence??0.95)]))};
   }};
  return {deps,calls,requests,actions:()=>calls.filter(c=>c.name==='computer_action').map(({args:{lease_token,operation_id,generation,...rest}})=>rest)};
 }
@@ -48,8 +51,8 @@ describe('agent-spawned goal runs to the goal',()=>{
   // Pod 2.0.16: the goal ended here as needs_input/COMMAND_WAITING_INPUT and the task hung in waiting_input.
   expect(r).toMatchObject({status:'succeeded',reason:'GOAL_REACHED',steps:2});
   expect(waited(r)).toBeUndefined();
-  expect(computerOutcomeText({...r,phase:'terminal',trace:r.trace.events} as any)).toBe('Done: 2 actions, last pressed "New Note". Send the next command.');
-  expect(computerOutcomeText({...r,phase:'terminal',trace:r.trace.events,accessReleased:true} as any)).toBe('Done: 2 actions, last pressed "New Note". Computer access was released.');
+  expect(computerOutcomeText({...r,phase:'terminal',trace:r.trace.events} as any)).toBe('Done after 2 actions. Last: pressed "New Note". Send the next command.');
+  expect(computerOutcomeText({...r,phase:'terminal',trace:r.trace.events,accessReleased:true} as any)).toBe('Done after 2 actions. Last: pressed "New Note". Computer access was released.');
  });
  test('later decisions see what this run already did and are asked for the next step toward the goal',async()=>{
   const f=fixture([finder,()=>notes(0),()=>notes(1)],[{pick:'open:com.apple.Notes'},{pick:'press:c8'},{pick:'DONE'}]);
@@ -286,10 +289,10 @@ describe('a yes to a goal step resumes the goal',()=>{
 // offline, access revoked) must never turn a finished goal into an error, or the
 // caller skips releasing the device session.
 describe('goal evidence is best-effort',()=>{
- const failingObserve=(f:ReturnType<typeof fixture>,from:number,code:string)=>{const call=f.deps.call;let actions=0;
-  f.deps.call=async(...a)=>{if(a[0]==='computer_action')actions++;if(a[0]==='computer_observe'&&actions>=from)throw Error(code);return call(...a);};};
+ const failingObserve=(f:ReturnType<typeof fixture>,from:number,code:string,allowedReads=0)=>{const call=f.deps.call;let actions=0,reads=0;
+  f.deps.call=async(...a)=>{if(a[0]==='computer_action')actions++;if(a[0]==='computer_observe'&&actions>=from&&reads++>=allowedReads)throw Error(code);return call(...a);};};
  test.each(['DEVICE_OFFLINE','ACCESS_DENIED','STALE_OBSERVATION'])('a fast path goal still reaches GOAL_REACHED when the closing read fails with %s',async code=>{
-  const f=fixture([finder,()=>chrome(),()=>chrome('youtube.com'),()=>chrome('youtube.com')]);failingObserve(f,3,code);
+  const f=fixture([finder,()=>chrome(),()=>chrome('youtube.com'),youtube]);failingObserve(f,3,code,1);
   const r=await spawn(f,'open YouTube in Chrome');
   expect(r).toMatchObject({status:'succeeded',reason:'GOAL_REACHED',steps:3});
  });
@@ -299,7 +302,7 @@ describe('goal evidence is best-effort',()=>{
   expect(r).toMatchObject({status:'blocked',reason:'STEP_LIMIT',steps:2});
  });
  test('a failed closing read leaves a trace the agent can read, without the provider error text',async()=>{
-  const f=fixture([finder,()=>chrome(),()=>chrome('youtube.com'),()=>chrome('youtube.com')]);failingObserve(f,3,'DEVICE_OFFLINE secret-detail');
+  const f=fixture([finder,()=>chrome(),()=>chrome('youtube.com'),youtube]);failingObserve(f,3,'DEVICE_OFFLINE secret-detail',1);
   const r=await spawn(f,'open YouTube in Chrome');
   expect(r).toMatchObject({status:'succeeded',reason:'GOAL_REACHED'});
   expect(waited(r)).toBe('GOAL_EVIDENCE_UNAVAILABLE');
@@ -307,7 +310,7 @@ describe('goal evidence is best-effort',()=>{
  });
  test('a good observation is kept when only the closing screenshot fails',async()=>{
   const withShot=(o:()=>any)=>()=>({...o(),screenshotAvailable:true});
-  const f=fixture([finder,withShot(chrome),withShot(()=>chrome('youtube.com')),withShot(()=>chrome('youtube.com'))]);
+  const f=fixture([finder,withShot(chrome),withShot(()=>chrome('youtube.com')),withShot(youtube)]);
   const seen:any[]=[];f.deps.observation=o=>{seen.push(o);};
   f.deps.snapshot=async()=>{throw Error('SCREENSHOT_FAILED');};
   const r=await spawn(f,'open YouTube in Chrome');
@@ -316,14 +319,14 @@ describe('goal evidence is best-effort',()=>{
   expect(r.observation).toMatchObject({application:'com.google.Chrome'});
  });
  test('lost authorization during the closing read still stops the run with ACCESS_DENIED',async()=>{
-  const f=fixture([finder,()=>chrome(),()=>chrome('youtube.com'),()=>chrome('youtube.com')]);
+  const f=fixture([finder,()=>chrome(),()=>chrome('youtube.com'),youtube]);
   let actions=0;const call=f.deps.call;f.deps.call=async(...a)=>{if(a[0]==='computer_action')actions++;return call(...a);};
   f.deps.authorized=()=>actions<3;
   const r=await spawn(f,'open YouTube in Chrome');
   expect(r).toMatchObject({status:'blocked',reason:'ACCESS_DENIED'});
  });
  test('an interruption raised during the closing read is reported as interrupted, not swallowed as missing evidence',async()=>{
-  const f=fixture([finder,()=>chrome(),()=>chrome('youtube.com'),()=>chrome('youtube.com')]);const interrupt=new AbortController();
+  const f=fixture([finder,()=>chrome(),()=>chrome('youtube.com'),youtube]);const interrupt=new AbortController();
   f.deps.interruptSignal=interrupt.signal;
   const call=f.deps.call;let actions=0;f.deps.call=async(...a)=>{if(a[0]==='computer_action')actions++;if(a[0]==='computer_observe'&&actions>=3){interrupt.abort();throw Error('DEVICE_OFFLINE');}return call(...a);};
   const r=await spawn(f,'open YouTube in Chrome');
@@ -368,7 +371,7 @@ describe('a refused action in a goal run',()=>{
 
 describe('URL fast path for agent goals',()=>{
  test('"open YouTube in Chrome" from Finder opens Chrome, then types the address: no model call',async()=>{
-  const f=fixture([finder,()=>chrome(),()=>chrome('youtube.com'),()=>chrome('youtube.com')]);
+  const f=fixture([finder,()=>chrome(),()=>chrome('youtube.com'),youtube]);
   const r=await spawn(f,'open YouTube in Chrome');
   expect(f.requests).toHaveLength(0);
   expect(f.actions()).toEqual([{kind:'open',app_id:'com.google.Chrome'},{kind:'type',ref:'c0',text:'youtube.com'},{kind:'key',key:'enter'}]);
@@ -378,7 +381,7 @@ describe('URL fast path for agent goals',()=>{
   expect(f.calls.at(-2)?.name).toBe('computer_observe');
  });
  test.each([['https://www.youtube.com/','https://www.youtube.com/'],['youtube.com','youtube.com'],['เปิด youtube ใน chrome','youtube.com']])('%s with Chrome in front types %s straight into the address bar',async(goal,address)=>{
-  const f=fixture([()=>chrome(),()=>chrome(address),()=>chrome(address)]);
+  const f=fixture([()=>chrome(),()=>chrome(address),youtube]);
   const r=await spawn(f,goal);
   expect(f.requests).toHaveLength(0);expect(r.reason).toBe('GOAL_REACHED');
   expect(f.actions()).toEqual([{kind:'type',ref:'c0',text:address},{kind:'key',key:'enter'}]);
@@ -389,7 +392,7 @@ describe('URL fast path for agent goals',()=>{
   expect(f.requests).toHaveLength(1);expect(f.actions()).toEqual([]);
  });
  test('a fast path on a direct user command still only acknowledges dispatch',async()=>{
-  const f=fixture([()=>chrome(),()=>chrome('youtube.com'),()=>chrome('youtube.com')]);
+  const f=fixture([()=>chrome(),()=>chrome('youtube.com'),youtube]);
   const r=await runComputerUse({goal:'open YouTube in Chrome',yieldAfterInteraction:true,readRequest:true},f.deps,new AbortController().signal);
   expect(r).toMatchObject({status:'needs_input',reason:'COMMAND_WAITING_INPUT'});expect(waited(r)).toBe('ACTION_DISPATCHED');
  });
@@ -460,5 +463,88 @@ describe('a goal run offers READ_REQUEST only before it has acted',()=>{
   expect(offered(f.requests[0])).toContain('READ_REQUEST');
   expect(f.actions()).toEqual([]);
   expect(waited(r)).toBe('READ_REQUEST');
+ });
+});
+
+// Pod-jinawong 2.0.21, computer-requests/fa17f432: the agent's goal named the command
+// in backticks. Round 1 opened Terminal; round 2 chose to type into the focused shell,
+// but the only text candidates were "Terminal" and "Terminal.app", so the model said
+// NONE and the run stopped as COMMAND_WAITING_INPUT with nothing typed and nobody asked.
+describe('an agent goal run types the command it was given in backticks',()=>{
+ const FA17F432='Open Terminal.app on this Mac (use Spotlight search with Cmd+Space, type "Terminal", press Enter if needed) and run the command `which htop` (or `command -v htop`) to check if htop is installed. Report back whether it\'s installed and the output of the command.';
+ const TERMINAL={id:'com.apple.Terminal',name:'Terminal'};
+ const desktop=()=>({...finder(),apps:[...APPS,TERMINAL]});
+ const terminal=()=>({application:TERMINAL.id,windowTitle:'jisack — -zsh — 80×24',truncated:false,apps:[...APPS,TERMINAL],
+  focusedControl:{ref:'t0',role:'AXTextArea',label:'shell'},
+  controls:[{ref:'t0',identity:'22222222-2222-4222-8222-222222222222',role:'AXTextArea',label:'shell',value:'',focused:true,actions:['type']}]});
+ // The model picks the offered candidate equal to the command, or NONE when it is not offered.
+ const command=(criteria:Record<string,string>)=>Object.entries(criteria).find(([k,v])=>k.startsWith('TEXT:')&&JSON.parse(v).text==='which htop')?.[0]??'NONE';
+ test('round 2 types `which htop` into the focused shell AXTextArea',async()=>{
+  const f=fixture([desktop,terminal,terminal],[{pick:'open:'+TERMINAL.id},{pick:'type:t0',text:command},{pick:'DONE'}]);
+  const r=await spawn(f,FA17F432);
+  expect(f.actions()).toEqual([{kind:'open',app_id:TERMINAL.id},{kind:'type',ref:'t0',text:'which htop'}]);
+  // The command the goal says to run is offered first, ahead of the app name.
+  expect(JSON.parse(f.requests[1].questions.text.criteria['TEXT:0']).text).toBe('which htop');
+  expect(r).toMatchObject({status:'succeeded',reason:'GOAL_REACHED',steps:2});
+ });
+ test('without a literal text the run stops as FIELD_TEXT_REQUIRED naming the field, not a bare wait',async()=>{
+  const f=fixture([desktop,terminal],[{pick:'open:'+TERMINAL.id},{pick:'type:t0'}]);
+  const r=await spawn(f,'Open Terminal.app on this Mac and check whether htop is installed, then report back what you find there.');
+  expect(f.actions()).toEqual([{kind:'open',app_id:TERMINAL.id}]);
+  expect(r).toMatchObject({status:'needs_input',reason:'FIELD_TEXT_REQUIRED',steps:1,
+   fieldRequest:{label:'shell',application:TERMINAL.id,windowTitle:'jisack — -zsh — 80×24',role:'AXTextArea',reason:'missing'}});
+  expect(waited(r)).toBeUndefined();
+ });
+ test('a user-issued direct command without the text still waits for the next command (no behavior change)',async()=>{
+  const f=fixture([terminal],[{pick:'type:t0'}]);
+  const r=await runComputerUse({goal:'check whether htop is installed in this terminal please now',yieldAfterInteraction:true,readRequest:true},f.deps,new AbortController().signal);
+  expect(f.actions()).toEqual([]);
+  expect(r).toMatchObject({status:'needs_input',reason:'COMMAND_WAITING_INPUT'});expect(r.fieldRequest).toBeUndefined();
+  expect(waited(r)).toBe('FIELD_TEXT_REQUIRED');
+ });
+});
+
+// Pod-jinawong r7, task 2f65b7cf: the user typed "play it on Spotify" in GetPod, so GetPod was in front and its
+// screen was withheld (no controls). The agent's hand-off command ran as one interaction and stopped
+// NO_SUPPORTED_ACTION. It runs as a short goal now (gateway-tasks/computer.ts agentHandoff), with the same gates.
+describe('an agent hand-off command runs as a short goal',()=>{
+ const withheld=()=>({application:'unapproved',truncated:false,apps:APPS,controls:[],screenshotAvailable:false,frontmostProtected:true,reason:'The frontmost application is protected on this computer; open or switch to an allowed application.'});
+ const play=()=>({application:'com.google.Chrome',windowTitle:'Song - Spotify',truncated:false,apps:APPS,controls:[{ref:'p1',role:'AXButton',label:'Play',actions:['press']}]});
+ // The input gateway-tasks/computer.ts builds for a hand-off round.
+ const handoff=(f:ReturnType<typeof fixture>,goal:string)=>runComputerUse({goal,yieldAfterAction:false,yieldAfterInteraction:true,readRequest:false,agentCommand:true,runToGoal:true,maxSteps:8},f.deps,new AbortController().signal);
+ test('opens the browser from a withheld screen, then carries on to the goal',async()=>{
+  const f=fixture([withheld,play,play],[{pick:'open:com.google.Chrome'},{pick:'press:p1'},{pick:'DONE'}]);
+  const r=await handoff(f,'play "Song" on Spotify in Chrome');
+  expect(f.actions()).toEqual([{kind:'open',app_id:'com.google.Chrome'},{kind:'press',ref:'p1'}]);
+  expect(r).toMatchObject({status:'succeeded',reason:'GOAL_REACHED',steps:2});
+  // The model was told why the screen was empty, not that the app is unapproved.
+  expect(f.requests[0].state.desktop).toMatchObject({application:'unapproved',frontmostProtected:true});
+  expect(f.requests[0].state.desktop.screenWithheld).toContain('not a missing approval');
+ });
+ test('without runToGoal the same command stops after its first action (the r7 behaviour)',async()=>{
+  const f=fixture([withheld,play],[{pick:'open:com.google.Chrome'},{pick:'press:p1'}]);
+  const r=await runComputerUse({goal:'play "Song" on Spotify in Chrome',yieldAfterInteraction:true,agentCommand:true},f.deps,new AbortController().signal);
+  expect(f.actions()).toEqual([{kind:'open',app_id:'com.google.Chrome'}]);expect(waited(r)).toBe('ACTION_DISPATCHED');
+ });
+ test('the impact gate is unchanged: a high-impact first action asks the user',async()=>{
+  const f=fixture([()=>notes(1)],[{pick:'press:c9',impact:'HIGH_IMPACT'}]);
+  const r=await handoff(f,'delete this note');
+  expect(f.requests[0].questions.impact).toBeDefined();
+  expect(f.actions()).toEqual([]);expect(waited(r)).toBe('CONFIRMATION_REQUIRED');
+ });
+ test('the impact gate holds on every later step too',async()=>{
+  const f=fixture([withheld,()=>notes(1)],[{pick:'open:com.apple.Notes'},{pick:'press:c9',impact:'HIGH_IMPACT'}]);
+  const r=await handoff(f,'delete my note');
+  expect(f.actions()).toEqual([{kind:'open',app_id:'com.apple.Notes'}]);expect(waited(r)).toBe('CONFIRMATION_REQUIRED');
+ });
+ test('the first action keeps the hand-off\'s best-choice rule; an unsure later step stops (confidence gate)',async()=>{
+  const f=fixture([withheld,()=>notes(1)],[{pick:'open:com.apple.Notes',confidence:0.5},{pick:'press:c10',confidence:0.4}]);
+  const r=await handoff(f,'share my note');
+  expect(f.actions()).toEqual([{kind:'open',app_id:'com.apple.Notes'}]);expect(waited(r)).toBe('LOW_CONFIDENCE');
+ });
+ test('stops at the goal step limit',async()=>{
+  const f=fixture([withheld,play,play,play],[{pick:'open:com.google.Chrome'},{pick:'press:p1'},{pick:'press:p1'}]);
+  const r=await runComputerUse({goal:'play',yieldAfterInteraction:true,readRequest:false,agentCommand:true,runToGoal:true,maxSteps:2},f.deps,new AbortController().signal);
+  expect(r).toMatchObject({status:'blocked',reason:'STEP_LIMIT',steps:2});
  });
 });

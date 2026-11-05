@@ -4790,6 +4790,18 @@ export function createApiRouter(
     }
   });
 
+  // The desktop app's on-screen overlay (getpod-app overlay.ts) asks what the run controlling it is doing. The relay
+  // forwards no extra command fields, so the app reads it here through its pod, keyed by its own relay grant.
+  router.get('/v1/computer/activity', auth, (req: Request, res: Response) => {
+    const apiKey = (req as AuthedRequest).apiKey;
+    const grantId = typeof req.query.grant_id === 'string' ? req.query.grant_id : '';
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(grantId)) { res.status(400).json({ error: 'grant_id must be a UUID' }); return; }
+    const runs = [...agentRunners].filter(([agentId]) => canAccessAgent(apiKey, agentId))
+      .flatMap(([, runner]) => { const run = runner.computerActivity(grantId, apiPrincipal(apiKey)); return run ? [run] : []; })
+      .sort((a, b) => b.updatedAt - a.updatedAt);
+    res.set('Cache-Control', 'no-store').json({ run: runs[0] ?? null });
+  });
+
   router.get('/v1/agents/:agentId/sessions/:sessionId/activity', auth, async (req: Request, res: Response) => {
     const { agentId, sessionId } = req.params as { agentId: string; sessionId: string };
     const apiKey = (req as AuthedRequest).apiKey;

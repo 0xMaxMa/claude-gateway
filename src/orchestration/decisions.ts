@@ -70,7 +70,9 @@ export class DecisionService {
     });
   }
   /** Explicit stop controls acknowledge cancellation themselves; retain history without redelivering. */
-  finish(receipt: DecisionReceipt, text: string, state: 'completed' | 'interrupted' | 'failed' = 'completed', spoken?: string, deliver = true): string {
+  /** `followUp`: what a task-report reply declared happens next; it goes with response.completed, so a client knows the
+   *  agent asked the user something (asks_user) and is waiting for a real answer. */
+  finish(receipt: DecisionReceipt, text: string, state: 'completed' | 'interrupted' | 'failed' = 'completed', spoken?: string, deliver = true, followUp?: import('./response-schema').FollowUp): string {
     if (Buffer.byteLength(text) > 262144) throw new OrchestrationError('PAYLOAD_TOO_LARGE');
     return this.store.transaction(() => {
       const decision = this.store.get(`SELECT d.* FROM conversation_decisions d JOIN conversations c ON c.id=d.conversation_id
@@ -98,7 +100,7 @@ export class DecisionService {
       for (const id of state === 'completed' ? JSON.parse(String(decision.notification_ids_json)) as string[] : []) {
         this.store.run("UPDATE outbox SET state='completed' WHERE kind='notification' AND json_extract(payload_json,'$.notificationId')=?", id);
       }
-      this.store.appendEvent(String(decision.conversation_id), `response.${state}`, { responseId });
+      this.store.appendEvent(String(decision.conversation_id), `response.${state}`, { responseId, ...(state === 'completed' && followUp ? { followUp } : {}) });
       return responseId;
     });
   }

@@ -33,6 +33,8 @@ export interface RuntimeProfile {
   /** Captured optional evaluation-tool inventory for this process; permissions remain live. */
   jevEnabled?: boolean;
   browserEnabled?: boolean;
+  /** device_shell is in this agent MCP process's inventory (GATEWAY_COMPUTER_ENABLED). */
+  deviceShellEnabled?: boolean;
   /** Read-only worker: Codex runs in its read-only sandbox; Claude gets read tools through workerTools and only the gateway MCP config. */
   readOnly?: boolean;
   /** Optional connector restriction for workers. Agent decisions never receive connectors. */

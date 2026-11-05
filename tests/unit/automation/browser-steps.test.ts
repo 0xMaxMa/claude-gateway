@@ -119,7 +119,11 @@ test("a step that finds nothing stops with the remaining steps listed", async ()
     return [key, { choice: selected, confidence: 0.95, probabilities: Object.fromEntries(ids.map(id => [id, id === selected ? 1 : 0])) }];
   })) }) });
   expect(result.stepRun).toMatchObject({ completed: 0, stopReason: "STEP_NOT_EXECUTED", detail: "NO_SUPPORTED_ACTION", remaining: ["เข้า link ที่สาม", "scroll ลง"] });
-  expect(browserOutcomeText(result)).toMatch(/^0\/2 steps done\. Stopped at step 1 "เข้า link ที่สาม": STEP_NOT_EXECUTED \(NO_SUPPORTED_ACTION\): nothing on the page matches/);
+  // Plain words first; the raw codes move to the last "Details:" line. Only later steps are "Not started".
+  const text = browserOutcomeText(result);
+  expect(text).toMatch(/^0\/2 steps done\. Stopped at step 1 "เข้า link ที่สาม": nothing on the page matches/);
+  expect(text).toContain(' Not started: "scroll ลง".');
+  expect(text.split("\n").at(-1)).toBe("Details: STEP_NOT_EXECUTED · NO_SUPPORTED_ACTION");
 });
 
 test("steps are capped like Computer Use (12 steps)", async () => {

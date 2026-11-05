@@ -1,5 +1,5 @@
 /** Bounded, untrusted target hints. Never persist actionable refs or field values. */
-export function computerContinuationContext(snapshot: {observedAt:number;state:any}|undefined,trace: Array<any> = [],previousCommand?:string,previousAction?:import("../../automation/computer-use").ComputerLastAction) {
+export function computerContinuationContext(snapshot: {observedAt:number;state:any}|undefined,trace: Array<any> = [],previousCommand?:string,previousAction?:import("../../automation/computer-use").ComputerLastAction,targetApp?:{id:string;name:string}) {
  if(!snapshot)return '';
  const s=snapshot.state;
  const short=(v:unknown)=>typeof v==='string'?v.slice(0,500):undefined;
@@ -7,6 +7,8 @@ export function computerContinuationContext(snapshot: {observedAt:number;state:a
   ...(typeof previousCommand==='string'?{previousCommand:previousCommand.slice(0,2000)}:{}),
   // What the previous command actually did, so "again"/"อีก" can refer to it.
   ...(previousAction&&!previousAction.blocked?{previousAction:{kind:previousAction.kind,...(previousAction.label?{label:short(previousAction.label)}:{}),...(previousAction.role?{role:short(previousAction.role)}:{}),...(previousAction.key?{key:previousAction.key}:{}),...(previousAction.direction?{direction:previousAction.direction}:{})}}:{}),
+  // The last approved application this task worked in: a withheld screen (GetPod in front) says "unapproved" instead.
+  ...(targetApp?{lastTargetApp:{id:short(targetApp.id),name:short(targetApp.name)}}:{}),
   observedAt:snapshot.observedAt,application:short(s.application),windowTitle:short(s.windowTitle),
   focusedControl:s.focusedControl?.sensitive?undefined:{label:short(s.focusedControl?.label),role:short(s.focusedControl?.role)},
   recentActions:trace.filter(e=>e.phase==='acted').slice(-5).map(e=>({application:short(e.application),action:e.action,key:e.key,outcome:e.outcome})),
