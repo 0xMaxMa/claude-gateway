@@ -41,9 +41,16 @@ describe("listDir", () => {
     makeDirs("alpha");
     const link = path.join(base, "projects-link");
     fs.symlinkSync(root, link);
+    const st = await fs.promises.statfs(root, { bigint: true });
+    const changed = { ...st, bfree: st.bfree - 1n, bavail: st.bavail - 1n };
+    const statfs = jest.spyOn(fs.promises, "statfs")
+      .mockResolvedValueOnce(st)
+      .mockResolvedValueOnce(changed);
     const rootResult = await listDir(link, rel(""));
     if (!rootResult.ok) throw new Error(rootResult.error);
-    const st = await fs.promises.statfs(root, { bigint: true });
+    await fs.promises.statfs(root, { bigint: true });
+    expect(statfs).toHaveBeenNthCalledWith(1, root, { bigint: true });
+    expect(statfs).toHaveBeenCalledTimes(2);
     expect(rootResult.value.filesystem).toEqual({
       total: Number(st.blocks * BigInt(st.bsize)),
       free: Number(st.bfree * BigInt(st.bsize)),
