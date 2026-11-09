@@ -1,12 +1,12 @@
 import { randomUUID } from 'crypto';
-import { describeVoiceError, providerHttpError } from '../voice/errors';
+import { describeVoiceError, isVoiceModelMismatch, providerHttpError } from '../voice/errors';
 import { VOICE_PREVIEW_TEXT, voicePreviewLanguages } from '../voice/preview';
 import { canonicalVoiceProvider, nativeVoiceModel } from '../voice/providers/model-ref';
 import { openRouterVoiceModels } from '../voice/providers/openrouter';
 import { geminiConnection, isGeminiTtsModel } from '../voice/providers/gemini';
 import { ttsProvider } from '../voice/providers/registry';
-import { resolveVoiceId } from '../voice/providers/voice-catalog';
-import { PCM16 } from '../voice/types';
+import { refuseAutoVoice, resolveVoiceId } from '../voice/providers/voice-catalog';
+import { PCM16, VoiceError } from '../voice/types';
 import { pcmToWav } from '../voice/wav';
 import { paxaConnection } from '../voice/providers/paxalabs-tts';
 import { isPaxaRealtimeSttModel } from '../voice/providers/paxalabs-live-stt';
@@ -331,17 +331,29 @@ export function voiceSettingsRouter(
     const abort = new AbortController();
     res.on('close', () => abort.abort());
     try {
-      const voice = await resolveVoiceId({ provider, voiceId, model });
       const signal = AbortSignal.any([abort.signal, AbortSignal.timeout(60000)]);
-      const chunks: Buffer[] = []; let size = 0;
-      for await (const chunk of ttsProvider({ provider, model }).synthesize({ text: (async function* () { yield VOICE_PREVIEW_TEXT[language]; })(), voiceId: voice, language, outputFormat: PCM16, signal })) {
-        size += chunk.bytes.length; if (size > 2 * 1024 * 1024) throw Error('Preview too large');
-        chunks.push(Buffer.from(chunk.bytes));
+      const speak = async (voice: string) => {
+        const chunks: Buffer[] = []; let size = 0;
+        for await (const chunk of ttsProvider({ provider, model }).synthesize({ text: (async function* () { yield VOICE_PREVIEW_TEXT[language]; })(), voiceId: voice, language, outputFormat: PCM16, signal })) {
+          size += chunk.bytes.length; if (size > 2 * 1024 * 1024) throw Error('Preview too large');
+          chunks.push(Buffer.from(chunk.bytes));
+        }
+        if (!size) throw Error('No audio');
+        return chunks;
+      };
+      const voice = await resolveVoiceId({ provider, voiceId, model });
+      let chunks: Buffer[];
+      try { chunks = await speak(voice); }
+      catch (error) {
+        // Auto previews what voice chat will use: after a refusal, the next Auto voice, tried once.
+        // A voice the user picked is never swapped; its refusal is reported as is.
+        if (voiceId.trim() || !(error instanceof VoiceError) || !isVoiceModelMismatch(error.code)) throw error;
+        refuseAutoVoice({ provider, model }, voice);
+        chunks = await speak(await resolveVoiceId({ provider, voiceId, model }));
       }
-      if (!size) throw Error('No audio');
       res.setHeader('Cache-Control', 'no-store');
       res.json({ mime: 'audio/wav', audio: pcmToWav(Buffer.concat(chunks)).toString('base64') });
-    } catch (error) { if (!res.destroyed) { const referenceId = randomUUID(); const diagnostic = describeVoiceError(error); console.warn(JSON.stringify({ event: 'Voice preview failed', agentId: id, provider, model, referenceId, ...diagnostic })); res.status(503).json({ error: diagnostic.message, referenceId, ...diagnostic }); } }
+    } catch (error) { if (!res.destroyed) { const referenceId = randomUUID(); const diagnostic = describeVoiceError(error); console.warn(JSON.stringify({ event: 'Voice preview failed', agentId: id, provider, model, referenceId, ...(error instanceof VoiceError ? { code: error.code } : {}), ...diagnostic })); res.status(503).json({ error: diagnostic.message, referenceId, ...diagnostic }); } }
   });
   return router;
 }

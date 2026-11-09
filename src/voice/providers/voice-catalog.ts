@@ -5,12 +5,17 @@ import { geminiConnection, GEMINI_VOICES } from './gemini';
 import { paxaConnection } from './paxalabs-tts';
 import { upstreamVoiceConnection } from './upstream';
 import { createHash } from 'crypto';
-export interface VoiceChoice { id: string; name: string; gender?: string; supported_model_ids?: string[] }
+export interface VoiceChoice { id: string; name: string; gender?: string; supported_model_ids?: string[]; requires_fine_tuning?: true }
 type Catalog = { key: () => string; list: (key: string) => Promise<VoiceChoice[]> };
 const gender = (input: unknown): string | undefined => {
   const value = typeof input === 'string' ? input.trim().toLowerCase() : undefined;
   return value==='m'||value==='male'||value==='masculine' ? 'male' : value==='f'||value==='female'||value==='feminine' ? 'female' : value==='neutral'||value==='gender_neutral' ? 'neutral' : undefined;
 };
+type ElevenLabsVoice = { voice_id: string; name: string; category?: string; labels?: { gender?: string }; fine_tuning?: { state?: Record<string, string> } };
+// ElevenLabs refuses a professional voice clone that has not finished fine-tuning for any model
+// (in-band `voice_not_fine_tuned`). Premade and generated voices report no state and still speak.
+const untuned = (v: ElevenLabsVoice): { requires_fine_tuning?: true } =>
+  v.category === 'professional' && !Object.values(v.fine_tuning?.state ?? {}).includes('fine_tuned') ? { requires_fine_tuning: true } : {};
 /** New TTS adapters register their catalog here; consumers share this provider-neutral interface. */
 const catalogs: Record<string, Catalog> = {
   'managed:elevenlabs': {
@@ -19,9 +24,9 @@ const catalogs: Record<string, Catalog> = {
       const { base, key } = upstreamVoiceConnection('elevenlabs', true);
       const response = await fetch(new URL('voices', base), { headers: { Authorization: `Bearer ${key}` }, signal: AbortSignal.timeout(10000), redirect: 'error' });
       if (!response.ok) throw await providerHttpError('VOICE', response);
-      const body = await response.json() as {voices?:Array<{voice_id:string;name:string;labels?:{gender?:string}}>};
+      const body = await response.json() as {voices?:ElevenLabsVoice[]};
       if (!Array.isArray(body.voices)) throw Error('VOICE_CATALOG_UNAVAILABLE');
-      return body.voices.filter(v=>typeof v.voice_id==='string'&&typeof v.name==='string').map(v=>({id:v.voice_id,name:v.name,gender:gender(v.labels?.gender)}));
+      return body.voices.filter(v=>typeof v.voice_id==='string'&&typeof v.name==='string').map(v=>({id:v.voice_id,name:v.name,gender:gender(v.labels?.gender),...untuned(v)}));
     },
   },
   'upstream:elevenlabs': {
@@ -30,9 +35,9 @@ const catalogs: Record<string, Catalog> = {
       const { base, key } = upstreamVoiceConnection();
       const response = await fetch(new URL('voices', base), { headers: { Authorization: `Bearer ${key}` }, signal: AbortSignal.timeout(10000), redirect: 'error' });
       if (!response.ok) throw await providerHttpError('VOICE', response);
-      const body = await response.json() as {voices?:Array<{voice_id:string;name:string;labels?:{gender?:string}}>};
+      const body = await response.json() as {voices?:ElevenLabsVoice[]};
       if (!Array.isArray(body.voices)) throw Error('VOICE_CATALOG_UNAVAILABLE');
-      return body.voices.filter(v=>typeof v.voice_id==='string'&&typeof v.name==='string').map(v=>({id:v.voice_id,name:v.name,gender:gender(v.labels?.gender)}));
+      return body.voices.filter(v=>typeof v.voice_id==='string'&&typeof v.name==='string').map(v=>({id:v.voice_id,name:v.name,gender:gender(v.labels?.gender),...untuned(v)}));
     },
   },
   elevenlabs: {
@@ -40,9 +45,9 @@ const catalogs: Record<string, Catalog> = {
     list: async key => {
       const response=await fetch('https://api.elevenlabs.io/v1/voices',{headers:{'xi-api-key':key},signal:AbortSignal.timeout(10000)});
       if(!response.ok)throw await providerHttpError('VOICE', response);
-      const body=await response.json() as {voices?:Array<{voice_id:string;name:string;labels?:{gender?:string}}>};
+      const body=await response.json() as {voices?:ElevenLabsVoice[]};
       if(!Array.isArray(body.voices))throw Error('VOICE_CATALOG_UNAVAILABLE');
-      return body.voices.filter(v=>typeof v.voice_id==='string'&&typeof v.name==='string').map(v=>({id:v.voice_id,name:v.name,...(gender(v.labels?.gender)?{gender:gender(v.labels?.gender)}:{})}));
+      return body.voices.filter(v=>typeof v.voice_id==='string'&&typeof v.name==='string').map(v=>({id:v.voice_id,name:v.name,...(gender(v.labels?.gender)?{gender:gender(v.labels?.gender)}:{}),...untuned(v)}));
     },
   },
   cartesia: {
@@ -106,14 +111,19 @@ export async function voiceChoices(config:{provider:string;voiceId:string;model?
 
 // Keep Auto stable for this gateway process, separately for each provider/account.
 const automatic = new Map<string, VoiceChoice>();
-export async function resolveVoiceId(config: {provider: string; voiceId: string; model?: string}): Promise<string> {
-  config = {...config, provider: canonicalVoiceProvider(config.provider)};
-  if (config.voiceId.trim()) return config.voiceId.trim();
+// Voices the provider refused for a model despite the catalog. Auto skips them for the rest of this process.
+const refused = new Set<string>();
+function autoKey(config: {provider: string; model?: string}): string {
   const catalog = catalogs[config.provider];
   if (!catalog) throw Error('VOICE_CATALOG_UNSUPPORTED');
   const credential = catalog.key();
   if (!credential) throw Error('VOICE_CATALOG_UNAVAILABLE');
-  const key = createHash('sha256').update(config.provider + '\0' + credential + '\0' + (config.model ?? '')).digest('hex');
+  return createHash('sha256').update(config.provider + '\0' + credential + '\0' + (config.model ?? '')).digest('hex');
+}
+export async function resolveVoiceId(config: {provider: string; voiceId: string; model?: string}): Promise<string> {
+  config = {...config, provider: canonicalVoiceProvider(config.provider)};
+  if (config.voiceId.trim()) return config.voiceId.trim();
+  const key = autoKey(config);
   const selected = automatic.get(key);
   if (selected) return selected.id;
   const allVoices = await voiceChoices(config);
@@ -121,9 +131,18 @@ export async function resolveVoiceId(config: {provider: string; voiceId: string;
   const voices = allVoices.filter(v => !v.supported_model_ids || (model && v.supported_model_ids.includes(model)));
   // Catalog ordering can change between requests. Sort IDs instead of picking
   // whichever voice the provider happens to return first.
-  const choice = voices.filter(v => v.id.trim()).slice().sort((a,b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0)[0];
+  const choice = voices.filter(v => v.id.trim() && !v.requires_fine_tuning && !refused.has(key + '\0' + v.id)).slice().sort((a,b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0)[0];
   if (!choice) throw Error('VOICE_CATALOG_UNAVAILABLE');
   if (automatic.size >= 100) automatic.delete(automatic.keys().next().value!);
   automatic.set(key, choice);
   return choice.id;
+}
+/** Auto picked a voice the provider then refused for this model: never pick it again in this process.
+ * Only for an Auto selection; a voice the user chose is reported, not replaced. */
+export function refuseAutoVoice(config: {provider: string; model?: string}, voiceId: string): void {
+  config = {...config, provider: canonicalVoiceProvider(config.provider)};
+  const key = autoKey(config);
+  if (refused.size >= 500) refused.delete(refused.values().next().value!);
+  refused.add(key + '\0' + voiceId);
+  if (automatic.get(key)?.id === voiceId) automatic.delete(key);
 }

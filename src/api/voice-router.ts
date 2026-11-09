@@ -1,5 +1,5 @@
 import { requireManagedVoiceCredit } from '../voice/managed-quota';
-import { describeVoiceError } from '../voice/errors';
+import { describeVoiceError, isVoiceModelMismatch } from '../voice/errors';
 import { Router, Request, Response } from 'express';
 import { IncomingMessage } from 'http';
 import { Duplex } from 'stream';
@@ -14,7 +14,7 @@ import { resolveOrchestrationConfig } from '../orchestration/config';
 import { sttProvider, ttsProvider } from '../voice/providers/registry';
 import { VoiceSession } from '../voice/session';
 import { decodeVoiceFrame } from '../voice/protocol';
-import { voiceChoices, resolveVoiceId } from '../voice/providers/voice-catalog';
+import { voiceChoices, resolveVoiceId, refuseAutoVoice } from '../voice/providers/voice-catalog';
 import { VoiceReplays } from '../voice/replay';
 import { hasSpokenWords, PCM16 } from '../voice/types';
 
@@ -201,6 +201,8 @@ export class VoiceApi {
       let reconnecting = false;
       let executionTaskId:string|undefined;
       let speechTarget:{taskId?:string; pause?:Promise<string|undefined>}|undefined;
+      // The Auto voice this socket speaks with, so a provider refusal can move Auto on. Unset by an explicit choice.
+      let autoVoice:{tts:typeof voice.tts;voiceId:string}|undefined;
       // The pause on first words is provisional: speech that yields no command resumes the task.
       const release=(target:typeof speechTarget)=>{
         if(target?.taskId&&target.pause)void target.pause.then(pauseId=>pauseId?runner.releaseVoicePause(ticket.sessionId,ticket.scope.principalId,target.taskId!,pauseId):undefined)
@@ -222,6 +224,7 @@ export class VoiceApi {
           const diagnostic = { ...describeVoiceError(message.code), ...(typeof message.retryable === 'boolean' ? { retryable: message.retryable } : {}) };
           message = { ...message, ...diagnostic, referenceId };
           console.warn(JSON.stringify({ ts: new Date().toISOString(), level: 'warn', event: 'Voice request failed', agentId: ticket.agentId, sessionId: ticket.sessionId, code: message.code, operation: typeof message.code === 'string' && /^(STT|TTS)_/.test(message.code) ? message.code.slice(0, 3).toLowerCase() : undefined, referenceId, ...diagnostic, stt: voice.stt, tts: { provider: voice.tts.provider, model: voice.tts.model } }));
+          if (autoVoice && String(message.code).startsWith('TTS_') && isVoiceModelMismatch(message.code)) void nextAutoVoice();
         }
         if (ws.readyState === WebSocket.OPEN) {
           if (message.reconnect === true) {
@@ -263,6 +266,20 @@ export class VoiceApi {
       this.sessions.set(ticket.voiceSessionId, { session, socket: ws, ticket });
       let started = false, playbackReady = false, hangup = false;
       let selectedGender: string | undefined;
+      // Auto's voice was refused for this model: later replies use the next Auto voice. The failed reply is not re-spoken.
+      const nextAutoVoice = async () => {
+        const refused = autoVoice;
+        if (!refused) return;
+        try {
+          refuseAutoVoice(refused.tts, refused.voiceId);
+          const voiceId = await resolveVoiceId(refused.tts);
+          if (autoVoice !== refused || ws.readyState !== WebSocket.OPEN) return;
+          autoVoice = { tts: refused.tts, voiceId };
+          session.setVoice(voiceId);
+          selectedGender = (await voiceChoices(refused.tts).catch(() => [])).find(choice => choice.id === voiceId)?.gender;
+          send({ type: 'voice.configured', voice_id: voiceId });
+        } catch { /* No other Auto voice: the next reply reports the same refusal. */ }
+      };
       let unsubscribe: (() => void) | undefined;
       let alive = true;
       let catchingUp = false, resumeFailed = false;
@@ -303,6 +320,7 @@ export class VoiceApi {
                 const choice = (await voiceChoices(voice.tts)).find(choice => choice.id === control.voice_id);
                 if (typeof control.voice_id !== 'string' || !choice) throw new Error('INVALID_CONTROL');
                 selectedGender = choice.gender;
+                autoVoice = undefined;
                 session.setVoice(control.voice_id);
                 send({ type: 'voice.configured', voice_id: control.voice_id });
               }
@@ -313,6 +331,7 @@ export class VoiceApi {
                   const tts = await runner.voiceTts(ticket.scope, voice.tts);
                   const voiceId = await resolveVoiceId(tts);
                   session.setVoice(voiceId);
+                  if (!tts.voiceId.trim()) autoVoice = { tts, voiceId };
                   selectedGender = (await voiceChoices(tts).catch(() => [])).find(choice => choice.id === voiceId)?.gender;
                   send({ type: 'voice.configured', voice_id: voiceId });
                 } catch { send({ type: 'voice.error', code: 'TTS_UNAVAILABLE' }); }
@@ -335,6 +354,7 @@ export class VoiceApi {
               const choices = await voiceChoices(voice.tts);
               if (!choices.some(choice => choice.id === control.voice_id)) throw new Error('INVALID_CONTROL');
               selectedGender = choices.find(choice => choice.id === control.voice_id)?.gender;
+              autoVoice = undefined;
               session.setVoice(control.voice_id);
               send({ type: 'voice.configured', voice_id: control.voice_id }); break;
             }

@@ -24,6 +24,7 @@ const descriptions: Record<Category, [string, boolean]> = {
   no_speech: ['No speech was recognized. Please speak again.', true],
   unknown: ['The voice request failed without a recognized diagnostic. Use the reference ID when reporting this problem.', false],
 };
+const VOICE_MODEL_MISMATCH_MESSAGE = 'This voice cannot be used with the selected speech model. Choose another voice in voice settings.';
 // Explicit provider codes only. Never infer causes from free-form messages.
 const providerCodes: Record<string, Category> = {
   insufficient_credits: 'payment', insufficient_balance: 'payment', payment_required: 'payment',
@@ -33,6 +34,13 @@ const providerCodes: Record<string, Category> = {
   unsupported_language: 'language', language_not_supported: 'language',
   model_not_found: 'model', voice_not_found: 'model', model_not_supported: 'model',
 };
+// The voice exists but this model cannot speak with it. Kept distinct in the code so the message
+// can point at the voice and logs can tell it from a missing model, without any provider body.
+const voiceModelCodes = new Set(['voice_not_fine_tuned']);
+const VOICE_MODEL_MISMATCH = '_VOICE_MODEL_MISMATCH';
+export function isVoiceModelMismatch(code: unknown): boolean {
+  return typeof code === 'string' && code.includes(VOICE_MODEL_MISMATCH + '_REASON_MODEL');
+}
 function object(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === 'object' ? value as Record<string, unknown> : {};
 }
@@ -47,6 +55,8 @@ export function providerVoiceError(prefix: 'STT' | 'TTS' | 'VOICE', status?: num
       return typeof violation.quotaId === 'string' && /(?:Requests|Tokens)PerDay(?:Per|$|-)/.test(violation.quotaId);
     });
   });
+  if (!dailyQuota && candidates.some(v => typeof v === 'string' && voiceModelCodes.has(v.toLowerCase())))
+    return new VoiceError(`${prefix}_PROVIDER_ERROR${status ? `_HTTP_${status}` : ''}${VOICE_MODEL_MISMATCH}_REASON_MODEL`);
   const category = dailyQuota ? 'daily_quota' : candidates.map(v => typeof v === 'string' && Object.prototype.hasOwnProperty.call(providerCodes, v.toLowerCase()) ? providerCodes[v.toLowerCase()] : undefined).find(Boolean);
   return new VoiceError(`${prefix}_PROVIDER_ERROR${status ? `_HTTP_${status}` : ''}${category ? `_REASON_${category.toUpperCase()}` : ''}`);
 }
@@ -100,7 +110,7 @@ export function describeVoiceError(error: unknown) {
     else if (/PROVIDER_ABORTED|AbortError/.test(code)) category = 'cancelled';
     else if (/INVALID_SPEECH_AUDIO|INCOMPLETE|INVALID_RESPONSE|INVALID_PROVIDER_MESSAGE|DECODE|UNSUPPORTED_AUDIO_FORMAT|No audio/.test(code)) category = 'invalid_response';
   }
-  const [message, retryable] = descriptions[category];
+  const [message, retryable] = isVoiceModelMismatch(code) ? [VOICE_MODEL_MISMATCH_MESSAGE, false] : descriptions[category];
   return { category, message: message + (httpStatus ? ` (HTTP ${httpStatus})` : ''), retryable, ...(httpStatus ? { httpStatus } : {}) };
 }
 
