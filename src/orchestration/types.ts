@@ -73,6 +73,9 @@ export interface TaskSnapshot {
   automationSession?: import("./tasks/automation-session").AutomationSession;
   /** agentHandoff: the agent's one command for a handed-off utterance (TaskRevision.agentHandoffInputId). */
   executionControl?: {id:string;action:'pause'|'revise'|'resume';revision:number;phase:'pending'|'applied'|'paused'|'blocked';requestedAt:number;agentHandoff?:true};
+  /** The agent's commands on this user-controlled run since the user's own last command or answer (agentHandoff
+   *  revisions); it caps the parked-round wakes (PARKED_WAKE_LIMIT). */
+  agentCommands?: number;
   /** Direct user commands typed while a user-controlled computer/browser round is busy; delivered verbatim, FIFO. */
   queuedCommands?: Array<{id:string;text:string;at:number}>;
   /** What each Browser/Computer round actually did, newest last; bounded for later summaries. */

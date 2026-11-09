@@ -66,6 +66,8 @@ export interface ComputerProgress {
 export const NATIVE_PHASE=/^[a-z_]{1,40}$/;
 /** A bounded diagnostic code from a Jev error; anything else is dropped. */
 export const jevValidationReason=(error:unknown)=>error instanceof JevError&&typeof error.metadata.validationReason==='string'&&/^[A-Z][A-Z_]{0,39}$/.test(error.metadata.validationReason)?error.metadata.validationReason:undefined;
+/** A decision answer that came back but could not be used (wrong keys, an unknown choice): asking again may work. */
+export const unusableDecision=(error:unknown)=>error instanceof JevError?error.code==='INVALID_RESPONSE':error instanceof Error&&error.message==='INVALID_DECISION';
 export interface ComputerUseDependencies {
  interruptSignal?:AbortSignal;
  call(name:string,args:Record<string,unknown>,signal:AbortSignal):Promise<unknown>;
@@ -501,10 +503,23 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
      // browser-use, after a confirmed action).
      const readRequest=input.yieldAfterInteraction&&input.readRequest&&!(goalRun&&(steps>0||resumed));
      const command=buildComputerCommand(state,goal.goal,targets,criteria,context,input.yieldAfterInteraction,readRequest,input.agentCommand||goalRun,goalRun);
-     const answer=await interruptible(s=>deps.evaluate({requestId,...command.request},s),runSignal,deps.interruptSignal);
-     check();checkInterruption(deps.interruptSignal);evaluations++;
-     const selected=readComputerCommand(command,answer.answers);
-     emit('decided',{...(targets.has(selected.action)?summary(targets.get(selected.action)!):{}),requestId,confidence:selected.confidence,elapsedMs:Date.now()-started});
+     const decide=async(id:string)=>{
+      const answer=await interruptible(s=>deps.evaluate({requestId:id,...command.request},s),runSignal,deps.interruptSignal);
+      check();checkInterruption(deps.interruptSignal);evaluations++;
+      return {id,answer,selected:readComputerCommand(command,answer.answers)};
+     };
+     // A goal run that has acted asks once more when the decision model's answer could not be used: one bad answer
+     // does not end the round. Pod-jinawong 2.1.12, task 059a5cac rev 3: after 4 actions the answer had the wrong
+     // keys (JEV_INVALID_RESPONSE) and the round stopped for the user with "Done: pressed the enter key".
+     let decision:Awaited<ReturnType<typeof decide>>;
+     try{decision=await decide(requestId);}
+     catch(error){
+      if(!(goalRun&&steps>0&&unusableDecision(error)))throw error;
+      const retryId=randomUUID();emit('evaluating',{requestId:retryId,decisionMode:mode(),reason:'DECISION_RETRY'});
+      decision=await decide(retryId);
+     }
+     const {answer,selected}=decision;
+     emit('decided',{...(targets.has(selected.action)?summary(targets.get(selected.action)!):{}),requestId:decision.id,confidence:selected.confidence,elapsedMs:Date.now()-started});
      // The agent's opening text for a session the user drives ("open a session, wait
      // for the user") is no command: anything but an action just means ready.
      if(input.sessionStart&&!(goalRun&&steps>0)&&!targets.has(selected.action)){await capture();return {result:waitForCommand('SESSION_READY')};}
