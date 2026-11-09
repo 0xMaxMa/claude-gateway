@@ -1,4 +1,4 @@
-import { voiceChoices, resolveVoiceId } from '../../../src/voice/providers/voice-catalog';
+import { voiceChoices, resolveVoiceId, refuseAutoVoice } from '../../../src/voice/providers/voice-catalog';
 afterEach(()=>jest.restoreAllMocks());
 test('ElevenLabs catalog sanitizes metadata and caches real voices without inventing missing defaults',async()=>{
  const old=process.env.ELEVENLABS_API_KEY;process.env.ELEVENLABS_API_KEY='catalog-test';
@@ -42,4 +42,41 @@ test('Gemini catalog retains documented genders for every voice', async () => {
   expect(voices.filter(v=>v.gender==='male')).toHaveLength(16);
   expect(voices).toEqual(expect.arrayContaining([{id:'Kore',name:'Kore',gender:'female'},{id:'Puck',name:'Puck',gender:'male'}]));
  } finally { if(previous===undefined) delete process.env.GEMINI_API_KEY; else process.env.GEMINI_API_KEY=previous; }
+});
+
+// Shapes from the managed ElevenLabs /voices catalog: a professional clone with no finished
+// fine-tune (refused in-band with voice_not_fine_tuned), a tuned professional clone, a generated voice.
+const untunedCatalog = {voices:[
+ {voice_id:'7XW5JhaNn90bnFojQ5DA',name:'Mali',category:'professional',fine_tuning:{state:{}}},
+ {voice_id:'MYZYcGOqrkYQcwDunXl7',name:'HammyTH',category:'professional',fine_tuning:{state:{eleven_v4:'fine_tuned'}}},
+ {voice_id:'nealpwJT5tCyJFKDzEq8',name:'Aom',category:'generated',fine_tuning:{state:{}}},
+]};
+test('Auto skips a professional voice that has not finished fine-tuning, but still lists it and keeps an explicit choice', async () => {
+ const old=process.env.ELEVENLABS_API_KEY;process.env.ELEVENLABS_API_KEY='untuned-test';
+ jest.spyOn(global,'fetch').mockResolvedValue({ok:true,json:async()=>untunedCatalog} as Response);
+ try {
+  const config={provider:'elevenlabs',voiceId:'',model:'eleven_v3_conversational'};
+  expect(await resolveVoiceId(config)).toBe('MYZYcGOqrkYQcwDunXl7');
+  expect(await voiceChoices(config)).toEqual([
+   {id:'7XW5JhaNn90bnFojQ5DA',name:'Mali',requires_fine_tuning:true},
+   {id:'MYZYcGOqrkYQcwDunXl7',name:'HammyTH'},
+   {id:'nealpwJT5tCyJFKDzEq8',name:'Aom'},
+  ]);
+  expect(await resolveVoiceId({...config,voiceId:'7XW5JhaNn90bnFojQ5DA'})).toBe('7XW5JhaNn90bnFojQ5DA');
+ } finally { if(old===undefined)delete process.env.ELEVENLABS_API_KEY;else process.env.ELEVENLABS_API_KEY=old; }
+});
+test('a refused Auto voice moves Auto to the next stable voice for that model only, and never replaces an explicit choice', async () => {
+ const old=process.env.ELEVENLABS_API_KEY;process.env.ELEVENLABS_API_KEY='refused-test';
+ jest.spyOn(global,'fetch').mockResolvedValue({ok:true,json:async()=>untunedCatalog} as Response);
+ try {
+  const config={provider:'elevenlabs',voiceId:'',model:'eleven_v3_conversational'};
+  expect(await resolveVoiceId(config)).toBe('MYZYcGOqrkYQcwDunXl7');
+  refuseAutoVoice(config,'MYZYcGOqrkYQcwDunXl7');
+  expect(await resolveVoiceId(config)).toBe('nealpwJT5tCyJFKDzEq8');
+  expect(await resolveVoiceId(config)).toBe('nealpwJT5tCyJFKDzEq8');
+  expect(await resolveVoiceId({...config,model:'eleven_flash_v2_5'})).toBe('MYZYcGOqrkYQcwDunXl7');
+  expect(await resolveVoiceId({...config,voiceId:'MYZYcGOqrkYQcwDunXl7'})).toBe('MYZYcGOqrkYQcwDunXl7');
+  refuseAutoVoice(config,'nealpwJT5tCyJFKDzEq8');
+  await expect(resolveVoiceId(config)).rejects.toThrow('VOICE_CATALOG_UNAVAILABLE');
+ } finally { if(old===undefined)delete process.env.ELEVENLABS_API_KEY;else process.env.ELEVENLABS_API_KEY=old; }
 });
