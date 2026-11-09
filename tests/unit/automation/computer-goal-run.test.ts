@@ -444,10 +444,12 @@ describe('a goal run offers READ_REQUEST only before it has acted',()=>{
   expect(r.trace.events.some(e=>e.reason==='READ_REQUEST')).toBe(false);
  });
  test('a later READ_REQUEST answer is rejected as invalid, never taken as a read request',async()=>{
-  const f=fixture([desktop,terminal],[{pick:'open:'+TERMINAL.id},{pick:'READ_REQUEST'}]);
+  // Unusable after an action, so asked once more (DECISION_RETRY); the same answer again stops the run.
+  const f=fixture([desktop,terminal],[{pick:'open:'+TERMINAL.id},{pick:'READ_REQUEST'},{pick:'READ_REQUEST'}]);
   const r=await spawn(f,'open Terminal and run which htop');
   expect(f.actions()).toEqual([{kind:'open',app_id:TERMINAL.id}]);
   expect(r.trace.events.some(e=>e.reason==='READ_REQUEST')).toBe(false);
+  expect(r.trace.events.filter(e=>e.reason==='DECISION_RETRY')).toHaveLength(1);
   expect(waited(r)).toBe('INVALID_DECISION');
  });
  test('the first decision still reads the screen: READ_REQUEST ends the run with nothing pressed',async()=>{

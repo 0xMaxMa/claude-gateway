@@ -85,7 +85,10 @@ const REASONS:Record<string,string>={
  JEV_MODEL_UNAVAILABLE:'The decision model is not available.',
  JEV_PROVIDER_UNAVAILABLE:'The decision model could not be reached.',
  JEV_INVALID_RESPONSE:'The decision model gave an answer that could not be used.',
+ INVALID_DECISION:'The decision model gave an answer that could not be used.',
 };
+/** A round's wait on its own failed decision (computer-use: `JEV_<code>` or INVALID_DECISION): it stopped, nothing was done. */
+const DECISION_FAILURE=/^(?:JEV_[A-Z_]+|INVALID_DECISION)$/;
 /** Native phases at which the click point belonged to another window or process: a real cover. */
 const COVERED_PHASES=new Set(['pointer_hit_other_window','pointer_check_hit','raw_pointer_occluded']);
 type PointerRefusal='covered'|'hover'|'nested_scroll';
@@ -250,6 +253,8 @@ function outcomeText(report:ComputerTaskReport,context:{handedOff?:boolean}):str
  if((report.steps>1||stoppedAfterAction)&&waiting&&HINTS[waiting])return `Not finished: ${actions} done, then ${hint(waiting,report)}`;
  // A round that ended blocked or failed is never Done, whatever its last action was.
  if(['blocked','failed','cancelled'].includes(report.status)&&report.steps>0)return `Not finished: ${actions} done, then it stopped. ${computerReasonText(report.reason)}`;
+ // Nor one whose next decision failed after its actions (pod-jinawong 2.1.12, task 059a5cac rev 3: "Done: pressed the enter key").
+ if(waiting&&DECISION_FAILURE.test(waiting)&&report.steps>0)return `Not finished: ${actions} done, then it stopped. ${computerReasonText(waiting)}`;
  if(report.lastAction&&!report.lastAction.blocked&&report.steps>0)return `Done: ${computerActionText(report.lastAction)}. Send the next command.`;
  if(report.steps>0)return 'Done: the action was sent. Send the next command.';
  // An open the computer never confirmed names the app (pod-jinawong r10, task 457a4930 rev3: TradingView's open).

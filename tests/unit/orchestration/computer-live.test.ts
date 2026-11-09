@@ -58,7 +58,7 @@ describe('computer live runs (the device overlay label)',()=>{
   expect(view({})).toEqual({taskId:'t',phase:'acting',label:'Opening Spotify',step:2,updatedAt:9});
   for(const state of ['completed','failed','cancelled'])expect(view({state}).phase).toBe('ended');
   // Nobody is deciding about a settled round any more: it is the user's turn, whoever controls it.
-  expect(view({state:'waiting_input',automationController:'agent'})).toMatchObject({phase:'waiting_for_user',reason:'next_command',label:'Your turn: reply in GetPod'});
+  expect(view({state:'waiting_input',automationController:'agent'})).toMatchObject({phase:'waiting_for_user',reason:'next_command',label:'Ready for your next command'});
   expect(view({state:'waiting_input',automationController:'user'})).toMatchObject({phase:'waiting_for_user',reason:'next_command'});
   expect(view({state:'waiting_input',automationController:'agent',pendingQuestion:{questionId:'q',text:'Which song?',revision:1}})).toMatchObject({phase:'waiting_for_user',reason:'question',label:'Answer the question in GetPod'});
   expect(view({state:'needs_reconciliation'})).toMatchObject({phase:'waiting_for_user',reason:'check'});

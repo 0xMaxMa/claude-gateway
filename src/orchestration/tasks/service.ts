@@ -627,6 +627,8 @@ export class TaskService {
     if(command.action==='revise')delete task.pendingQuestion;
     this.store.run('INSERT INTO task_revisions VALUES(?,?,?)',taskId,task.revision,JSON.stringify({...previous,requestBrowserConsent:command.action!=='pause',revision:task.revision,instructions,mode:'interrupt_and_resume',computerInputs:command.action==='revise'?undefined:previous.computerInputs,answers:command.action==='revise'?undefined:previous.answers,browserRecoveryCount:0,guidance:undefined,guidanceBasis:undefined,...(command.action==='revise'?{directCommand:true}:{}),agentHandoffInputId}));
     task.executionControl={id:command.id,action:command.action,revision:task.revision,phase:task.activeAttemptId?'pending':command.action==='pause'?'paused':'pending',requestedAt:Date.now(),...(agentHandoffInputId?{agentHandoff:true as const}:{})};
+    // The agent's commands since the user's own last one cap its parked-round wakes (PARKED_WAKE_LIMIT).
+    if(agentHandoffInputId)task.agentCommands=(task.agentCommands??0)+1;else delete task.agentCommands;
     task.state=task.activeAttemptId?'interrupting':command.action==='pause'?'waiting_input':'queued';
     task.latestProgress={source:'runtime',observedAt:Date.now(),text:((task.activeAttemptId?'Control accepted; settling the current action before applying it.':command.action==='pause'?'Automation paused.':'Control accepted; resuming from a fresh observation.')+dropped).slice(0,4096)};
     this.store.saveTask(task,task.stateVersion);
@@ -836,7 +838,7 @@ export class TaskService {
         this.store.appendEvent(conversationId, 'input.accepted', { inputId });
       }
       this.handleAnswerInput(conversationId, inputId);
-      const answered = this.answerOwned(conversationId, taskId, questionId, answer, inputId);
+      const answered = this.answerOwned(conversationId, taskId, questionId, answer, inputId, undefined, undefined, true);
       this.store.appendEvent(conversationId, 'task.user_answer', { taskId, questionId, principalId, inputId, answerHash: payloadHash(answer) }, taskId);
       return answered;
     });
@@ -853,7 +855,7 @@ export class TaskService {
   private assertQuestion(task: TaskSnapshot, questionId: string): void {
     if (task.state !== 'waiting_input' || task.pendingQuestion?.questionId !== questionId || task.pendingQuestion.revision !== task.revision) throw new OrchestrationError('STALE_QUESTION');
   }
-  private answerOwned(conversationId: string, taskId: string, questionId: string, answer: string, inputId: string, prepared?:TaskRevision['answers'], computerInputs?:TaskRevision['computerInputs']): TaskSnapshot {
+  private answerOwned(conversationId: string, taskId: string, questionId: string, answer: string, inputId: string, prepared?:TaskRevision['answers'], computerInputs?:TaskRevision['computerInputs'], byUser=false): TaskSnapshot {
     const task = this.owned(taskId, conversationId), version = task.stateVersion;
     this.assertQuestion(task, questionId);
     // Persist early answers, while fencing scheduling until the old attempt really ends.
@@ -866,6 +868,8 @@ export class TaskService {
     this.store.run('INSERT INTO task_revisions VALUES(?,?,?)', taskId, task.revision, JSON.stringify({ ...previous, ...(computerInputs!==undefined?{computerInputs}:{}), revision: task.revision,
       answers: [...(previous.answers ?? []), ...(prepared??[]), { questionId, text: answer, inputId, ...(browserFieldLabel ? {browserFieldLabel} : {}),...(computerField?{computerFieldLabel:computerField.label,computerApplication:computerField.application,computerWindowTitle:computerField.windowTitle,computerFieldRole:computerField.role}:{}) }], originatingInputId: inputId }));
     task.pendingQuestion = undefined;
+    // The user's own answer starts a fresh count of the agent's commands (PARKED_WAKE_LIMIT).
+    if (byUser) delete task.agentCommands;
     task.state = task.activeAttemptId ? (task.gatewayTarget ? 'running' : 'interrupting') : 'queued';
     this.store.saveTask(task, version);
     this.store.enqueue(task.activeAttemptId && !task.gatewayTarget ? 'interrupt' : 'schedule', `answer:${questionId}`, { taskId });
@@ -1244,6 +1248,7 @@ export class TaskService {
     if (!task.queuedCommands) delete task.queuedCommands;
     if (task.state === 'completed') { delete task.result; delete task.computerReport; delete task.browserReport; delete task.gatewayDispatch; }
     task.executionControl = { id: next.id, action: 'revise', revision: task.revision, phase: 'pending', requestedAt: Date.now() };
+    delete task.agentCommands;
     task.state = 'queued';
     const done = task.latestProgress?.text;
     task.latestProgress = { source: 'runtime', observedAt: Date.now(), text: [done, `Running queued command: ${JSON.stringify(next.text.slice(0, 120))}${rest.length ? ` (${rest.length} more waiting)` : ''}.`].filter(Boolean).join('\n').slice(0, 4096) };

@@ -75,7 +75,8 @@ const WAIT_LABEL:Record<ComputerWaitReason,string>={
  paused:'Paused',
  continue:'Paused: reply in GetPod to continue',
  check:'Check the last action in GetPod',
- next_command:'Your turn: reply in GetPod',
+ // Nothing was asked: the round is over and the session takes the next command. Never "reply" (pod-jinawong 2.1.12).
+ next_command:'Ready for your next command',
 };
 const DECIDING='Deciding the next step';
 /** Whether a settled round (waiting_input, needs_reconciliation) waits for the agent or for the user, from

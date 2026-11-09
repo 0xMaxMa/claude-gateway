@@ -66,13 +66,21 @@ test('a settled round waits for the agent while its turn runs or is due, then fo
   expect(view()).toMatchObject({ phase: 'thinking' });
   // The turn ended without a next command: the user's turn.
   active.clear();
-  expect(view()).toMatchObject({ phase: 'waiting_for_user', reason: 'next_command', label: 'Your turn: reply in GetPod' });
+  expect(view()).toMatchObject({ phase: 'waiting_for_user', reason: 'next_command', label: 'Ready for your next command' });
   // A queued input (the user's own message, a question review) is agent work again.
   queued = true;
   expect(view()).toMatchObject({ phase: 'thinking' });
   queued = false;
   // A notice that cannot wake the agent (a round of the user's own command, revision 2) does not count.
-  task = { ...parked, revision: 2 }; notice = true;
+  const userCommand = { id: 'u', action: 'revise', revision: 2, phase: 'applied', requestedAt: 1 };
+  task = { ...parked, revision: 2, executionControl: userCommand }; notice = true;
+  expect(view()).toMatchObject({ phase: 'waiting_for_user', reason: 'next_command' });
+  // The agent's own command for it (agentHandoff) parks like its goal run: the agent decides, not the user.
+  // Pod-jinawong 2.1.12, task 059a5cac rev 3.
+  task = { ...parked, revision: 2, executionControl: { ...userCommand, agentHandoff: true }, agentCommands: 1 };
+  expect(view()).toMatchObject({ phase: 'thinking', label: 'Deciding the next step' });
+  // Past the agent's command cap it no longer wakes for the next command.
+  task = { ...parked, revision: 2, executionControl: { ...userCommand, agentHandoff: true }, agentCommands: 3 };
   expect(view()).toMatchObject({ phase: 'waiting_for_user', reason: 'next_command' });
   // A question is a real wait even while the agent runs.
   task = { ...parked, pendingQuestion: { questionId: 'q', text: 'Which song?', revision: 1 } }; active.set('sess-1', {});
