@@ -297,7 +297,7 @@ export class ComputerTaskAdapter implements GatewayTaskAdapter {
    },AbortSignal.any([signal,AbortSignal.timeout(COMPUTER_VISION_RUN_TIMEOUT_MS+5000)]));};
    if(vision&&'goal' in input&&(!reply||reply==='YES')){
     const resumed=reply==='YES'&&previousContext!.goalRun===true;
-    const outcome=await visionRun(vision,{goal:reply==='YES'?asked!.command:input.goal,revision:t.revision,...(contextNote?{interactionContext:contextNote}:{}),
+    const outcome=await visionRun(vision,{goal:reply==='YES'?asked!.command:input.goal,revision:t.revision,preparedInputs,...(contextNote?{interactionContext:contextNote}:{}),
      // The Accessibility semantics: the agent's own command is its authorization and control returns after each action;
      // a goal run or a handed-off command judges each action's impact and keeps going to its goal.
      impact:t.automationController!=='agent',yieldAfterAction:!(sessionStart||agentHandoff||answeredGoal||resumed),...(reply==='YES'&&asked!.target?{confirmedTarget:asked!.target}:{})});
@@ -308,7 +308,7 @@ export class ComputerTaskAdapter implements GatewayTaskAdapter {
    // A goal round Accessibility found no control to act on (the model chose BLOCKED; Spotify's own window shows only window
    // buttons and menus) continues from the screenshot with raw input when visionFallback is on: the rest of the same goal,
    // with no action limit (its own round time and no-progress check end it), impact-gated, typing only text the instruction
-   // holds. Nothing that ran is replayed; the vision run is told what this round already did. Without raw input (or a
+   // holds or a value prepared for it (computerInputs). Nothing that ran is replayed; the vision run is told what this round already did. Without raw input (or a
    // capture) the round stops as before, saying why.
    // Pod-jinawong r8, task b0ba459d: "play bodyslam on Spotify" opened Spotify and stopped at NO_SUPPORTED_ACTION.
    // The same goes for a button the helper could not reach even after hovering it (TARGET_NOT_REACHED, GetPod Desktop
@@ -324,7 +324,7 @@ export class ComputerTaskAdapter implements GatewayTaskAdapter {
     const done=result.lastAction&&!result.lastAction.blocked?` Its last: ${computerActionText(result.lastAction)}.`:'';
     const why=stoppedOn==='TARGET_NOT_REACHED'?'then could not reach a button that only appears while the pointer is over it (nothing was clicked)':'then found no control it could use';
     const note=`Accessibility already took ${result.steps} action${result.steps===1?'':'s'} toward this goal in this round and ${why}.${done} Continue from the current screen; do not repeat what is done.`;
-    const outcome=await visionRun(fallback,{goal:input.goal,revision:t.revision,interactionContext:[contextNote,note].filter(Boolean).join('\n\n').slice(-8000),
+    const outcome=await visionRun(fallback,{goal:input.goal,revision:t.revision,preparedInputs,interactionContext:[contextNote,note].filter(Boolean).join('\n\n').slice(-8000),
      impact:t.automationController!=='agent',yieldAfterAction:false,literalText:true,approvedOnly:true},result);
     if('fallback' in outcome){
      // The Windows helper has no raw input yet: nothing for the user to turn on there.

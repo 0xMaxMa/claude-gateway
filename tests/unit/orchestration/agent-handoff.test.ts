@@ -308,3 +308,58 @@ test('a computer hand-off goal that reached its goal is not reported',async()=>{
   expect(f.prompts).toHaveLength(turns);
  }finally{await f.close();}
 });
+
+// Pod-jinawong r14, task f3042fe1 rev 5: the agent's command for a handed-off utterance failed; its notification stayed
+// pending and nobody told the user. It now wakes the agent once, report-only; the round says nothing itself.
+test('a computer hand-off command whose round ends (failed) wakes the agent once to report it',async()=>{
+ const f=await fixture('computer');try{
+  const applied=f.command(odd);
+  let sent=false;
+  f.onTurn(()=>{if(sent)return;sent=true;f.runtime.tasks.update(f.agentContext(applied.inputId),f.taskId,f.runtime.store.task(f.taskId)!.revision,'open Notion and type the story','when_ready');});
+  f.settle(gaveUpComputer());
+  await until(()=>sent);await f.idle();
+  const turns=f.prompts.length;f.heard.mockClear();
+  // No device is connected here: the gateway runs the agent's command and its round fails, as a real failure ends.
+  await until(()=>f.runtime.store.task(f.taskId)!.state==='failed');
+  await until(()=>f.prompts.length>turns);await f.idle();
+  expect(f.prompts.at(-1)).toContain('Your own command on automation task');
+  expect(f.prompts.at(-1)).toContain('has failed, and nobody has told the user yet');
+  expect(f.prompts.at(-1)).toContain('This turn is report-only');
+  expect(f.prompts).toHaveLength(turns+1);
+  // Live voice speaks that report (the agent's own reply), and only it.
+  expect(spoken(f.heard)).toEqual(['Opening it.']);f.heard.mockClear();
+  // Settling that ended round again speaks nothing and wakes nobody else (the notification is the one report).
+  const ended=f.runtime.store.task(f.taskId)!;
+  f.runtime.settleDirectRound(ended,{revision:ended.revision,inputId:ended.executionControl!.id,outcome:{type:'failed',failure:ended.failure!,computerReport:gaveUpComputer()}});
+  await new Promise(r=>setTimeout(r,50));await f.idle();
+  expect(f.heard).not.toHaveBeenCalled();
+  expect(f.prompts).toHaveLength(turns+1);
+ }finally{await f.close();}
+});
+
+// Pod-jinawong r14, task f3042fe1 rev 4: the user's answer to the agent's question ran on the task as a literal command.
+test('a reply to the agent\'s question goes to the agent, which may send it on as one command or end the task',async()=>{
+ const f=await fixture('computer');try{
+  const applied=f.command(odd);
+  f.onTurn(()=>{});
+  f.settle(gaveUpComputer());
+  await until(()=>f.prompts.length===1);await f.idle();
+  // The agent's turn asked the user something (follow_up asks_user, recorded with response.completed).
+  f.runtime.store.transaction(()=>f.runtime.store.appendEvent(f.runtime.store.task(f.taskId)!.conversationId,'response.completed',{responseId:randomUUID(),followUp:'asks_user'}));
+  const revision=f.runtime.store.task(f.taskId)!.revision;
+  const results:unknown[]=[];
+  f.onTurn(text=>{
+   if(!text.includes('answers the question you just asked'))return;
+   const reply=liveControlReceipt(f.runtime.store,results[0] as string)!;
+   try{f.runtime.tasks.update(f.agentContext(reply.inputId),f.taskId,revision,'open Notion and type the story','when_ready',undefined,[{application:'notion.id',label:'Page body',text:'Once upon a time.'}]);results.push('sent');}catch(error){results.push((error as {code?:string}).code);}
+  });
+  const reply=f.command('เอา ฝากนะ ทำไงอะ');results.push(reply.inputId);
+  expect(reply).toMatchObject({status:'needs_agent',code:'AGENT_QUESTION',taskId:f.taskId,revision});
+  await until(()=>results.length===2);await f.idle();
+  expect(results[1]).toBe('sent');
+  expect(f.prompts.at(-1)).toContain('เอา ฝากนะ ทำไงอะ');
+  // The agent's command carries the text it prepared; the user's own words never ran as a command.
+  expect(f.runtime.tasks.revision(f.taskId,revision+1)).toMatchObject({instructions:'open Notion and type the story',agentHandoffInputId:reply.inputId,computerInputs:[{application:'notion.id',label:'Page body',text:'Once upon a time.'}]});
+  expect(f.runtime.store.all('SELECT revision FROM task_revisions WHERE task_id=? AND json_extract(payload_json,\'$.instructions\')=?',f.taskId,'เอา ฝากนะ ทำไงอะ')).toEqual([]);
+ }finally{await f.close();}
+});

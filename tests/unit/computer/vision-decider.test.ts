@@ -1,5 +1,5 @@
 import {
-  COMPUTER_TOOLSET, VISION_MAX_IMAGES, axHints, chordKeys, mapComputerCall, rawCapabilities, runVisionComputerUse, supportsComputerToolset, visionModelDecider, visionRequestBody, withRecentImages,
+  COMPUTER_TOOLSET, VISION_MAX_IMAGES, axHints, chordKeys, literalTextAllowed, mapComputerCall, rawCapabilities, runVisionComputerUse, supportsComputerToolset, visionModelDecider, visionRequestBody, withRecentImages,
   type RawCapabilities, type VisionDependencies, type VisionScreenshot, type VisionTurn,
 } from '../../../src/automation/vision-decider';
 import { IMPACT_CRITERIA, IMPACT_QUESTION } from '../../../src/automation/computer-command';
@@ -535,6 +535,30 @@ describe('literal text for an Accessibility fallback', () => {
     const result=await runVisionComputerUse({goal:'continue in Spotify',approvedOnly:true},d.deps(m.decide),signal()) as any;
     expect(d.actions()).toHaveLength(0);
     expect(result).toMatchObject({status:'blocked',reason:'VISION_APPLICATION_NOT_APPROVED'});
+  });
+  // Pod-jinawong r14, task f3042fe1 rev 5: the fallback typed the title (in the goal), then refused the prepared
+  // 812-character story three times (VISION_TEXT_NOT_IN_GOAL): only the goal text counted.
+  test('a prepared input is typed whole; its text is shown to the model as data', async () => {
+    const story = 'Once upon a time, a small rabbit.\n\nThe end.';
+    const preparedInputs = [{ application: 'notion.id', label: 'Page body', text: story }];
+    const d = device({ at: () => ({ application: 'notion.id', windowTitle: 'Test story' }) }), m = model([{ name: 'type', input: { text: story } }, finish('done')]);
+    const result = await runVisionComputerUse({ goal: 'open Notion, create a new page titled "Test story" and type the story into the page body', literalText: true, approvedOnly: true, preparedInputs }, d.deps(m.decide), signal()) as any;
+    expect(result).toMatchObject({ status: 'succeeded', reason: 'GOAL_REACHED', steps: 1 });
+    expect(d.actions().map(a => a.text)).toEqual([story]);
+    const first: string = (m.seen[0][0] as any).content[0].text;
+    expect(first).toContain('<prepared_inputs>');expect(first).toContain(JSON.stringify(story));
+  });
+  test('the literal rule stays: part of a prepared input, another application\'s input or screen text is refused', async () => {
+    const preparedInputs = [{ application: 'notion.id', label: 'Page body', text: 'Once upon a time.' }, { application: 'com.apple.Notes', label: 'Body', text: 'Shopping list' }];
+    const d = device({ text: ['Recent: Paradise'], at: () => ({ application: 'notion.id' }) }), m = model([
+      { name: 'type', input: { text: 'Once upon' } }, { name: 'type', input: { text: 'Shopping list' } }, { name: 'type', input: { text: 'Paradise' } },
+    ]);
+    const result = await runVisionComputerUse({ goal: 'type the story in Notion', literalText: true, preparedInputs }, d.deps(m.decide), signal()) as any;
+    expect(d.actions()).toHaveLength(0);
+    expect(result).toMatchObject({ status: 'blocked', reason: 'VISION_TEXT_NOT_IN_GOAL', steps: 0 });
+    expect(literalTextAllowed('Once upon a time.', { goal: 'x', preparedInputs }, 'notion.id')).toBe(true);
+    expect(literalTextAllowed('Once upon a time.', { goal: 'x', preparedInputs }, 'com.apple.Notes')).toBe(false);
+    expect(literalTextAllowed('x', { goal: 'type x' }, 'notion.id')).toBe(true);
   });
   test('without literalText a primary vision run keeps its behavior', async () => {
     const d = device(), m = model([{ name: 'type', input: { text: 'Paradise' } }, finish('done')]);

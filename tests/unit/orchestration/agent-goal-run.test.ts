@@ -1,5 +1,5 @@
 import {DatabaseSync} from 'node:sqlite';
-import {agentGoalRun,agentGoalRunSql,agentGoalRunParked,agentGoalRunParkedSql,agentRound,parkedRoundCapped,PARKED_WAKE_LIMIT} from '../../../src/orchestration/tasks/automation-session';
+import {agentGoalRun,agentGoalRunSql,agentGoalRunParked,agentGoalRunParkedSql,agentRound,agentRoundEnded,agentRoundSql,parkedRoundCapped,PARKED_WAKE_LIMIT} from '../../../src/orchestration/tasks/automation-session';
 import type {TaskSnapshot} from '../../../src/orchestration/types';
 
 // The computer adapter (sessionStart) and the notification mailbox (the goal run's
@@ -86,5 +86,30 @@ test('agentGoalRunParked and its SQL twin agree on later computer rounds, hand-o
   // no command of revision 1 (none, older). Later revisions, computer only: none, older (an answer) and handoff.
   expect(counts.parked).toBe((2*2+3*2)*3);
   expect(counts.capped).toBe(2*2+3*2);
+ }finally{db.close();}
+});
+
+// Pod-jinawong r14, task f3042fe1 rev 5: the agent's handoff command failed and its notification stayed pending, since
+// only revision 1 counted as the agent's own run. agentRoundEnded (any agentRound, ended) wakes it to report.
+test('agentRoundEnded and its SQL twin (agentRoundSql) agree on every state, surface, controller, revision and command',()=>{
+ const db=new DatabaseSync(':memory:');
+ try{
+  const query=db.prepare(`SELECT (state IN ('completed','failed','needs_reconciliation') AND ${agentRoundSql('t')}) AS ended FROM (SELECT ? AS state,? AS snapshot_json) t`);
+  let ended=0;
+  for(const adapter of ['computer','browser'] as const)
+   for(const automationController of ['agent','user'] as const)
+    for(const revision of [1,2,5])
+     for(const control of ['none','user','handoff','older'] as const)
+      for(const state of ['completed','failed','needs_reconciliation','cancelled','waiting_input','running'] as const){
+       const executionControl=control==='none'?undefined:{id:'c',action:'revise',revision:control==='older'?revision-1:revision,phase:'applied',requestedAt:0,...(control==='handoff'?{agentHandoff:true}:{})};
+       const task={automationController,revision,state,gatewayTarget:{adapter,sessionId:'s',name:'n'},...(executionControl?{executionControl}:{})} as unknown as TaskSnapshot;
+       const value=Number((query.get(state,JSON.stringify(task)) as {ended:number|null}).ended);
+       expect({task,sql:value===1}).toEqual({task,sql:agentRoundEnded(task)});
+       if(value===1)ended++;
+      }
+  // User-controlled and ended (3 states). Revision 1 on both surfaces without a command of revision 1 (none, older);
+  // later revisions on a computer: none, older (an answer run) and the agent's handoff command. The user's own never.
+  expect(ended).toBe((2*2+2*3)*3);
+  expect(agentRoundEnded({automationController:'user',revision:5,state:'failed',gatewayTarget:{adapter:'computer',sessionId:'s',name:'n'},executionControl:{id:'c',action:'revise',revision:5,phase:'applied',requestedAt:0}} as unknown as TaskSnapshot)).toBe(false);
  }finally{db.close();}
 });

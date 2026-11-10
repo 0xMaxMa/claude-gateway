@@ -21,7 +21,9 @@ export interface VoiceSessionOptions { silenceCommitMs: number; finalizationTime
    * within fastAckAfterMs of admission. Undefined when no acknowledgement fits. */
   acknowledge?: (transcript: string, signal: AbortSignal, context: FastAckContext) => Promise<string | undefined>; fastAckAfterMs?: number; }
 /** Per-turn facts the conversation turn is told. fastAck: a short acknowledgement may play before the reply. */
-export interface VoiceTurnHints { fastAck: boolean }
+export interface VoiceTurnHints { fastAck: boolean;
+  /** Set by the voice router: the user said stop (or no) while the targeted computer task acted; it is paused and the words go to the agent. */
+  voiceStop?: boolean }
 /** Acknowledgements more alike than this (character-bigram Dice) are heard as the same phrase. */
 const ACK_SIMILARITY = 0.6;
 function bigrams(text: string): string[] {

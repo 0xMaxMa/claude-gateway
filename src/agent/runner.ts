@@ -6,6 +6,7 @@ import { presentedResponseError } from '../orchestration/response-errors';
 import { ChannelMediaError } from '../orchestration/channel-media-error';
 import { payloadHash, type AcceptInput } from '../orchestration/store';
 import { channelScope } from '../orchestration/identity';
+import { awaitingDeviceAccess } from '../orchestration/tasks/automation-session';
 import type { VoiceScope } from '../voice/scope';
 import type { VoiceTurnHints } from '../voice/session';
 import { ORCHESTRATION_DEFAULTS } from '../orchestration/config';
@@ -743,7 +744,7 @@ export class AgentRunner extends EventEmitter {
       scope = { agentId: this.agentConfig.id, agentSessionId: sessionId, source: 'api', accountId: principalId, chatId, threadKey: '', principalId };
     }
     const orchestration = await this.getOrchestration();
-    const accepted = orchestration.submitInput({ scope, text, model, metadata:{executionTaskId, ...(hints?.fastAck ? { fastAck: true } : {})}, modality: 'live_voice', ingressKey: `utterance:${utteranceId}`,
+    const accepted = orchestration.submitInput({ scope, text, model, metadata:{executionTaskId, ...(hints?.fastAck ? { fastAck: true } : {}), ...(hints?.voiceStop ? { voiceStop: true } : {})}, modality: 'live_voice', ingressKey: `utterance:${utteranceId}`,
       ...(voiceScope.kind === 'telegram' ? { trustedChannelMember: true } : {}) }, { execute: allowTools, writeMemory: false }, undefined, onMark);
     // The browser refreshes history on utterance.accepted, before inference finishes.
     await orchestration.flushHistory();
@@ -771,17 +772,28 @@ export class AgentRunner extends EventEmitter {
     // Full retained result, with worker-only skill context removed by status().
     return { ...runtime.tasks.status(task.conversationId, principalId, taskId)[0], ...detail };
   }
-  /** Provisional: returns the pause id so releaseVoicePause can undo it if the speech yields no command. */
-  async pauseVoiceExecution(sessionId:string,principalId:string,taskId:string):Promise<string|undefined> {
+  /** Provisional: returns the pause id so releaseVoicePause can undo it if the speech yields no command.
+   *  `stop`: the user said stop (taskSpeechKind): it pauses during the access wait and a settling command too. */
+  async pauseVoiceExecution(sessionId:string,principalId:string,taskId:string,stop=false):Promise<string|undefined> {
     const runtime=await this.getOrchestration();
     const detail=runtime.taskControls.detail(sessionId,principalId,taskId);
     const task=runtime.store.task(taskId)!;
     if(task.executionControl?.action==='pause'&&['pending','paused'].includes(task.executionControl.phase))return;
     if(!['queued','starting','running','interrupting'].includes(task.state))return;
-    if(!runtime.tasks.voicePauseApplies(detail.taskId))return;
+    // Waiting for device access is not acting: a pause there interrupts the round before it starts.
+    if(!stop&&(awaitingDeviceAccess(task)||!runtime.tasks.voicePauseApplies(detail.taskId)))return;
     const id=randomUUID();
     runtime.controlTask(sessionId,principalId,detail.taskId,{id,action:'pause',expectedRevision:task.revision});
     return id;
+  }
+  /** Whether the computer task live voice targets acts now (it runs, waits for device access, or holds this speech's
+   *  provisional pause `pauseId`): the voice router then has the words classified (taskSpeechKind) before they reach it. */
+  async voiceTaskActing(sessionId:string,principalId:string,taskId:string,pauseId?:string):Promise<boolean> {
+    const runtime=await this.getOrchestration();
+    try{runtime.taskControls.detail(sessionId,principalId,taskId);}catch{return false;}
+    const task=runtime.store.task(taskId);
+    if(task?.gatewayTarget?.adapter!=='computer')return false;
+    return ['queued','starting','running','interrupting'].includes(task.state)||(!!pauseId&&task.executionControl?.id===pauseId&&task.executionControl.action==='pause');
   }
   /** Speech that produced no command (empty, muted or lost) resumes the task,
    * but only if this voice pause is still the latest control. */

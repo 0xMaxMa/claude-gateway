@@ -1,0 +1,403 @@
+{
+ "source": "pod-jinawong, gateway r14 (2.1.12 + #667 + #671 @ c7b6680b), GetPod Desktop on macOS, task f3042fe1, 2026-11-09 09:58:12-10:00:23Z. Sanitized: ids dropped, timestamps relative to task creation (atMs), the page title and the 812-character story replaced by placeholders of the same kind (the story keeps its length), screenshots and screen text dropped. The two short voice transcripts are kept: they are the behavior under test.",
+ "goal": "open Notion, create a new page titled \"Test story\" and type the story into the page body",
+ "computerInputs": [
+  {
+   "application": "notion.id",
+   "label": "Page title",
+   "text": "Test story"
+  },
+  {
+   "application": "notion.id",
+   "label": "Page body",
+   "text": "Once upon a time, in a wide meadow, there lived a little rabbit who watched the stars every night. Once upon a time, in a wide meadow, there lived a little rabbit who watched the stars every night. Once upon a time, in a wide meadow, there lived a little rabbit who watched the stars every night. Once upon a time, in a wide meadow, there lived a little rabbit who watched the stars every night. Once upon a time, in a wide meadow, there lived a little rabbit who watched the stars every night. Once upon a time, in a wide meadow, there lived a little rabbit who watched the stars every night. Once upon a time, in a wide meadow, there lived a little rabbit who watched the stars every night. Once upon a time, in a wide meadow, there lived a little rabbit who watched the stars every night. Once upon a time, in"
+  }
+ ],
+ "rev1": {
+  "accessWait": {
+   "status": "waiting_access",
+   "reason": "OWNER_APPROVAL_REQUIRED",
+   "steps": 0,
+   "evaluations": 0,
+   "phase": "awaiting_access"
+  },
+  "computerConnection": "waiting_access",
+  "accessWaitMs": [
+   1000,
+   10000
+  ],
+  "firstWordsAtMs": 7000,
+  "outcome": {
+   "type": "stopped",
+   "failure": {
+    "code": "COMPUTER_EXECUTION_INTERRUPTED",
+    "message": "Computer execution interrupted. No automatic replay was attempted.",
+    "observedAt": 1794218299196
+   },
+   "computerReport": {
+    "status": "cancelled",
+    "reason": "REVISION_SUPERSEDED",
+    "steps": 0,
+    "evaluations": 0,
+    "phase": "terminal"
+   }
+  }
+ },
+ "voice": [
+  {
+   "atMs": 7000,
+   "kind": "partial",
+   "note": "STT partial words; r14 paused rev 1 (rev 2) and it ended COMPUTER_EXECUTION_INTERRUPTED"
+  },
+  {
+   "atMs": 26291,
+   "kind": "final",
+   "text": "ไม่เอา ไม่",
+   "becameRevision": 3,
+   "taskState": "waiting_input (paused by rev 2)",
+   "note": "admitted 26.3 s after the task started (commit at 23.6 s)"
+  },
+  {
+   "atMs": 54281,
+   "kind": "final",
+   "text": "เอา ฝากนะ ทำไงอะ",
+   "becameRevision": 4,
+   "taskState": "waiting_input (rev 3 handed to the agent; the agent had asked the user)",
+   "note": "admitted 54.3 s after the task started (commit at 51.8 s)"
+  }
+ ],
+ "rev3": {
+  "command": "ไม่เอา ไม่",
+  "outcome": {
+   "type": "paused",
+   "computerReport": {
+    "targetApp": {
+     "id": "com.apple.finder",
+     "name": "Finder"
+    },
+    "status": "needs_input",
+    "reason": "COMMAND_WAITING_INPUT",
+    "steps": 0,
+    "evaluations": 1,
+    "phase": "terminal",
+    "trace": [
+     {
+      "phase": "observing",
+      "sequence": 1,
+      "round": 1,
+      "revision": 3,
+      "steps": 0,
+      "evaluations": 0,
+      "atMs": 27198
+     },
+     {
+      "phase": "observed",
+      "sequence": 2,
+      "round": 1,
+      "revision": 3,
+      "steps": 0,
+      "evaluations": 0,
+      "atMs": 27959
+     },
+     {
+      "decisionMode": "model",
+      "phase": "evaluating",
+      "sequence": 3,
+      "round": 1,
+      "revision": 3,
+      "steps": 0,
+      "evaluations": 0,
+      "atMs": 27981
+     },
+     {
+      "phase": "decided",
+      "sequence": 4,
+      "round": 1,
+      "revision": 3,
+      "steps": 0,
+      "evaluations": 1,
+      "atMs": 29759
+     },
+     {
+      "reason": "NO_SUPPORTED_ACTION",
+      "decisionMode": "model",
+      "phase": "waiting",
+      "sequence": 5,
+      "round": 1,
+      "revision": 3,
+      "steps": 0,
+      "evaluations": 1,
+      "atMs": 30393
+     },
+     {
+      "status": "needs_input",
+      "reason": "COMMAND_WAITING_INPUT",
+      "phase": "terminal",
+      "sequence": 6,
+      "round": 1,
+      "revision": 3,
+      "steps": 0,
+      "evaluations": 1,
+      "atMs": 30399
+     }
+    ]
+   }
+  },
+  "settledAtMs": 30676,
+  "agentReply": {
+   "atMs": 40955,
+   "followUp": "asks_user",
+   "note": "the agent tried task_cancel (refused: AGENT_HANDOFF_ONE_COMMAND), then asked the user"
+  }
+ },
+ "rev4": {
+  "command": "เอา ฝากนะ ทำไงอะ",
+  "outcome": {
+   "type": "paused",
+   "computerReport": {
+    "targetApp": {
+     "id": "com.apple.finder",
+     "name": "Finder"
+    },
+    "status": "needs_input",
+    "reason": "COMMAND_WAITING_INPUT",
+    "steps": 0,
+    "evaluations": 1,
+    "phase": "terminal",
+    "trace": [
+     {
+      "phase": "observing",
+      "sequence": 1,
+      "round": 1,
+      "revision": 4,
+      "steps": 0,
+      "evaluations": 0,
+      "atMs": 54791
+     },
+     {
+      "phase": "observed",
+      "sequence": 2,
+      "round": 1,
+      "revision": 4,
+      "steps": 0,
+      "evaluations": 0,
+      "atMs": 55283
+     },
+     {
+      "decisionMode": "model",
+      "phase": "evaluating",
+      "sequence": 3,
+      "round": 1,
+      "revision": 4,
+      "steps": 0,
+      "evaluations": 0,
+      "atMs": 55292
+     },
+     {
+      "phase": "decided",
+      "sequence": 4,
+      "round": 1,
+      "revision": 4,
+      "steps": 0,
+      "evaluations": 1,
+      "atMs": 57214
+     },
+     {
+      "reason": "UNCLEAR",
+      "decisionMode": "model",
+      "phase": "waiting",
+      "sequence": 5,
+      "round": 1,
+      "revision": 4,
+      "steps": 0,
+      "evaluations": 1,
+      "atMs": 57686
+     },
+     {
+      "status": "needs_input",
+      "reason": "COMMAND_WAITING_INPUT",
+      "phase": "terminal",
+      "sequence": 6,
+      "round": 1,
+      "revision": 4,
+      "steps": 0,
+      "evaluations": 1,
+      "atMs": 57693
+     }
+    ]
+   }
+  }
+ },
+ "rev5": {
+  "command": "open Notion, create a new page titled \"Test story\" and type the story into the page body",
+  "agentHandoff": true,
+  "computerInputs": "none (the handoff rule forbade them)",
+  "outcome": {
+   "type": "failed",
+   "failure": {
+    "code": "COMPUTER_VISION_TEXT_NOT_IN_GOAL"
+   },
+   "computerReport": {
+    "targetApp": {
+     "id": "notion.id",
+     "name": "Notion"
+    },
+    "status": "blocked",
+    "reason": "VISION_TEXT_NOT_IN_GOAL",
+    "steps": 7,
+    "evaluations": 15,
+    "phase": "terminal",
+    "trace": [
+     {
+      "phase": "observing",
+      "sequence": 52,
+      "round": 3,
+      "revision": 5,
+      "steps": 7,
+      "evaluations": 11,
+      "atMs": 98174
+     },
+     {
+      "application": "notion.id",
+      "phase": "observed",
+      "sequence": 53,
+      "round": 3,
+      "revision": 5,
+      "steps": 7,
+      "evaluations": 11,
+      "atMs": 98954
+     },
+     {
+      "decisionMode": "model",
+      "phase": "evaluating",
+      "sequence": 54,
+      "round": 4,
+      "revision": 5,
+      "steps": 7,
+      "evaluations": 11,
+      "atMs": 99458
+     },
+     {
+      "reason": "VISION_TEXT_NOT_IN_GOAL",
+      "decisionMode": "model",
+      "phase": "decided",
+      "sequence": 55,
+      "round": 4,
+      "revision": 5,
+      "steps": 7,
+      "evaluations": 12,
+      "atMs": 121571
+     },
+     {
+      "decisionMode": "model",
+      "phase": "evaluating",
+      "sequence": 56,
+      "round": 5,
+      "revision": 5,
+      "steps": 7,
+      "evaluations": 12,
+      "atMs": 121588
+     },
+     {
+      "phase": "observing",
+      "sequence": 57,
+      "round": 5,
+      "revision": 5,
+      "steps": 7,
+      "evaluations": 13,
+      "atMs": 124483
+     },
+     {
+      "application": "notion.id",
+      "phase": "observed",
+      "sequence": 58,
+      "round": 5,
+      "revision": 5,
+      "steps": 7,
+      "evaluations": 13,
+      "atMs": 125229
+     },
+     {
+      "decisionMode": "model",
+      "phase": "evaluating",
+      "sequence": 59,
+      "round": 6,
+      "revision": 5,
+      "steps": 7,
+      "evaluations": 13,
+      "atMs": 125737
+     },
+     {
+      "reason": "VISION_TEXT_NOT_IN_GOAL",
+      "decisionMode": "model",
+      "phase": "decided",
+      "sequence": 60,
+      "round": 6,
+      "revision": 5,
+      "steps": 7,
+      "evaluations": 14,
+      "atMs": 128497
+     },
+     {
+      "decisionMode": "model",
+      "phase": "evaluating",
+      "sequence": 61,
+      "round": 7,
+      "revision": 5,
+      "steps": 7,
+      "evaluations": 14,
+      "atMs": 128511
+     },
+     {
+      "reason": "VISION_TEXT_NOT_IN_GOAL",
+      "decisionMode": "model",
+      "phase": "decided",
+      "sequence": 62,
+      "round": 7,
+      "revision": 5,
+      "steps": 7,
+      "evaluations": 15,
+      "atMs": 130961
+     },
+     {
+      "status": "blocked",
+      "reason": "VISION_TEXT_NOT_IN_GOAL",
+      "phase": "terminal",
+      "sequence": 63,
+      "round": 7,
+      "revision": 5,
+      "steps": 7,
+      "evaluations": 15,
+      "atMs": 130970
+     }
+    ],
+    "lastAction": {
+     "kind": "key_chord",
+     "key": "enter"
+    }
+   }
+  }
+ },
+ "notification": {
+  "id": "270629b6",
+  "taskStateVersion": 99,
+  "status": "pending",
+  "note": "stuck: automationController=user and revision 5, so notification-mailbox filtered it"
+ },
+ "taskAtFailure": {
+  "state": "failed",
+  "revision": 5,
+  "automationController": "user",
+  "computerConnection": "waiting_access",
+  "automationSession": {
+   "status": "blocked",
+   "idleTimeoutMs": 1800000
+  },
+  "executionControl": {
+   "action": "revise",
+   "revision": 5,
+   "phase": "applied",
+   "agentHandoff": true
+  }
+ }
+}
