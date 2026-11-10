@@ -37,6 +37,13 @@ export function computerAccess(task: Omit<TaskSnapshot,'skill'>, now = Date.now(
   if (session?.status !== 'closed' && !task.activeAttemptId && ['waiting_input','completed','failed'].includes(task.state)
     && task.computerAccessReleased?.requestId === task.gatewayDispatch?.requestId && task.computerAccessReleased) return 'released';
 }
+/** A computer round waiting for the owner to grant device access (the GetPod prompt): nothing acts yet, and granting
+ *  is a click, not speech. Before its first report, a device that has not granted access (computerConnection) waits too.
+ *  Pod-jinawong r14, task f3042fe1: words heard during this 9 s wait paused rev 1 before it ran (COMPUTER_EXECUTION_INTERRUPTED). */
+export function awaitingDeviceAccess(task: Omit<TaskSnapshot,'skill'>): boolean {
+  if (task.gatewayTarget?.adapter !== 'computer') return false;
+  return task.computerReport?.phase === 'awaiting_access' || (!task.computerReport && task.computerConnection === 'waiting_access');
+}
 /** The device a computer task controls, by its own label ("Computer Use · DESKTOP-1" → "DESKTOP-1"). */
 export function computerDevice(task: Pick<TaskSnapshot,'gatewayTarget'>): string | undefined {
   if (task.gatewayTarget?.adapter !== 'computer') return;
@@ -87,6 +94,21 @@ export function agentRound(task: Omit<TaskSnapshot,'skill'>): boolean {
   return task.automationController==='user'&&task.gatewayTarget?.adapter==='computer'
     &&(task.executionControl?.revision!==task.revision||task.executionControl.agentHandoff===true);
 }
+/** An agent round (agentRound) ended: done, failed, or an outcome awaiting reconciliation. The task is the user's, yet
+ *  the agent sent this command and must say how it ended (notification-mailbox); its turn is report-only, as the task
+ *  takes no command from it. A cancel by the user is the user's own stop and is delivered anyway.
+ *  Pod-jinawong r14, task f3042fe1 rev 5: the agent's handoff command failed (VISION_TEXT_NOT_IN_GOAL), its
+ *  notification stayed pending and nobody told the user. */
+export function agentRoundEnded(task: Omit<TaskSnapshot,'skill'>): boolean {
+  return ['completed','failed','needs_reconciliation'].includes(task.state)&&agentRound(task);
+}
+/** agentRound as a trusted SQL fragment over a tasks row alias; a parity test keeps them equal. */
+export const agentRoundSql=(alias:string)=>{
+  const field=(path:string)=>`json_extract(${alias}.snapshot_json,'${path}')`;
+  return `(CASE WHEN ${field('$.revision')}=1 THEN ${agentGoalRunSql(alias)} ELSE (${field('$.automationController')}='user'
+  AND ${field('$.gatewayTarget.adapter')}='computer' AND (COALESCE(${field('$.executionControl.revision')},0)!=${field('$.revision')}
+  OR COALESCE(${field('$.executionControl.agentHandoff')},0)=1)) END)`;
+};
 /** An agent round settled waiting with no question, confirmation or pause for the owner. */
 function agentRoundStopped(task: Omit<TaskSnapshot,'skill'>): boolean {
   const report=task.computerReport??task.browserReport;
@@ -132,10 +154,7 @@ export function confirmationAsked(task: Omit<TaskSnapshot,'skill'>): boolean {
 export const agentGoalRunParkedSql=(alias:string)=>{
   const field=(path:string)=>`json_extract(${alias}.snapshot_json,'${path}')`;
   const report=`COALESCE(${field('$.computerReport')},${field('$.browserReport')})`;
-  const agentRound=`(CASE WHEN ${field('$.revision')}=1 THEN ${agentGoalRunSql(alias)} ELSE (${field('$.automationController')}='user'
-  AND ${field('$.gatewayTarget.adapter')}='computer' AND (COALESCE(${field('$.executionControl.revision')},0)!=${field('$.revision')}
-  OR COALESCE(${field('$.executionControl.agentHandoff')},0)=1)) END)`;
-  return `COALESCE((${agentRound} AND COALESCE(${field('$.agentCommands')},0)<${PARKED_WAKE_LIMIT} AND ${alias}.state='waiting_input'
+  return `COALESCE((${agentRoundSql(alias)} AND COALESCE(${field('$.agentCommands')},0)<${PARKED_WAKE_LIMIT} AND ${alias}.state='waiting_input'
   AND ${field('$.activeAttemptId')} IS NULL AND ${field('$.pendingQuestion')} IS NULL AND COALESCE(${field('$.executionControl.phase')},'')!='paused'
   AND COALESCE(json_extract(${report},'$.reason'),'') IN (${WAITING_FOR_COMMAND.map(r=>`'${r}'`).join(',')})
   AND json_extract(${report},'$.fieldRequest') IS NULL AND NOT COALESCE(${field('$.computerReport.lastAction.confirm')},0)

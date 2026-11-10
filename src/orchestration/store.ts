@@ -41,6 +41,9 @@ export interface AcceptInput {
     unavailableAttachments?: Array<{code:string;name?:string;quoted:boolean}>; senderName?: string; senderId?: string; platformMessageId?: string; platformMessageIds?: string[]; mediaGroupId?: string; promptContext?: string; imageRefs?: string[];
     /** Live voice: a fast acknowledgement may play before this turn's reply (voice.live.fastAck). */
     fastAck?: boolean;
+    /** Live voice: a stop or a no heard while the targeted computer task acted; the task was paused and the words
+     *  go to the agent (live-execution-input VOICE_STOP), never to the task as a command. */
+    voiceStop?: boolean;
     attachmentName?: string; mediaType?: string; repliedText?: string; repliedMessageId?: string; repliedSender?: string; repliedAttachmentIds?: string[]; attachmentDetails?: Array<{ref:string;name?:string;quoted:boolean}>; attachmentError?: string };
   /** Internal mailbox replay identifier; never accepted from HTTP/model arguments. */
   acceptedInputId?: string;

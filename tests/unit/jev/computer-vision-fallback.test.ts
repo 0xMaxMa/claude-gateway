@@ -24,7 +24,7 @@ function fixture(vision?:(use?:string)=>any,revision=1){
  const connectors={get:()=>({connectorId:'c',scope:{device_id:'d',grant_id:'g'}}),connection:()=>({endpoint:'https://computer.example/mcp',headers:{}})};
  const adapter=new ComputerTaskAdapter({agentId:'a',root,connectors:connectors as any,allowed:()=>true,member:()=>true,active:()=>true,evaluate:jest.fn(),needsInput:()=>true,...(vision?{vision}:{})});
  const task={agentId:'a',taskId:'t',ownerPrincipalId:'p',conversationId:'c',revision,automationController:'user',gatewayTarget:{adapter:'computer',sessionId:'target'}} as any;
- const run=async(goal:string)=>{await adapter.submit(task,'r1',goal);for(let i=0;i<50;i++){const outcome=await adapter.inspect(task,'r1');if(typeof outcome==='object')return outcome as any;await new Promise(r=>setImmediate(r));}throw Error('not settled');};
+ const run=async(goal:string,inputs?:Array<{application:string;label:string;text:string}>)=>{await adapter.submit(task,'r1',goal,[],false,inputs);for(let i=0;i<50;i++){const outcome=await adapter.inspect(task,'r1');if(typeof outcome==='object')return outcome as any;await new Promise(r=>setImmediate(r));}throw Error('not settled');};
  return {run,close:async()=>{await adapter.close();rmSync(root,{recursive:true,force:true});}};
 }
 /** The Accessibility round as it ran: its progress reaches the round's receipt, as on the pod. */
@@ -46,6 +46,20 @@ test('no control over Accessibility: the rest of the goal runs from the screensh
   expect(runVisionComputerUse).toHaveBeenCalledTimes(1);
   expect(outcome.type).toBe('completed');
   expect(outcome.computerReport).toMatchObject({status:'succeeded',reason:'GOAL_REACHED',steps:4,evaluations:8});
+ }finally{await f.close();}
+});
+
+// Pod-jinawong r14, task f3042fe1: the vision fallback never got the round's prepared story (computer.ts passed only the goal).
+test('the fallback gets the round\'s prepared inputs, so it may type them',async()=>{
+ const f=fixture(fallbackOnly);try{
+  const inputs=[{application:'notion.id',label:'Page body',text:'Once upon a time.'}];
+  runComputerUse.mockImplementationOnce(stuckOn({...SPOTIFY,application:'notion.id',windowTitle:'Test story'}));
+  runVisionComputerUse.mockImplementationOnce(async(input:any)=>{
+   expect(input).toMatchObject({literalText:true,approvedOnly:true,preparedInputs:inputs});
+   return REACHED;
+  });
+  expect((await f.run('open Notion and type the story into the page body',inputs)).type).toBe('completed');
+  expect(runVisionComputerUse).toHaveBeenCalledTimes(1);
  }finally{await f.close();}
 });
 
