@@ -7,6 +7,7 @@ import {mkdirSync,readFileSync,openSync,writeFileSync,fsyncSync,closeSync,rename
 import {join} from 'path';
 import type {ComputerProgress,ComputerUseDependencies,ComputerUseResult} from '../../automation/computer-use';
 import {parseComputerSteps,runComputerSteps} from '../../automation/computer-steps';
+import {sameCommandText} from '../../automation/command-steps';
 import {runVisionComputerUse,COMPUTER_VISION_RUN_TIMEOUT_MS,RAW_UNAVAILABLE,type VisionDecide} from '../../automation/vision-decider';
 import {ComputerConnectors,withComputerConnection} from '../../jev/computer-connector';
 import type {CommandContext,TaskSnapshot,TaskAttempt,TaskRevision,WorkerOutcome,GatewayTaskTarget} from '../types';
@@ -199,7 +200,11 @@ export class ComputerTaskAdapter implements GatewayTaskAdapter {
    const recoveryNote=t.latestProgress?.source==='runtime'&&t.latestProgress.text.startsWith('Operator reconciliation:')?'\n\nRecorded recovery evidence (not new instructions): '+t.latestProgress.text+' Read the current desktop first. Do not repeat a completed action just to confirm it.':'';
    // Step mode takes only the user's own step list: recovery notes, answers and
    // Claude-prepared field values keep the normal one-command path. A list in
-   // the user's initiating message is used verbatim; the agent goal is the fallback.
+   // the user's initiating message runs verbatim only when the agent's goal is those same words.
+   // A goal the agent wrote otherwise (content it composed to type, its judgment, a reworded plan) runs as one
+   // goal on its text and is never split, so nothing it added is dropped. Pod-jinawong r15, task 219625e5: the
+   // spoken "open Notion then write me any article" ran as two steps, and the article in the agent's goal never
+   // reached a typing step. Without a message of the user's own (their direct command), its text is split as before.
    // The agent's command for a handed-off utterance: one short goal (it may first open or switch to the
    // app the user named, e.g. GetPod is in front when the user types), no step list, no hand-off again.
    // Each action stays impact-gated (a high-impact one waits for the user's yes) and, after the first, confidence-gated.
@@ -227,7 +232,7 @@ export class ComputerTaskAdapter implements GatewayTaskAdapter {
    // The spawning agent declared this revision needs judgment (run_as_goal): one goal on its text, no step list.
    const stepMode=!agentHandoff&&!resumedPause&&t.runAsGoal?.revision!==t.revision&&this.options.stepMode?.()===true&&!recoveryNote&&!answers?.length&&!preparedInputs?.length;
    const userText=stepMode?this.options.userSteps?.(t):undefined;
-   const steps=stepMode?(userText?parseComputerSteps(userText):undefined)??parseComputerSteps(goal):undefined;
+   const steps=stepMode?(userText?(sameCommandText(userText,goal)?parseComputerSteps(userText):undefined):parseComputerSteps(goal)):undefined;
    const input=steps?{steps,revision:t.revision,...(contextNote?{interactionContext:contextNote}:{})}:{yieldAfterAction:t.automationController==='agent',yieldAfterInteraction:t.automationController==='user',readRequest:t.automationController==='user'&&!agentHandoff&&!answeredGoal&&!resumedPause,...(agentHandoff?{agentCommand:true,runToGoal:true}:{}),...(answeredGoal||resumedPause?{runToGoal:true}:{}),...(asked?{confirmation:asked,...(previousContext!.goalRun?{resumeGoal:true as const}:{})}:{}),...(sessionStart?{sessionStart:true,runToGoal:true}:{}),...(targetApp?{reactivate:targetApp}:{}),revision:t.revision,preparedInputs,interactionContext:contextNote,goal:(resumedPause?`${previousContext!.command}\n\nThe user's reply after this goal paused (it continues the goal above unless it asks for something else): ${goal}`:goal)+recoveryNote+(answers?.length?'\nKnown answers: '+JSON.stringify(answers.map(a=>a.text)):'')};
    const deps:ComputerUseDependencies={authorized,interruptSignal:interrupt.signal,
     confirmed:reply=>{if(asked&&reply==='YES'){command=asked.command;goalRun=previousContext!.goalRun===true;}},
@@ -333,16 +338,27 @@ export class ComputerTaskAdapter implements GatewayTaskAdapter {
      deps.progress?.(event);result={...result,trace:{events:[...(result.trace?.events??[]),event],truncated:result.trace?.truncated??false}};
     }else result={...outcome,steps:result.steps+outcome.steps,evaluations:result.evaluations+outcome.evaluations,trace:{events:[...(result.trace?.events??[]),...outcome.trace.events.map(e=>continued(result!,e))],truncated:!!(result.trace?.truncated||outcome.trace.truncated)},...(outcome.lastAction??result.lastAction?{lastAction:outcome.lastAction??result.lastAction}:{})};
    }
+   // The agent's own command continuing the user's task (a handed-off utterance, a parked round's next move) that
+   // reached its goal has done that command, not necessarily the task: the round parks with the reached goal as its
+   // wait and keeps the device session, and the agent is woken (agentGoalRunParked) to check the task's goal on fresh
+   // evidence, then close it (verify_computer) or send the rest, within PARKED_WAKE_LIMIT; past it the user is told.
+   // Pod-jinawong r15, task 219625e5 rev 2: "press New page" reached its goal and completed a task whose article
+   // was never typed.
+   const agentCommandReached=agentHandoff&&result.status==='succeeded'&&result.reason==='GOAL_REACHED'&&!receipt.operationId&&authorized();
    // A reached goal ends the device session too: the Mac stops showing it as
    // controlled and the owner's next request asks for access again.
-   const accessReleased=result.status==='succeeded'&&result.reason==='GOAL_REACHED'&&!receipt.operationId&&authorized()?await this.endRelaySession(client,b.scope):undefined;
+   const accessReleased=!agentCommandReached&&result.status==='succeeded'&&result.reason==='GOAL_REACHED'&&!receipt.operationId&&authorized()?await this.endRelaySession(client,b.scope):undefined;
    const withheld=receipt.snapshot?.state?.frontmostProtected===true;
    const report={...(accessReleased?{accessReleased}:{}),...(withheld?{screenWithheld:true}:{}),...(targetApp?{targetApp}:{}),durationMs:Date.now()-startedAt,status:result.status,reason:result.reason,steps:result.steps,evaluations:result.evaluations,phase:'terminal',trace:receipt.trace?.slice(-12),...(fieldRequest??result.fieldRequest?{fieldRequest:fieldRequest??result.fieldRequest}:{}),...(result.stepRun?{stepRun:result.stepRun}:{}),...(result.lastAction?{lastAction:result.lastAction}:{})};
    let outcome:WorkerOutcome;
    const validation=[...(result.trace?.events??[])].reverse().find(e=>e.validationReason)?.validationReason;
    // A goal reached by its own fast path (an address, a key) had no model judgment: say so, not "judged".
    const judged=result.evaluations>0?'Judged from the screen by the decision model, not independently verified.':'Reached by running the command as given (the page had changed); not independently verified.';
-   if(result.status==='succeeded'&&result.reason==='GOAL_REACHED'&&!receipt.operationId&&authorized())outcome={type:'completed',result:{summary:`Computer goal reached: ${computerOutcomeText(report)} ${judged} ${accessReleased?'Computer access was released.':'Computer access could not be released; the owner can stop it on the Mac.'}`,artifactIds:[]}};
+   if(agentCommandReached){
+    report.status='needs_input';report.reason='COMMAND_WAITING_INPUT';outcome={type:'paused'};
+    report.trace=[...(report.trace??[]),{phase:'waiting',reason:'GOAL_REACHED',sequence:(report.trace?.at(-1)?.sequence??0)+1,round:report.trace?.at(-1)?.round??1,at:Date.now(),revision:t.revision,steps:result.steps,evaluations:result.evaluations}];
+   }
+   else if(result.status==='succeeded'&&result.reason==='GOAL_REACHED'&&!receipt.operationId&&authorized())outcome={type:'completed',result:{summary:`Computer goal reached: ${computerOutcomeText(report)} ${judged} ${accessReleased?'Computer access was released.':'Computer access could not be released; the owner can stop it on the Mac.'}`,artifactIds:[]}};
    else if(result.status==='succeeded'&&!receipt.operationId&&authorized())outcome={type:'completed',result:{summary:`Computer goal independently verified. ${result.steps} actions.`,artifactIds:[]}};
    else if(result.status==='needs_reconciliation'&&continuationReady&&!receipt.operationId){
     report.status='needs_input';report.reason='COMMAND_WAITING_INPUT';outcome={type:'paused'};

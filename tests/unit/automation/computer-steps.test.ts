@@ -279,6 +279,23 @@ test('E2E-2: a listed step joining two commands runs both; a named shortcut runs
  expect(stopped.stepRun).toMatchObject({stopReason:'STEP_NOT_EXECUTED',stoppedAt:1,completed:0,detail:'NO_SUPPORTED_ACTION',doneParts:['เปิด Chrome']});
 });
 
+// Pod-jinawong r15, task 219625e5: "เปิด Notion" with Notion already in front changed nothing on the screen, so the
+// run stopped at step 1 (STEP_NO_EFFECT) and never reached the writing step.
+test('opening the application already in front satisfies the step, and the run goes on',async()=>{
+ const plan=(command:string,req:Request)=>command==='เปิด Chrome'?answer(req,'open:com.google.Chrome'):browsePlan(command,req);
+ const f=desktop(plan,{inert:['open:undefined']});
+ const r=await run(['เปิด Chrome','เปิด tab ใหม่'],f.deps);
+ expect(f.actions().map(a=>[a.kind,a.app_id??a.ref])).toEqual([['open','com.google.Chrome'],['press','newtab']]);
+ expect(r.stepRun).toMatchObject({stopReason:'ALL_STEPS_DONE',completed:2});
+ expect(r.trace.events.find(e=>e.phase==='observed'&&e.action==='open')).toMatchObject({changed:false,reason:'STEP_ALREADY_SATISFIED'});
+ // Another application stays in front after the open: that is still no effect, and the run stops there.
+ const g=desktop(plan,{inert:['open:undefined']});
+ g.state.application='com.apple.finder';g.state.windowTitle='Finder';
+ const stopped=await run(['เปิด Chrome','เปิด tab ใหม่'],g.deps);
+ expect(stopped.stepRun).toMatchObject({stopReason:'STEP_NO_EFFECT',stoppedAt:1,completed:0});
+ expect(g.actions().map(a=>a.kind)).toEqual(['open']);
+});
+
 test('E2E-1: a step whose target is still loading re-observes instead of stopping at once',async()=>{
  let loaded=false;
  const f=desktop((command,req)=>command==='เข้า link แรก'?answer(req,Object.hasOwn(req.questions.target_press?.criteria??{},'press:link1')?'press:link1':'BLOCKED'):browsePlan(command,req));
