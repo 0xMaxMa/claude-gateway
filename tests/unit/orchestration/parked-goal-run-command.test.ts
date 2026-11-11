@@ -150,9 +150,14 @@ test('the one command gains no extra authority: plain when_ready on the current 
   f.finish(parked());
   const [notice]=f.notices(),t=f.turn('report',{notice});
   expect(f.code(()=>f.tasks.update(t.context(),f.task.taskId,1,'key enter','interrupt_and_resume'))).toBe('INVALID_INPUT');
-  expect(f.code(()=>f.tasks.update(t.context(),f.task.taskId,1,'type it','when_ready',undefined,[{application:'Terminal',label:'shell',text:'which htop'}]))).toBe('INVALID_INPUT');
   expect(f.code(()=>f.tasks.update(t.context(),f.task.taskId,0,'key enter','when_ready'))).toBe('REVISION_CONFLICT');
   expect(f.store.task(f.task.taskId)!.revision).toBe(1);
+  // r16: like a hand-off, the one command may carry the text it types (computer_inputs). Pod-jinawong r15, task
+  // 219625e5: refused inputs left the article behind. It is still exactly one command.
+  const inputs=[{application:'Terminal',label:'shell',text:'which htop'}];
+  expect(f.code(()=>f.tasks.update(t.context(),f.task.taskId,1,'type it into the shell and press enter','when_ready',undefined,inputs))).toBe('ok');
+  expect(f.tasks.revision(f.task.taskId,2)).toMatchObject({instructions:'type it into the shell and press enter',computerInputs:inputs,directCommand:true});
+  expect(f.code(()=>f.tasks.update(t.context(),f.task.taskId,2,'key enter','when_ready'))).toBe('AGENT_HANDOFF_USED');
  }finally{f.close();}
 });
 

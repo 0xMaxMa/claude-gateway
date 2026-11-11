@@ -59,15 +59,23 @@ test('computerSteps is a recognised Jev feature flag',()=>{
  for(const flag of ['skillRouting','progressFiltering','conversationIntake'])expect(()=>validateJevConfig({features:{[flag]:{enabled:true}}})).toThrow();
 });
 
-test('E2E-3: the user\'s own step list is used verbatim instead of the agent\'s rewritten goal',async()=>{
- // Recorded: the user typed a one-line list; the agent delegated a rewritten,
- // merged list ("เปิด Chrome แล้วกด Cmd+T ...", "(ไม่ใช่ ad)") plus pacing text.
+// E2E-3 recorded: the user typed a one-line list; the agent delegated a rewritten,
+// merged list ("เปิด Chrome แล้วกด Cmd+T ...", "(ไม่ใช่ ad)") plus pacing text. Until r16 the user's
+// list ran instead; now the user's words run as steps only when the agent's goal is those words.
+// Pod-jinawong r15, task 219625e5: the user's two spoken steps replaced the agent's goal and its article.
+test('the user\'s own step list runs only when the agent\'s goal is those words; a rewritten goal runs as one goal',async()=>{
  const user='ทำตามขั้นตอนนี้ทีละขั้น: เปิด tab ใหม่, เข้า google.com, ค้น getpod, เข้า link แรก, scroll ลงมา';
  const agent='ควบคุม Mac ของผู้ใช้ผ่าน Computer Use ทำขั้นตอนต่อไปนี้ทีละขั้น:\n\n1. เปิด Chrome แล้วกด Cmd+T เพื่อเปิด tab ใหม่\n2. คลิก address bar แล้วพิมพ์ google.com กด Enter\n3. พิมพ์ "getpod" ใน search box แล้วกด Enter\n4. คลิก link แรกในผลการค้นหา (ไม่ใช่ ad)\n5. Scroll ลงมาในหน้านั้น\n\nทำทีละขั้นตอน รอให้แต่ละขั้นสำเร็จก่อนไปขั้นถัดไป';
  await submit(agent,true,[],user);
+ expect(runComputerSteps).not.toHaveBeenCalled();expect(runComputerUse.mock.calls[0][0].goal).toBe(agent);
+ // The agent forwarded the user's words (spacing and case aside): the user's list runs verbatim.
+ await submit(`  ${user.replace(' google.com',' Google.com')}\n`,true,[],user);
  expect(runComputerSteps.mock.calls[0][0].steps).toEqual(['เปิด tab ใหม่','เข้า google.com','ค้น getpod','เข้า link แรก','scroll ลงมา']);
- // Without a list in the user's message the agent goal remains the fallback.
+ // An agent goal under a user message without a list is the agent's own text: never split.
  await submit('เปิด tab ใหม่, scroll ลงมา',true,[],'ช่วยหน่อย');
+ expect(runComputerSteps).not.toHaveBeenCalled();
+ // A direct command has no other message behind it: its own text is the user's and is split as before.
+ await submit('เปิด tab ใหม่, scroll ลงมา',true,[]);
  expect(runComputerSteps.mock.calls[0][0].steps).toEqual(['เปิด tab ใหม่','scroll ลงมา']);
 });
 
@@ -198,9 +206,10 @@ describe('run_as_goal: the spawning agent declared the request needs its judgmen
   expect(runComputerSteps).not.toHaveBeenCalled();expect(runComputerUse).toHaveBeenCalledTimes(1);
  });
  test('only for the revision it was declared on; without it the user\'s steps still run',async()=>{
-  await submit('open Chrome and Steam',true,[],user,{revision:2,runAsGoal:{revision:1}});
+  // The agent forwarded the user's words, so they are the user's own list.
+  await submit(user,true,[],user,{revision:2,runAsGoal:{revision:1}});
   expect(runComputerSteps).toHaveBeenCalledTimes(1);
-  await submit('open Chrome and Steam',true,[],user);
+  await submit(user,true,[],user);
   expect(runComputerSteps.mock.calls[0][0].steps).toEqual(['เปิด Chrome เปิด Steam','เลือกมาซักเกมให้ผม']);
  });
 });

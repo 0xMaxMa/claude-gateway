@@ -1,4 +1,4 @@
-import { observedEffect } from '../../../src/automation/computer-policy';
+import { observedEffect, openSatisfied } from '../../../src/automation/computer-policy';
 import type { ComputerState } from '../../../src/automation/computer-use';
 const state: ComputerState = {generation:'g1',application:'notes',apps:[],truncated:false,controls:[{ref:'a',role:'field',label:'Note',value:'',actions:['type']}]};
 test('generation and unrelated clock labels alone do not demonstrate progress',()=>{
@@ -58,4 +58,14 @@ test('standard commands never reinterpret ambiguous, negated or compound instruc
  const {standardComputerCommand}=require('../../../src/automation/computer-command');
  for(const command of ['close','ปิด','do not scroll down','scroll down then click','scroll down in the left sidebar','ปิดแท็บ','__proto__'])expect(standardComputerCommand(command)).toBeUndefined();
  expect(standardComputerCommand('  SCROLL   DOWN ')).toBe('scroll:down');
+});
+// Pod-jinawong r15, task 219625e5: "open Notion" with Notion in front changed nothing, and the step run stopped there.
+test('a step run counts an open as satisfied once its application is in front, even when nothing changed',()=>{
+ expect(openSatisfied(state,{kind:'open',app_id:'notes'})).toBe(true);
+ expect(openSatisfied({...state,application:'maps'},{kind:'open',app_id:'notes'})).toBe(false);
+ expect(openSatisfied({...state,frontmostProtected:true},{kind:'open',app_id:'notes'})).toBe(false);
+ expect(openSatisfied(state,{kind:'press',ref:'a'})).toBe(false);
+ expect(openSatisfied(state,{kind:'open'})).toBe(false);
+ // The goal loop's own progress check is unchanged: reopening the front app alone is still no observed effect.
+ expect(observedEffect(state,{...state,generation:'g2'},{kind:'open',app_id:'notes'})).toBe(false);
 });

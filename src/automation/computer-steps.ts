@@ -1,5 +1,5 @@
 import {z} from 'zod';
-import {observedEffect} from './computer-policy';
+import {observedEffect,openSatisfied} from './computer-policy';
 import {checkInterruption} from './interrupt';
 import {runComputerUse,ComputerObservation} from './computer-use';
 import type {ComputerProgress,ComputerState,ComputerUseDependencies,ComputerUseResult} from './computer-use';
@@ -180,18 +180,21 @@ export async function runComputerSteps(raw:unknown, deps:ComputerUseDependencies
           return await finish(result.status === 'needs_input' ? 'needs_input' : result.status, reason, stop(index, 'STEP_NOT_EXECUTED', waiting ?? result.reason));
         }
         // Verify the part's observable effect before the next command decides.
-        let changed = false;
-        for (let poll = 0; poll < SETTLE_OBSERVATIONS && !changed; poll++) {
+        let changed = false, satisfied = false;
+        for (let poll = 0; poll < SETTLE_OBSERVATIONS && !changed && !satisfied; poll++) {
           if (poll) await delay(SETTLE_DELAY_MS, runSignal);
           try {prefetched = await observe();} catch (error) {
             if (!(error instanceof Error) || error.message !== 'STALE_OBSERVATION') throw error;
             prefetched = undefined;continue;
           }
           changed = observedEffect(before, prefetched, dispatched);
+          // An open of the application already in front changes nothing, yet the step is done.
+          satisfied = !changed && openSatisfied(prefetched, dispatched);
         }
         // Replaces the inner controller's terminal event: no extra receipt write per step.
-        emit('observed', {action:dispatched.kind as ComputerProgress['action'], changed, reason:changed ? 'STEP_VERIFIED' : 'STEP_NO_EFFECT'});
+        emit('observed', {action:dispatched.kind as ComputerProgress['action'], changed, reason:changed ? 'STEP_VERIFIED' : satisfied ? 'STEP_ALREADY_SATISFIED' : 'STEP_NO_EFFECT'});
         lastKind = dispatched.kind;
+        changed ||= satisfied;
         if (!changed && (dispatched.kind !== 'scroll' || parts.length > 1)) {
           // Dispatched but ineffective: never re-sent here; the parent decides.
           prefetched = undefined;

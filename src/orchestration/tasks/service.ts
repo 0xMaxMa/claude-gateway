@@ -440,7 +440,7 @@ export class TaskService {
         const handoff=this.agentHandoff(context,task,expectedRevision,mode,browserFields,computerInputs,startUrl);
         // Likewise the agent's own goal run that parked and woke the agent (agentGoalRunParked).
         if(handoff||this.parkedGoalRunCommand(context,task,expectedRevision,mode,browserFields,computerInputs,startUrl))
-          return this.applyDirectControl(context.conversationId,taskId,task,{id:handoffCommandId(context.inputId),action:'revise',text:instruction},undefined,context.inputId,handoff?computerInputs:undefined);
+          return this.applyDirectControl(context.conversationId,taskId,task,{id:handoffCommandId(context.inputId),action:'revise',text:instruction},undefined,context.inputId,computerInputs);
         throw new OrchestrationError('USER_CONTROLS_AUTOMATION');
       }
       const agentControl = !context.execute &&
@@ -584,7 +584,9 @@ export class TaskService {
       throw new OrchestrationError('AGENT_HANDOFF_USED','The one command for this parked run was already sent. Report its outcome; do not send another.');
     if(!agentGoalRunParked(task)||!this.parkedRoundNotice(context,task,String(notice.id)))
       throw new OrchestrationError('STATE_CONFLICT','The run changed since this notice (a newer command, question or pause). Read task_status; do not act on this notice.');
-    if(mode!=='when_ready'||browserFields!==undefined||computerInputs!==undefined||startUrl!==undefined)throw new OrchestrationError('INVALID_INPUT','The command for a parked run is one plain next command: mode=when_ready, no fields, inputs or start_url.');
+    // Like a hand-off, the command may carry the text it types (computer_inputs): the rest of the goal often includes it.
+    // Pod-jinawong r15, task 219625e5: refused inputs left the agent's article behind, and it sent "press New page" alone.
+    if(mode!=='when_ready'||browserFields!==undefined||startUrl!==undefined)throw new OrchestrationError('INVALID_INPUT','The command for a parked run is one plain command for the rest of the goal: mode=when_ready, no browser fields or start_url (computer_inputs may carry text to type).');
     if(expectedRevision!==task.revision)throw new OrchestrationError('REVISION_CONFLICT');
     return true;
   }

@@ -208,8 +208,15 @@ export const ANSWERED_FROM_SCREEN='Done · The assistant answered from the scree
  * the assistant answers), or every step of its step list ran. */
 export function computerRoundDone(report:ComputerTaskReport):boolean{
  if(report.stepRun)return report.stepRun.stopReason==='ALL_STEPS_DONE';
+ // The agent's own command reached its goal, but the task's goal is not confirmed until the agent closes it.
+ if(agentCommandDone(report))return false;
  const text=computerOutcomeText(report);
  return ['Done','Ready:','Read request:'].some(prefix=>text.startsWith(prefix));
+}
+/** A round of the agent's own command (a handed-off utterance or a parked round's next move) that reached that
+ *  command's goal and parked for the agent to check the task's goal (gateway-tasks/computer.ts). */
+export function agentCommandDone(report:ComputerTaskReport):boolean{
+ return report.status==='needs_input'&&report.reason==='COMMAND_WAITING_INPUT'&&!report.stepRun&&lastWaitReason(report)==='GOAL_REACHED';
 }
 /** Said when a round that did not finish last saw a withheld screen (report.screenWithheld). */
 const WITHHELD_HINT='The screen was hidden because a protected app such as GetPod was in front.';
@@ -242,7 +249,8 @@ function outcomeText(report:ComputerTaskReport,context:{handedOff?:boolean}):str
  if(sequence&&planned&&sequence.length<planned)return `Not done: pressed ${sequence.length} of ${planned} (${sequence.map(label=>quoted(label)).join(', ')}), then stopped${waiting&&HINTS[waiting]?`: ${hint(waiting,report)}`:'.'}`;
  // A goal run took several actions: say how it ended, never "Done" for a stop.
  const actions=`${report.steps} action${report.steps===1?'':'s'}`;
- if(waiting==='GOAL_REACHED'&&report.steps>0)return `Done after ${actions}. Last: ${report.lastAction&&!report.lastAction.blocked?computerActionText(report.lastAction):'the action was sent'}.${report.accessReleased?' Computer access was released.':' Send the next command.'}`;
+ if(waiting==='GOAL_REACHED'&&report.steps>0)return `Done after ${actions}. Last: ${report.lastAction&&!report.lastAction.blocked?computerActionText(report.lastAction):'the action was sent'}.${report.accessReleased?' Computer access was released.':agentCommandDone(report)?' The assistant checks what is left of the task.':' Send the next command.'}`;
+ if(waiting==='GOAL_REACHED'&&agentCommandDone(report))return 'Done: the screen already showed what was asked. The assistant checks what is left of the task.';
  if(waiting==='STEP_LIMIT'&&report.steps>0)return `Not finished: stopped after ${actions}, the action limit it was given. Check the screen and send the next command.`;
  if(waiting==='COMPLETION_UNCERTAIN'&&report.steps>0)return `Not confirmed: ${actions} done, and the goal may already be complete, but the screen was not clear enough to say. Check the screen, then send the next command.`;
  if(waiting==='LOW_CONFIDENCE'&&report.steps>0)return `Not finished: ${actions} done, then the next step was unclear from the screen. Say what to do next.`;
