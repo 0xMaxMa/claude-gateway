@@ -1,4 +1,4 @@
-import {automationSession} from './tasks/automation-session';
+import {automationSession,confirmationAsked} from './tasks/automation-session';
 import {AcceptInput, OrchestrationStore} from './store';
 import {TaskService} from './tasks/service';
 import {ExecutionCapabilities, OrchestrationError, TaskSnapshot} from './types';
@@ -28,6 +28,24 @@ export function handDirectCommandToAgent(store:OrchestrationStore,task:TaskSnaps
     return true;
   });
 }
+/** Whether the agent's latest reply in this chat, sent at or after `since`, asked the user something (its follow_up
+ *  asks_user, recorded with response.completed). */
+export function agentAskedSince(store:OrchestrationStore,conversationId:string,since:number):boolean {
+  const row=store.get("SELECT json_extract(payload_json,'$.payload.followUp') AS follow_up FROM conversation_events WHERE conversation_id=? AND type='response.completed' AND occurred_at>=? ORDER BY seq DESC LIMIT 1",conversationId,since);
+  return row?.follow_up==='asks_user';
+}
+/**
+ * The agent asked the user something after this settled task last changed, and the task itself asks nothing (no
+ * question, missing field value or confirmation of its own, which the reply must reach): the user's next words
+ * answer the agent. They become a conversation turn (AGENT_QUESTION receipt) and the agent may send them on as one
+ * command (TaskService.agentHandoff). Pod-jinawong r14, task f3042fe1 rev 4: "เอา ฝากนะ ทำไงอะ" answered the agent's
+ * question but ran on the Notion task as a literal command (UNCLEAR).
+ */
+export function agentQuestionPending(store:OrchestrationStore,task:TaskSnapshot):boolean {
+  if(task.activeAttemptId||!['waiting_input','completed','failed'].includes(task.state))return false;
+  if(task.pendingQuestion||task.computerReport?.fieldRequest||confirmationAsked(task))return false;
+  return agentAskedSince(store,task.conversationId,task.updatedAt);
+}
 /** Apply explicitly targeted control without conversational inference. */
 export function liveExecutionInput(store:OrchestrationStore,tasks:TaskService,input:AcceptInput,capabilities:ExecutionCapabilities,maxPending=100):(LiveControlReceipt & {task?:TaskSnapshot;reused:boolean})|undefined {
   const target=input.metadata?.executionTaskId;
@@ -45,11 +63,16 @@ export function liveExecutionInput(store:OrchestrationStore,tasks:TaskService,in
       control.taskId=target;
       const session=automationSession(current);
       if(session?.status==='closed')throw new OrchestrationError('AUTOMATION_SESSION_CLOSED');
-      // Explicit task destination resumes the same session with a fresh command.
-      // Unknown mutations remain fenced by controlByUser.
-      if(input.attachmentIds?.length)throw new OrchestrationError('INVALID_INPUT');
-      task=tasks.controlByUser(receipt.conversationId,input.scope.principalId,target,{id:receipt.inputId,action:'revise',expectedRevision:current.revision,text:input.text});
-      control={...control,status:'applied',revision:task.revision};
+      // A stop or a no heard while the task acted (voice router): the task is paused; the words are the agent's to read.
+      if(input.metadata?.voiceStop===true)control={...control,code:'VOICE_STOP',revision:current.revision};
+      else if(agentQuestionPending(store,current))control={...control,code:'AGENT_QUESTION',revision:current.revision};
+      else{
+        // Explicit task destination resumes the same session with a fresh command.
+        // Unknown mutations remain fenced by controlByUser.
+        if(input.attachmentIds?.length)throw new OrchestrationError('INVALID_INPUT');
+        task=tasks.controlByUser(receipt.conversationId,input.scope.principalId,target,{id:receipt.inputId,action:'revise',expectedRevision:current.revision,text:input.text});
+        control={...control,status:'applied',revision:task.revision};
+      }
     }catch(error){
       if(!(error instanceof OrchestrationError))throw error;
       control.code=error.code;

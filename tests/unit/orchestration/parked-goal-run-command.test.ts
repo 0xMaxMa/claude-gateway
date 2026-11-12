@@ -5,7 +5,7 @@ import {randomUUID} from 'node:crypto';
 import {OrchestrationStore} from '../../../src/orchestration/store';
 import {TaskService} from '../../../src/orchestration/tasks/service';
 import {DecisionService} from '../../../src/orchestration/decisions';
-import {parkedGoalRunNote} from '../../../src/orchestration/tasks/automation-session';
+import {agentGoalRunParked,parkedGoalRunNote,parkedRoundCapped,PARKED_WAKE_LIMIT} from '../../../src/orchestration/tasks/automation-session';
 import type {ComputerTaskReport,WorkerOutcome} from '../../../src/orchestration/types';
 
 // Pod-jinawong, task c449e48d: the agent's goal run "open Terminal, type `which htop`,
@@ -56,6 +56,32 @@ test('c449e48d: the notified agent sends key enter once, as the next direct comm
   // Never twice for the same notification.
   expect(f.code(()=>f.tasks.update(t.context(),f.task.taskId,2,'key enter','when_ready'))).toBe('AGENT_HANDOFF_USED');
   expect(f.store.task(f.task.taskId)!.revision).toBe(2);
+ }finally{f.close();}
+});
+
+// Pod-jinawong 2.1.12, task 059a5cac rev 3: the agent's own command parked again without a question, but only revision 1
+// counted as its goal run, so no notice woke it and the user read "reply in GetPod". Each of its rounds that parks is
+// notified now, and its notice authorizes the next command, up to PARKED_WAKE_LIMIT commands; then no more notices.
+test('each round of the agent\'s commands that parks wakes it again, up to its command cap',()=>{
+ const f=fixture();try{
+  const stopped:ComputerTaskReport={status:'needs_input',reason:'COMMAND_WAITING_INPUT',steps:4,evaluations:5,phase:'terminal',
+   trace:[{phase:'waiting',reason:'JEV_INVALID_RESPONSE',validationReason:'ANSWER_KEYS',sequence:26,round:5,at:2,revision:1,steps:4,evaluations:4}]};
+  let waiting=f.finish(parked(stopped));
+  for(let sent=1;sent<=PARKED_WAKE_LIMIT;sent++){
+   expect(agentGoalRunParked(waiting)).toBe(true);
+   const notice=f.notices().at(-1)!;expect(f.notices()).toHaveLength(sent);
+   const t=f.turn('report',{notice});
+   expect(f.tasks.update(t.context(),f.task.taskId,waiting.revision,'press play','when_ready')).toMatchObject({revision:sent+1,agentCommands:sent,executionControl:{agentHandoff:true}});
+   t.done();
+   waiting=f.finish(parked(stopped));
+  }
+  // The cap: this round is not parked for the agent, so no notice; the runtime wakes it once, report-only (agent-handoff.test.ts).
+  expect(waiting).toMatchObject({state:'waiting_input',revision:PARKED_WAKE_LIMIT+1,agentCommands:PARKED_WAKE_LIMIT});
+  expect(agentGoalRunParked(waiting)).toBe(false);expect(parkedRoundCapped(waiting)).toBe(true);
+  expect(f.notices()).toHaveLength(PARKED_WAKE_LIMIT);
+  // A retried delivery of the last notice authorizes nothing more.
+  const late=f.turn('report',{notice:`${f.notices().at(-1)!}:retry:1`});
+  expect(f.code(()=>f.tasks.update(late.context(),f.task.taskId,waiting.revision,'press play','when_ready'))).toBe('STATE_CONFLICT');
  }finally{f.close();}
 });
 
@@ -124,9 +150,14 @@ test('the one command gains no extra authority: plain when_ready on the current 
   f.finish(parked());
   const [notice]=f.notices(),t=f.turn('report',{notice});
   expect(f.code(()=>f.tasks.update(t.context(),f.task.taskId,1,'key enter','interrupt_and_resume'))).toBe('INVALID_INPUT');
-  expect(f.code(()=>f.tasks.update(t.context(),f.task.taskId,1,'type it','when_ready',undefined,[{application:'Terminal',label:'shell',text:'which htop'}]))).toBe('INVALID_INPUT');
   expect(f.code(()=>f.tasks.update(t.context(),f.task.taskId,0,'key enter','when_ready'))).toBe('REVISION_CONFLICT');
   expect(f.store.task(f.task.taskId)!.revision).toBe(1);
+  // r16: like a hand-off, the one command may carry the text it types (computer_inputs). Pod-jinawong r15, task
+  // 219625e5: refused inputs left the article behind. It is still exactly one command.
+  const inputs=[{application:'Terminal',label:'shell',text:'which htop'}];
+  expect(f.code(()=>f.tasks.update(t.context(),f.task.taskId,1,'type it into the shell and press enter','when_ready',undefined,inputs))).toBe('ok');
+  expect(f.tasks.revision(f.task.taskId,2)).toMatchObject({instructions:'type it into the shell and press enter',computerInputs:inputs,directCommand:true});
+  expect(f.code(()=>f.tasks.update(t.context(),f.task.taskId,2,'key enter','when_ready'))).toBe('AGENT_HANDOFF_USED');
  }finally{f.close();}
 });
 

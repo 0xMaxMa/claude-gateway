@@ -18,6 +18,7 @@ jest.mock('../../../src/voice/providers/voice-catalog', () => ({
 jest.mock('../../../src/voice/providers/registry', () => ({
   sttProvider: jest.fn(() => new FakeSttProvider()), ttsProvider: () => new FakeTtsProvider(),
 }));
+jest.mock('../../../src/voice/task-speech', () => ({ ...jest.requireActual('../../../src/voice/task-speech'), taskSpeechKind: jest.fn(async () => ({ kind: 'command', outcome: 'declared', elapsedMs: 0 })) }));
 // voice.live.fastAck is on by default: keep its acknowledgement call off the network.
 jest.mock('../../../src/voice/fast-ack', () => ({ ...jest.requireActual('../../../src/voice/fast-ack'), fastAcknowledgement: jest.fn(async () => ({ outcome: 'skipped', elapsedMs: 0 })) }));
 
@@ -193,7 +194,7 @@ test('speech that yields no command releases its provisional pause; an admitted 
   const agent={id:'a',allow_tools:true,orchestration:{enabled:true},voice:{...ORCHESTRATION_DEFAULTS.voice,enabled:true,tts:{...ORCHESTRATION_DEFAULTS.voice.tts,voiceId:'fixture'}}} as AgentConfig;
   const submit=jest.fn(async()=>({inputId:'input',response:Promise.resolve('')}));
   let pauses=0;const pause=jest.fn(async()=>`pause-${++pauses}`);const release=jest.fn(async()=>{});
-  const runner={setBrowserVoice:async()=>{},pendingVoiceSpeech:async()=>[],voiceTts:async(_scope:unknown,tts:unknown)=>tts, subscribeVoiceResults:async()=>()=>{},apiSessionExists:async()=>true,authorizeVoiceSession:async()=>{},submitVoiceUtterance:submit,pauseVoiceExecution:pause,releaseVoicePause:release,stopVoiceResponse:jest.fn(),recordVoicePlayback:jest.fn(),saveVoiceReplay:jest.fn()} as unknown as AgentRunner;
+  const runner={setBrowserVoice:async()=>{},pendingVoiceSpeech:async()=>[],voiceTts:async(_scope:unknown,tts:unknown)=>tts, subscribeVoiceResults:async()=>()=>{},apiSessionExists:async()=>true,authorizeVoiceSession:async()=>{},submitVoiceUtterance:submit,voiceTaskActing:async()=>false,pauseVoiceExecution:pause,releaseVoicePause:release,stopVoiceResponse:jest.fn(),recordVoicePlayback:jest.fn(),saveVoiceReplay:jest.fn()} as unknown as AgentRunner;
   const api=new VoiceApi(new Map([['a',runner]]),new Map([['a',agent]]),[{id:'owner',key:'fixture',agents:['a'],allow_tools:true}]);
   const app=express();app.use(express.json());app.use('/api',api.router);
   const server=createServer(app);server.on('upgrade',(req,socket,head)=>api.upgrade(req,socket,head));server.listen(0,'127.0.0.1');await once(server,'listening');
@@ -247,6 +248,92 @@ test('speech that yields no command releases its provisional pause; an admitted 
   }finally{ws?.terminate();await api.close();await new Promise<void>(resolve=>server.close(()=>resolve()));}
 });
 
+// Pod-jinawong r14, task f3042fe1: background words became revises of the Notion goal ("ไม่เอา ไม่", "เอา ฝากนะ ทำไงอะ").
+test('while a computer task acts: filler is dropped and its pause released, a stop or a no pauses and goes to the agent, a command is a command',async()=>{
+  const {sttProvider}=require('../../../src/voice/providers/registry');
+  const {taskSpeechKind}=require('../../../src/voice/task-speech');
+  const stt=new FakeSttProvider();sttProvider.mockReturnValueOnce(stt);
+  const {encodeVoiceFrame}=require('../../../src/voice/protocol');
+  const agent={id:'a',allow_tools:true,orchestration:{enabled:true},voice:{...ORCHESTRATION_DEFAULTS.voice,enabled:true,tts:{...ORCHESTRATION_DEFAULTS.voice.tts,voiceId:'fixture'}}} as AgentConfig;
+  const submit=jest.fn(async()=>({inputId:'input',response:Promise.resolve('')}));
+  // The access wait: the provisional pause does not apply (runner: awaitingDeviceAccess), an explicit stop does.
+  let waitingForAccess=false,pauses=0;
+  const pause=jest.fn(async(_s:string,_p:string,_t:string,stop?:boolean)=>waitingForAccess&&!stop?undefined:`pause-${++pauses}`);const release=jest.fn(async()=>{});
+  // The model's declaration for each transcript heard while the task acts (taskSpeechKind, tested on its own).
+  // "หยุด" times out at the classifier's bound, which counts as a stop.
+  const kinds:Record<string,string>={'อืมมม เอ่อ':'noise','ไม่เอา ไม่':'stop','scroll down':'command','เอา ฝากนะ ทำไงอะ':'command'};
+  jest.mocked(taskSpeechKind).mockImplementation(async(text:string)=>kinds[text]?{kind:kinds[text],outcome:'declared',elapsedMs:1}:{kind:'stop',outcome:'failed',code:'TIMEOUT',elapsedMs:3000});
+  const acting=jest.fn(async()=>true);
+  const runner={setBrowserVoice:async()=>{},pendingVoiceSpeech:async()=>[],voiceTts:async(_scope:unknown,tts:unknown)=>tts, subscribeVoiceResults:async()=>()=>{},apiSessionExists:async()=>true,authorizeVoiceSession:async()=>{},submitVoiceUtterance:submit,voiceTaskActing:acting,pauseVoiceExecution:pause,releaseVoicePause:release,stopVoiceResponse:jest.fn(),recordVoicePlayback:jest.fn(),saveVoiceReplay:jest.fn()} as unknown as AgentRunner;
+  const api=new VoiceApi(new Map([['a',runner]]),new Map([['a',agent]]),[{id:'owner',key:'fixture',agents:['a'],allow_tools:true}]);
+  const app=express();app.use(express.json());app.use('/api',api.router);
+  const server=createServer(app);server.on('upgrade',(req,socket,head)=>api.upgrade(req,socket,head));server.listen(0,'127.0.0.1');await once(server,'listening');
+  let ws:WebSocket|undefined;const events:any[]=[];
+  const debug=jest.spyOn(console,'debug').mockImplementation(()=>{}),info=jest.spyOn(console,'info');
+  const until=async(fn:()=>boolean)=>{const start=Date.now();while(!fn()){if(Date.now()-start>5000)throw Error('voice fixture timeout');await new Promise(r=>setTimeout(r,5));}};
+  const task='11111111-1111-4111-8111-111111111111';
+  try{
+    const ticket=await request(app).post('/api/v1/agents/a/sessions/p/voice-sessions').set('Authorization','Bearer fixture').send({chat_id:'c'});
+    ws=new WebSocket(`ws://127.0.0.1:${(server.address() as any).port}${ticket.body.stream_path}?ticket=${ticket.body.ticket}`,{headers:{'user-agent':'Mozilla/5.0 (Macintosh) AppleWebKit/605.1.15 GetPod/0.1.1-alpha.3.test.5 Safari/605.1.15'}});
+    ws.on('message',(data,binary)=>{if(!binary)events.push(JSON.parse(String(data)));});
+    await until(()=>events.some(e=>e.state==='ready'));
+    ws.send(JSON.stringify({type:'voice.start',execution_task_id:task}));
+    await until(()=>events.some(e=>e.state==='listening'));
+    let utterances=0;
+    const say=async(text:string)=>{
+      await until(()=>events.filter(e=>e.state==='listening'&&e.utterance_id).length>utterances);utterances++;
+      const listening=events.filter(e=>e.state==='listening'&&e.utterance_id).at(-1),session=stt.sessions.at(-1)!;
+      const frames=session.frames.length,commit=session.commitId;
+      ws!.send(encodeVoiceFrame({generation:listening.generation,epoch:0,sequence:1,segmentId:listening.utterance_id,audio:Buffer.alloc(640)}));
+      await until(()=>session.frames.length===frames+1);
+      session.emit({type:'partial',segmentId:'segment',text});
+      ws!.send(JSON.stringify({type:'utterance.commit',last_audio_seq:1,final:true}));
+      await until(()=>Boolean(session.commitId)&&session.commitId!==commit);
+      session.emit({type:'segment_final',segmentId:'segment',text});
+      session.emit({type:'commit_done',commitId:session.commitId!});
+    };
+    // Filler: dropped like an empty transcript, the provisional pause released, nothing admitted.
+    await say('อืมมม เอ่อ');
+    await until(()=>release.mock.calls.length===1);
+    expect(release.mock.calls[0]).toEqual(['p','api:owner',task,'pause-1']);
+    await until(()=>events.some(e=>e.type==='voice.error'&&e.code==='EMPTY_TRANSCRIPT'));
+    expect(submit).not.toHaveBeenCalled();
+    // Logged by kind and cost, never with the words.
+    const lines=info.mock.calls.map(c=>String(c[0])),debugged=debug.mock.calls.map(c=>String(c[0]));
+    expect(lines.find(l=>l.includes('Voice transcript dropped'))).toEqual(expect.not.stringContaining('อืม'));
+    expect(JSON.parse(debugged.find(l=>l.includes('"event":"Voice task speech"'))!)).toMatchObject({level:'debug',kind:'noise',outcome:'declared',elapsedMs:1,model:'claude-haiku-5-5',taskId:task});
+    expect(debugged.filter(l=>l.includes('Voice task speech')).join('')).not.toContain('อืม');
+    expect(acting.mock.calls[0]).toEqual(['p','api:owner',task,'pause-1']);
+    // A short no: never dropped, never a command; the pause stands and the words go to the agent.
+    await say('ไม่เอา ไม่');
+    await until(()=>submit.mock.calls.length===1);
+    expect((submit.mock.calls[0] as unknown[])[8]).toMatchObject({voiceStop:true});
+    expect(release).toHaveBeenCalledTimes(1);
+    // During the access wait the first words do not pause; "หยุด" pauses explicitly.
+    waitingForAccess=true;
+    await say('หยุด');
+    await until(()=>submit.mock.calls.length===2);
+    expect(pause.mock.calls.at(-1)).toEqual(['p','api:owner',task,true]);
+    expect((submit.mock.calls[1] as unknown[])[8]).toMatchObject({voiceStop:true});
+    expect(JSON.parse(debug.mock.calls.map(c=>String(c[0])).filter(l=>l.includes('Voice task speech')).at(-1)!)).toMatchObject({kind:'stop',outcome:'failed',code:'TIMEOUT'});
+    // A command is the user's next command, as before (also f3042fe1's reply, when the task acts).
+    waitingForAccess=false;
+    await say('scroll down');
+    await until(()=>submit.mock.calls.length===3);
+    expect((submit.mock.calls[2] as unknown[])[8]).not.toHaveProperty('voiceStop');
+    await say('เอา ฝากนะ ทำไงอะ');
+    await until(()=>submit.mock.calls.length===4);
+    expect((submit.mock.calls[3] as unknown[])[8]).not.toHaveProperty('voiceStop');
+    expect(release).toHaveBeenCalledTimes(1);
+    // The client and its mute receipts are logged at debug level, with no transcript.
+    ws.send(JSON.stringify({type:'voice.mute',muted:true,policy:'discard',last_audio_seq:0}));
+    await until(()=>debug.mock.calls.some(c=>String(c[0]).includes('"event":"Voice mute"')));
+    const logged=debug.mock.calls.map(c=>JSON.parse(String(c[0])));
+    expect(logged.find(l=>l.event==='Voice client')).toMatchObject({executionTaskId:task,client:'AppleWebKit/605.1.15 GetPod/0.1.1-alpha.3.test.5 Safari/605.1.15'});
+    expect(logged.find(l=>l.event==='Voice mute')).toMatchObject({level:'debug',muted:true,policy:'discard',executionTaskId:task});
+  }finally{debug.mockRestore();info.mockRestore();ws?.terminate();await api.close();await new Promise<void>(resolve=>server.close(()=>resolve()));}
+});
+
 test('confirmed voice words pause the selected task once, retain its target across a selection change, and speak the correction ACK',async()=>{
   const {sttProvider}=require('../../../src/voice/providers/registry');
   const stt=new FakeSttProvider();sttProvider.mockReturnValueOnce(stt);
@@ -255,7 +342,7 @@ test('confirmed voice words pause the selected task once, retain its target acro
   const responseId='aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa';
   const submit=jest.fn(async()=>({inputId:'input',response:Promise.resolve('Correction accepted.'),responseId:()=>responseId,stream:(async function*(){yield {responseId,text:'Correction accepted.'};})()}));
   const pause=jest.fn(async()=>{});
-  const runner={setBrowserVoice:async()=>{},pendingVoiceSpeech:async()=>[],voiceTts:async(_scope:unknown,tts:unknown)=>tts, subscribeVoiceResults:async()=>()=>{},apiSessionExists:async()=>true,authorizeVoiceSession:async()=>{},submitVoiceUtterance:submit,pauseVoiceExecution:pause,stopVoiceResponse:jest.fn(),recordVoicePlayback:jest.fn(),saveVoiceReplay:jest.fn()} as unknown as AgentRunner;
+  const runner={setBrowserVoice:async()=>{},pendingVoiceSpeech:async()=>[],voiceTts:async(_scope:unknown,tts:unknown)=>tts, subscribeVoiceResults:async()=>()=>{},apiSessionExists:async()=>true,authorizeVoiceSession:async()=>{},submitVoiceUtterance:submit,voiceTaskActing:async()=>false,pauseVoiceExecution:pause,stopVoiceResponse:jest.fn(),recordVoicePlayback:jest.fn(),saveVoiceReplay:jest.fn()} as unknown as AgentRunner;
   const api=new VoiceApi(new Map([['a',runner]]),new Map([['a',agent]]),[{id:'owner',key:'fixture',agents:['a'],allow_tools:true}]);
   const app=express();app.use(express.json());app.use('/api',api.router);
   const server=createServer(app);server.on('upgrade',(req,socket,head)=>api.upgrade(req,socket,head));server.listen(0,'127.0.0.1');await once(server,'listening');

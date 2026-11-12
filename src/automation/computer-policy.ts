@@ -33,6 +33,12 @@ export function observedEffect(before: ComputerState, after: ComputerState, acti
     JSON.stringify([after.application,after.windowTitle,after.focusedControl,
     after.controls.map(c=>[c.role,c.value,c.focused]),after.text]);
 }
+/** A step that opens an application is satisfied once that application is in front, even when it already was and
+ *  nothing changed. Only the step runner reads it: a goal loop still counts a repeated open as no progress.
+ *  Pod-jinawong r15, task 219625e5: "open Notion" with Notion in front stopped the step run as STEP_NO_EFFECT. */
+export function openSatisfied(after: ComputerState, action: Record<string,unknown>) {
+  return action.kind === 'open' && typeof action.app_id === 'string' && after.application === action.app_id && after.frontmostProtected !== true;
+}
 /** Why a withheld observation (frontmostProtected) shows nothing, for the decision model and the agent. */
 export const SCREEN_WITHHELD_NOTE='The screen is withheld because a protected app (such as GetPod, where the user typed the command) is frontmost. This is not a missing approval or permission for the target app. Open or switch to the app or browser the command needs (from apps); its screen is observed after that.';
 export function decisionState(state:ComputerState) {

@@ -1,5 +1,5 @@
 import { requireManagedVoiceCredit } from '../voice/managed-quota';
-import { describeVoiceError } from '../voice/errors';
+import { describeVoiceError, isVoiceModelMismatch } from '../voice/errors';
 import { Router, Request, Response } from 'express';
 import { IncomingMessage } from 'http';
 import { Duplex } from 'stream';
@@ -14,14 +14,21 @@ import { resolveOrchestrationConfig } from '../orchestration/config';
 import { sttProvider, ttsProvider } from '../voice/providers/registry';
 import { VoiceSession } from '../voice/session';
 import { decodeVoiceFrame } from '../voice/protocol';
-import { voiceChoices, resolveVoiceId } from '../voice/providers/voice-catalog';
+import { voiceChoices, resolveVoiceId, refuseAutoVoice } from '../voice/providers/voice-catalog';
 import { VoiceReplays } from '../voice/replay';
-import { hasSpokenWords, PCM16 } from '../voice/types';
+import { hasSpokenWords, PCM16, VoiceError } from '../voice/types';
 
 import type { VoiceScope } from '../voice/scope';
 import { voiceCallPairings } from '../voice/call-pairing';
 import { fastAcknowledgement, type FastAckContext } from '../voice/fast-ack';
+import { taskSpeechKind, type TaskSpeech } from '../voice/task-speech';
 
+/** The client's product tokens from its User-Agent (e.g. "AppleWebKit/605.1.15 GetPod/0.1.1 Safari/605.1.15"),
+ *  for diagnosis only: name/version pairs, without the comments that describe the device. */
+export function voiceClient(userAgent: string | undefined): string | undefined {
+  const tokens = (userAgent ?? '').match(/[A-Za-z][\w.-]{0,40}\/[\w.+-]{1,40}/g)?.filter(token => !token.startsWith('Mozilla/'));
+  return tokens?.slice(0, 6).join(' ') || undefined;
+}
 interface VoiceTicket {
   agentId: string; sessionId: string; scope: VoiceScope;
   voiceSessionId: string; expiresAt: number; origin?: string; allowTools: boolean; model?: string;
@@ -200,7 +207,10 @@ export class VoiceApi {
       const runner = this.agents.get(ticket.agentId)!;
       let reconnecting = false;
       let executionTaskId:string|undefined;
+      const client = voiceClient(request.headers['user-agent']);
       let speechTarget:{taskId?:string; pause?:Promise<string|undefined>}|undefined;
+      // The Auto voice this socket speaks with, so a provider refusal can move Auto on. Unset by an explicit choice.
+      let autoVoice:{tts:typeof voice.tts;voiceId:string}|undefined;
       // The pause on first words is provisional: speech that yields no command resumes the task.
       const release=(target:typeof speechTarget)=>{
         if(target?.taskId&&target.pause)void target.pause.then(pauseId=>pauseId?runner.releaseVoicePause(ticket.sessionId,ticket.scope.principalId,target.taskId!,pauseId):undefined)
@@ -222,6 +232,7 @@ export class VoiceApi {
           const diagnostic = { ...describeVoiceError(message.code), ...(typeof message.retryable === 'boolean' ? { retryable: message.retryable } : {}) };
           message = { ...message, ...diagnostic, referenceId };
           console.warn(JSON.stringify({ ts: new Date().toISOString(), level: 'warn', event: 'Voice request failed', agentId: ticket.agentId, sessionId: ticket.sessionId, code: message.code, operation: typeof message.code === 'string' && /^(STT|TTS)_/.test(message.code) ? message.code.slice(0, 3).toLowerCase() : undefined, referenceId, ...diagnostic, stt: voice.stt, tts: { provider: voice.tts.provider, model: voice.tts.model } }));
+          if (autoVoice && String(message.code).startsWith('TTS_') && isVoiceModelMismatch(message.code)) void nextAutoVoice();
         }
         if (ws.readyState === WebSocket.OPEN) {
           if (message.reconnect === true) {
@@ -242,9 +253,25 @@ export class VoiceApi {
           { control: send, audio: data => { if (ws.readyState === WebSocket.OPEN) ws.send(data); }, bufferedBytes: () => ws.bufferedAmount },
           async (text, utteranceId, mark, hints) => {
             const target=speechTarget??{taskId:executionTaskId};speechTarget=undefined;
-            await target.pause;
+            const pauseId=await target.pause;
+            // While a computer task acts, the model declares what the words are (taskSpeechKind). Noise is dropped
+            // like an empty transcript, the provisional pause released, the task goes on. A stop (or a no) is never
+            // dropped: the task is paused and the words go to the agent, never to the task as a command.
+            let kind:TaskSpeech='command';
+            if(target.taskId&&ticket.allowTools&&await runner.voiceTaskActing(ticket.sessionId,ticket.scope.principalId,target.taskId,pauseId).catch(()=>false)){
+              const declared=await taskSpeechKind(text,{model:voice.live.fastAckModel});kind=declared.kind;
+              // Its kind, latency and cost only, never the words.
+              console.debug(JSON.stringify({ts:new Date().toISOString(),level:'debug',event:'Voice task speech',agentId:ticket.agentId,sessionId:ticket.sessionId,voiceSessionId:ticket.voiceSessionId,taskId:target.taskId,utteranceId,
+                model:voice.live.fastAckModel,kind,outcome:declared.outcome,code:declared.code,elapsedMs:declared.elapsedMs,inputTokens:declared.inputTokens,outputTokens:declared.outputTokens}));
+            }
+            if(kind==='noise'){
+              release(target);
+              console.info(JSON.stringify({ts:new Date().toISOString(),level:'info',event:'Voice transcript dropped',agentId:ticket.agentId,sessionId:ticket.sessionId,voiceSessionId:ticket.voiceSessionId,taskId:target.taskId,utteranceId,reason:'NOT_A_COMMAND',characters:text.length}));
+              throw new VoiceError('EMPTY_TRANSCRIPT');
+            }
+            if(kind==='stop'&&!pauseId)await runner.pauseVoiceExecution(ticket.sessionId,ticket.scope.principalId,target.taskId!,true).catch(()=>undefined);
             let accepted;
-            try{accepted=await runner.submitVoiceUtterance(ticket.sessionId,ticket.scope,text,utteranceId,ticket.allowTools,ticket.model,target.taskId,mark,hints);}
+            try{accepted=await runner.submitVoiceUtterance(ticket.sessionId,ticket.scope,text,utteranceId,ticket.allowTools,ticket.model,target.taskId,mark,kind==='stop'?{fastAck:hints?.fastAck===true,voiceStop:true}:hints);}
             catch(error){release(target);throw error;}
             return accepted;
           },
@@ -263,6 +290,20 @@ export class VoiceApi {
       this.sessions.set(ticket.voiceSessionId, { session, socket: ws, ticket });
       let started = false, playbackReady = false, hangup = false;
       let selectedGender: string | undefined;
+      // Auto's voice was refused for this model: later replies use the next Auto voice. The failed reply is not re-spoken.
+      const nextAutoVoice = async () => {
+        const refused = autoVoice;
+        if (!refused) return;
+        try {
+          refuseAutoVoice(refused.tts, refused.voiceId);
+          const voiceId = await resolveVoiceId(refused.tts);
+          if (autoVoice !== refused || ws.readyState !== WebSocket.OPEN) return;
+          autoVoice = { tts: refused.tts, voiceId };
+          session.setVoice(voiceId);
+          selectedGender = (await voiceChoices(refused.tts).catch(() => [])).find(choice => choice.id === voiceId)?.gender;
+          send({ type: 'voice.configured', voice_id: voiceId });
+        } catch { /* No other Auto voice: the next reply reports the same refusal. */ }
+      };
       let unsubscribe: (() => void) | undefined;
       let alive = true;
       let catchingUp = false, resumeFailed = false;
@@ -299,10 +340,12 @@ export class VoiceApi {
           }
           switch (control.type) {
             case 'voice.start': if (control.muted !== undefined && typeof control.muted !== 'boolean') throw new Error('INVALID_CONTROL'); if (started) throw new Error('VOICE_ALREADY_STARTED'); started = true;
+              console.debug(JSON.stringify({ ts: new Date().toISOString(), level: 'debug', event: 'Voice client', agentId: ticket.agentId, sessionId: ticket.sessionId, voiceSessionId: ticket.voiceSessionId, muted: control.muted === true, executionTaskId, client }));
               if (control.voice_id !== undefined) {
                 const choice = (await voiceChoices(voice.tts)).find(choice => choice.id === control.voice_id);
                 if (typeof control.voice_id !== 'string' || !choice) throw new Error('INVALID_CONTROL');
                 selectedGender = choice.gender;
+                autoVoice = undefined;
                 session.setVoice(control.voice_id);
                 send({ type: 'voice.configured', voice_id: control.voice_id });
               }
@@ -313,6 +356,7 @@ export class VoiceApi {
                   const tts = await runner.voiceTts(ticket.scope, voice.tts);
                   const voiceId = await resolveVoiceId(tts);
                   session.setVoice(voiceId);
+                  if (!tts.voiceId.trim()) autoVoice = { tts, voiceId };
                   selectedGender = (await voiceChoices(tts).catch(() => [])).find(choice => choice.id === voiceId)?.gender;
                   send({ type: 'voice.configured', voice_id: voiceId });
                 } catch { send({ type: 'voice.error', code: 'TTS_UNAVAILABLE' }); }
@@ -335,6 +379,7 @@ export class VoiceApi {
               const choices = await voiceChoices(voice.tts);
               if (!choices.some(choice => choice.id === control.voice_id)) throw new Error('INVALID_CONTROL');
               selectedGender = choices.find(choice => choice.id === control.voice_id)?.gender;
+              autoVoice = undefined;
               session.setVoice(control.voice_id);
               send({ type: 'voice.configured', voice_id: control.voice_id }); break;
             }
@@ -346,7 +391,10 @@ export class VoiceApi {
             case 'playback.pause': session.pausePlayback(control.epoch, control.paused); break;
             case 'playback.progress': session.progress(control.epoch, control.sample_offset); break;
             case 'playback.clear.ack': break;
-            case 'voice.mute': if (typeof control.muted !== 'boolean' || !['discard', 'commit'].includes(control.policy)) throw new Error('INVALID_CONTROL'); await session.mute(control.muted, control.policy, control.last_audio_seq); if(control.muted)discardSpeech(); break;
+            case 'voice.mute': if (typeof control.muted !== 'boolean' || !['discard', 'commit'].includes(control.policy)) throw new Error('INVALID_CONTROL');
+              // Receipt of the client's mute state (e.g. auto-pause while Computer Use acts), to prove it in a diagnosis.
+              console.debug(JSON.stringify({ ts: new Date().toISOString(), level: 'debug', event: 'Voice mute', agentId: ticket.agentId, sessionId: ticket.sessionId, voiceSessionId: ticket.voiceSessionId, muted: control.muted, policy: control.policy, executionTaskId, client }));
+              await session.mute(control.muted, control.policy, control.last_audio_seq); if(control.muted)discardSpeech(); break;
             case 'voice.stop': if (control.hangup !== undefined && typeof control.hangup !== 'boolean') throw new Error('INVALID_CONTROL'); hangup = control.hangup === true; await session.close(); ws.close(); break;
             default: throw new Error('INVALID_CONTROL');
           }

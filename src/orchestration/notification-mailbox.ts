@@ -1,17 +1,20 @@
 import { OrchestrationStore } from './store';
 import {CURRENT_CONTROL_ROUND_SQL} from './control-notification';
-import {agentGoalRunSql,agentGoalRunParkedSql} from './tasks/automation-session';
+import {agentRoundSql,agentGoalRunParkedSql} from './tasks/automation-session';
 
-/** The agent's own goal run (its spawn text, revision 1, no user command yet) ended,
- * including an unknown outcome awaiting reconciliation and a goal loop or step run,
- * on either surface, that parked without a question for the owner (agentGoalRunParked).
+/** The agent's own goal run (its spawn text, revision 1, no user command yet) or a later
+ * round the agent commanded (agentRound: its command for a handed-off utterance, a parked
+ * round or a reply to its question) ended (agentRoundEnded), including an unknown outcome
+ * awaiting reconciliation, or a goal loop or step run, on either surface, parked without a
+ * question for the owner (agentGoalRunParked).
  * The task is user-controlled, yet the agent started this work and must hear how it
  * ended. Pod-jinawong 2.0.17: such a failure stayed pending, the agent said nothing
- * and the user saw the chat hang. Later rounds are the user's own commands.
+ * and the user saw the chat hang; r14, task f3042fe1 rev 5: the same for the agent's
+ * handoff command. Other rounds are the user's own commands.
  * Unprompted only within the run's automation-session idle window (bound to `now`):
  * an older end, such as one left pending before this rule, joins the user's next turn.
  * A run without a recorded idle window has no unprompted delivery (fails closed). */
-const AGENT_GOAL_ENDED_SQL = `(controlled.state IN ('completed','failed','needs_reconciliation') AND ${agentGoalRunSql('controlled')} OR ${agentGoalRunParkedSql('controlled')})
+const AGENT_GOAL_ENDED_SQL = `(controlled.state IN ('completed','failed','needs_reconciliation') AND ${agentRoundSql('controlled')} OR ${agentGoalRunParkedSql('controlled')})
   AND controlled.state_version=n.task_state_version
   AND COALESCE(json_extract(controlled.snapshot_json,'$.automationSession.idleSince')+json_extract(controlled.snapshot_json,'$.automationSession.idleTimeoutMs'),0)>?`;
 

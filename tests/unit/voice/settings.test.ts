@@ -357,3 +357,39 @@ test('live.vad edits persist only the changed fields and merge across saves', as
     expect((await patch({ live: { vad: { minLevel: -1 } } })).status).toBe(400);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('Auto preview retries once with the next Auto voice after a voice/model refusal; a chosen voice is reported, not swapped', async () => {
+  const registry = await import('../../../src/voice/providers/registry');
+  const { providerVoiceError } = await import('../../../src/voice/errors');
+  const old = process.env.ELEVENLABS_API_KEY; process.env.ELEVENLABS_API_KEY = 'preview-refusal-test';
+  jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true, json: async () => ({ voices: [
+    { voice_id: 'A-untuned', name: 'Untuned', category: 'professional', fine_tuning: { state: {} } },
+    { voice_id: 'B-refused', name: 'Refused', category: 'professional', fine_tuning: { state: { eleven_v4: 'fine_tuned' } } },
+    { voice_id: 'C-speaks', name: 'Speaks', category: 'generated' },
+  ] }) } as Response);
+  const spoken: string[] = [];
+  const synth = jest.spyOn(registry, 'ttsProvider').mockReturnValue({ id: 'fixture', capabilities: { textStreaming: false, wordAlignment: false, outputFormats: [] }, synthesize: async function* (options) {
+    spoken.push(options.voiceId);
+    if (options.voiceId !== 'C-speaks') throw providerVoiceError('TTS', undefined, { error: 'voice_not_fine_tuned', message: 'provider text' });
+    yield { bytes: Buffer.alloc(320), format: { encoding: 'pcm_s16le', channels: 1, sampleRate: 16000 }, chunkSeq: 0 };
+  } });
+  const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+  const app = express(); app.use(express.json()); app.use(voiceSettingsRouter(new Map([['a', { id: 'a' } as AgentConfig]]), new Map(), [{ id: 'w', key: 'w', agents: ['a'], write: true }]));
+  const preview = (voiceId: string) => request(app).post('/v1/agents/a/voice-settings/preview').set('Authorization', 'Bearer w').send({ provider: 'elevenlabs', model: 'eleven_v3_conversational', voiceId });
+  try {
+    const auto = await preview('');
+    expect(auto.status).toBe(200);
+    expect(spoken).toEqual(['B-refused', 'C-speaks']);
+    spoken.length = 0;
+    const chosen = await preview('B-refused');
+    expect(chosen.status).toBe(503);
+    expect(spoken).toEqual(['B-refused']);
+    expect(chosen.body).toMatchObject({ category: 'model', error: 'This voice cannot be used with the selected speech model. Choose another voice in voice settings.' });
+    const logged = JSON.parse(String(warn.mock.calls.at(-1)?.[0]));
+    expect(logged).toMatchObject({ event: 'Voice preview failed', code: 'TTS_PROVIDER_ERROR_VOICE_MODEL_MISMATCH_REASON_MODEL' });
+    expect(JSON.stringify(logged)).not.toContain('provider text');
+    spoken.length = 0;
+    expect((await preview('')).status).toBe(200);
+    expect(spoken).toEqual(['C-speaks']);
+  } finally { synth.mockRestore(); warn.mockRestore(); jest.restoreAllMocks(); if (old === undefined) delete process.env.ELEVENLABS_API_KEY; else process.env.ELEVENLABS_API_KEY = old; }
+});

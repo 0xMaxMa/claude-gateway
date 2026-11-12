@@ -440,7 +440,7 @@ export class TaskService {
         const handoff=this.agentHandoff(context,task,expectedRevision,mode,browserFields,computerInputs,startUrl);
         // Likewise the agent's own goal run that parked and woke the agent (agentGoalRunParked).
         if(handoff||this.parkedGoalRunCommand(context,task,expectedRevision,mode,browserFields,computerInputs,startUrl))
-          return this.applyDirectControl(context.conversationId,taskId,task,{id:handoffCommandId(context.inputId),action:'revise',text:instruction},undefined,context.inputId);
+          return this.applyDirectControl(context.conversationId,taskId,task,{id:handoffCommandId(context.inputId),action:'revise',text:instruction},undefined,context.inputId,computerInputs);
         throw new OrchestrationError('USER_CONTROLS_AUTOMATION');
       }
       const agentControl = !context.execute &&
@@ -547,16 +547,21 @@ export class TaskService {
   /**
    * The agent turn for a handed-off utterance (needs_agent AGENT_HANDOFF receipt
    * on this input and task) may send one command: same task, the receipt's
-   * revision (no newer user command), the round settled and waiting, no fields,
-   * inputs or navigation, and never twice for the same utterance.
+   * revision (no newer user command), the round settled and waiting, no browser
+   * fields or navigation, and never twice for the same utterance. It may carry the
+   * computer inputs it prepared (a long text to type): they come from the agent,
+   * never from the screen. Pod-jinawong r14, task f3042fe1 rev 5: the agent resent
+   * the goal without its 812-character story and the round could not type it.
    */
   private agentHandoff(context:CommandContext,task:TaskSnapshot,expectedRevision:number,mode:ChangeMode,browserFields:unknown,computerInputs:unknown,startUrl:unknown):boolean {
     const receipt=this.liveReceipt(context.inputId);
-    if(receipt?.code!=='AGENT_HANDOFF'||receipt.status!=='needs_agent'||receipt.taskId!==task.taskId)return false;
+    // Also a reply to the agent's own question about the task (AGENT_QUESTION, live-execution-input agentQuestionPending)
+    // and a stop or a no the user said while it acted (VOICE_STOP): the agent decides what the words mean.
+    if(!receipt||!['AGENT_HANDOFF','AGENT_QUESTION','VOICE_STOP'].includes(receipt.code??'')||receipt.status!=='needs_agent'||receipt.taskId!==task.taskId)return false;
     if(!context.execute||task.ownerPrincipalId!==context.principalId)throw new OrchestrationError('EXECUTION_DENIED');
     if(this.store.get("SELECT 1 FROM task_revisions WHERE task_id=? AND json_extract(payload_json,'$.agentHandoffInputId')=?",task.taskId,context.inputId))
       throw new OrchestrationError('AGENT_HANDOFF_USED','The one command for this handed-off utterance was already sent. Report its outcome; do not send another.');
-    if(mode!=='when_ready'||browserFields!==undefined||computerInputs!==undefined||startUrl!==undefined)throw new OrchestrationError('INVALID_INPUT','A handed-off command is one plain next command: mode=when_ready, no fields, inputs or start_url.');
+    if(mode!=='when_ready'||browserFields!==undefined||startUrl!==undefined)throw new OrchestrationError('INVALID_INPUT','A handed-off command is one plain next command: mode=when_ready, no browser fields or start_url (computer_inputs may carry text to type).');
     if(expectedRevision!==receipt.revision||task.revision!==receipt.revision)throw new OrchestrationError('REVISION_CONFLICT','The user has given a newer command since this utterance; do not act on it.');
     if(task.activeAttemptId||!(pausedForCommand(task)||stoppedForCommand(task)))throw new OrchestrationError('STATE_CONFLICT');
     return true;
@@ -579,7 +584,9 @@ export class TaskService {
       throw new OrchestrationError('AGENT_HANDOFF_USED','The one command for this parked run was already sent. Report its outcome; do not send another.');
     if(!agentGoalRunParked(task)||!this.parkedRoundNotice(context,task,String(notice.id)))
       throw new OrchestrationError('STATE_CONFLICT','The run changed since this notice (a newer command, question or pause). Read task_status; do not act on this notice.');
-    if(mode!=='when_ready'||browserFields!==undefined||computerInputs!==undefined||startUrl!==undefined)throw new OrchestrationError('INVALID_INPUT','The command for a parked run is one plain next command: mode=when_ready, no fields, inputs or start_url.');
+    // Like a hand-off, the command may carry the text it types (computer_inputs): the rest of the goal often includes it.
+    // Pod-jinawong r15, task 219625e5: refused inputs left the agent's article behind, and it sent "press New page" alone.
+    if(mode!=='when_ready'||browserFields!==undefined||startUrl!==undefined)throw new OrchestrationError('INVALID_INPUT','The command for a parked run is one plain command for the rest of the goal: mode=when_ready, no browser fields or start_url (computer_inputs may carry text to type).');
     if(expectedRevision!==task.revision)throw new OrchestrationError('REVISION_CONFLICT');
     return true;
   }
@@ -588,8 +595,9 @@ export class TaskService {
     const row=this.store.get("SELECT payload_json FROM conversation_events WHERE type='input.execution_control' AND json_extract(payload_json,'$.payload.inputId')=? ORDER BY seq DESC LIMIT 1",inputId);
     return row?JSON.parse(String(row.payload_json)).payload:undefined;
   }
-  /** The owner's pause/revise/resume, or (agentHandoffInputId) the agent's single command for a handed-off utterance. Runs inside the caller's transaction. */
-  private applyDirectControl(conversationId:string,taskId:string,task:TaskSnapshot,command:{id:string;action:'pause'|'revise'|'resume';text?:string},record?:(task:TaskSnapshot)=>void,agentHandoffInputId?:string):TaskSnapshot {
+  /** The owner's pause/revise/resume, or (agentHandoffInputId) the agent's single command for a handed-off utterance,
+   *  with the inputs it prepared (handoffInputs). Runs inside the caller's transaction. */
+  private applyDirectControl(conversationId:string,taskId:string,task:TaskSnapshot,command:{id:string;action:'pause'|'revise'|'resume';text?:string},record?:(task:TaskSnapshot)=>void,agentHandoffInputId?:string,handoffInputs?:TaskRevision['computerInputs']):TaskSnapshot {
     task.automationController='user';
     const paused=pausedForCommand(task);
     const recoverable=command.action==='revise'&&stoppedForCommand(task);
@@ -625,14 +633,33 @@ export class TaskService {
     if(recoverable&&!paused){delete task.computerReport;delete task.failure;delete task.browserReport;delete task.gatewayDispatch;}
     // The owner's new command supersedes any pending question (saveTask closes its record).
     if(command.action==='revise')delete task.pendingQuestion;
-    this.store.run('INSERT INTO task_revisions VALUES(?,?,?)',taskId,task.revision,JSON.stringify({...previous,requestBrowserConsent:command.action!=='pause',revision:task.revision,instructions,mode:'interrupt_and_resume',computerInputs:command.action==='revise'?undefined:previous.computerInputs,answers:command.action==='revise'?undefined:previous.answers,browserRecoveryCount:0,guidance:undefined,guidanceBasis:undefined,...(command.action==='revise'?{directCommand:true}:{}),agentHandoffInputId}));
+    // A new command drops the previous one's prepared values, unless it resends that same goal (sameGoalInputs).
+    const computerInputs=command.action!=='revise'?previous.computerInputs:handoffInputs??this.sameGoalInputs(task,command.text!);
+    this.store.run('INSERT INTO task_revisions VALUES(?,?,?)',taskId,task.revision,JSON.stringify({...previous,requestBrowserConsent:command.action!=='pause',revision:task.revision,instructions,mode:'interrupt_and_resume',computerInputs,answers:command.action==='revise'?undefined:previous.answers,browserRecoveryCount:0,guidance:undefined,guidanceBasis:undefined,...(command.action==='revise'?{directCommand:true}:{}),agentHandoffInputId}));
     task.executionControl={id:command.id,action:command.action,revision:task.revision,phase:task.activeAttemptId?'pending':command.action==='pause'?'paused':'pending',requestedAt:Date.now(),...(agentHandoffInputId?{agentHandoff:true as const}:{})};
+    // The agent's commands since the user's own last one cap its parked-round wakes (PARKED_WAKE_LIMIT).
+    if(agentHandoffInputId)task.agentCommands=(task.agentCommands??0)+1;else delete task.agentCommands;
     task.state=task.activeAttemptId?'interrupting':command.action==='pause'?'waiting_input':'queued';
     task.latestProgress={source:'runtime',observedAt:Date.now(),text:((task.activeAttemptId?'Control accepted; settling the current action before applying it.':command.action==='pause'?'Automation paused.':'Control accepted; resuming from a fresh observation.')+dropped).slice(0,4096)};
     this.store.saveTask(task,task.stateVersion);
     this.store.appendEvent(conversationId,'task.control_accepted',{taskId,control:task.executionControl},taskId);
     record?.(task);
     return task;
+  }
+  /** The computer inputs prepared for an earlier revision whose goal text this command resends (whitespace and case
+   *  aside): the agent's command after a noise revise, or the user repeating the goal, keeps the story it was to type.
+   *  The values come only from those revisions (the agent's or the user's), never from the screen.
+   *  Pod-jinawong r14, task f3042fe1: "ไม่เอา ไม่" (rev 3) dropped the inputs, and rev 5 resent rev 1's goal without them. */
+  private sameGoalInputs(task:TaskSnapshot,text:string):TaskRevision['computerInputs'] {
+    if(task.gatewayTarget?.adapter!=='computer')return undefined;
+    const goal=(value:unknown)=>typeof value==='string'?value.normalize('NFC').replace(/\s+/g,' ').trim().toLowerCase():'';
+    const wanted=goal(text);
+    if(!wanted)return undefined;
+    for(const row of this.store.all("SELECT payload_json FROM task_revisions WHERE task_id=? AND json_array_length(payload_json,'$.computerInputs')>0 ORDER BY revision DESC",task.taskId)){
+      const revision=JSON.parse(String(row.payload_json)) as TaskRevision;
+      if(goal(revision.instructions)===wanted)return revision.computerInputs;
+    }
+    return undefined;
   }
   /** A user's direct command is still settling, so a new one joins the FIFO queue. */
   private queuesDirectCommand(task:TaskSnapshot,previous:TaskRevision):boolean {
@@ -836,7 +863,7 @@ export class TaskService {
         this.store.appendEvent(conversationId, 'input.accepted', { inputId });
       }
       this.handleAnswerInput(conversationId, inputId);
-      const answered = this.answerOwned(conversationId, taskId, questionId, answer, inputId);
+      const answered = this.answerOwned(conversationId, taskId, questionId, answer, inputId, undefined, undefined, true);
       this.store.appendEvent(conversationId, 'task.user_answer', { taskId, questionId, principalId, inputId, answerHash: payloadHash(answer) }, taskId);
       return answered;
     });
@@ -853,7 +880,7 @@ export class TaskService {
   private assertQuestion(task: TaskSnapshot, questionId: string): void {
     if (task.state !== 'waiting_input' || task.pendingQuestion?.questionId !== questionId || task.pendingQuestion.revision !== task.revision) throw new OrchestrationError('STALE_QUESTION');
   }
-  private answerOwned(conversationId: string, taskId: string, questionId: string, answer: string, inputId: string, prepared?:TaskRevision['answers'], computerInputs?:TaskRevision['computerInputs']): TaskSnapshot {
+  private answerOwned(conversationId: string, taskId: string, questionId: string, answer: string, inputId: string, prepared?:TaskRevision['answers'], computerInputs?:TaskRevision['computerInputs'], byUser=false): TaskSnapshot {
     const task = this.owned(taskId, conversationId), version = task.stateVersion;
     this.assertQuestion(task, questionId);
     // Persist early answers, while fencing scheduling until the old attempt really ends.
@@ -866,6 +893,8 @@ export class TaskService {
     this.store.run('INSERT INTO task_revisions VALUES(?,?,?)', taskId, task.revision, JSON.stringify({ ...previous, ...(computerInputs!==undefined?{computerInputs}:{}), revision: task.revision,
       answers: [...(previous.answers ?? []), ...(prepared??[]), { questionId, text: answer, inputId, ...(browserFieldLabel ? {browserFieldLabel} : {}),...(computerField?{computerFieldLabel:computerField.label,computerApplication:computerField.application,computerWindowTitle:computerField.windowTitle,computerFieldRole:computerField.role}:{}) }], originatingInputId: inputId }));
     task.pendingQuestion = undefined;
+    // The user's own answer starts a fresh count of the agent's commands (PARKED_WAKE_LIMIT).
+    if (byUser) delete task.agentCommands;
     task.state = task.activeAttemptId ? (task.gatewayTarget ? 'running' : 'interrupting') : 'queued';
     this.store.saveTask(task, version);
     this.store.enqueue(task.activeAttemptId && !task.gatewayTarget ? 'interrupt' : 'schedule', `answer:${questionId}`, { taskId });
@@ -1239,11 +1268,12 @@ export class TaskService {
     const [next, ...rest] = queue;
     const previous = this.revision(task.taskId, task.revision);
     task.revision++;
-    this.store.run('INSERT INTO task_revisions VALUES(?,?,?)', task.taskId, task.revision, JSON.stringify({...previous, requestBrowserConsent: true, revision: task.revision, instructions: next.text, mode: 'interrupt_and_resume', computerInputs: undefined, answers: undefined, browserRecoveryCount: 0, guidance: undefined, guidanceBasis: undefined, directCommand: true}));
+    this.store.run('INSERT INTO task_revisions VALUES(?,?,?)', task.taskId, task.revision, JSON.stringify({...previous, requestBrowserConsent: true, revision: task.revision, instructions: next.text, mode: 'interrupt_and_resume', computerInputs: this.sameGoalInputs(task, next.text), answers: undefined, browserRecoveryCount: 0, guidance: undefined, guidanceBasis: undefined, directCommand: true}));
     task.queuedCommands = rest.length ? rest : undefined;
     if (!task.queuedCommands) delete task.queuedCommands;
     if (task.state === 'completed') { delete task.result; delete task.computerReport; delete task.browserReport; delete task.gatewayDispatch; }
     task.executionControl = { id: next.id, action: 'revise', revision: task.revision, phase: 'pending', requestedAt: Date.now() };
+    delete task.agentCommands;
     task.state = 'queued';
     const done = task.latestProgress?.text;
     task.latestProgress = { source: 'runtime', observedAt: Date.now(), text: [done, `Running queued command: ${JSON.stringify(next.text.slice(0, 120))}${rest.length ? ` (${rest.length} more waiting)` : ''}.`].filter(Boolean).join('\n').slice(0, 4096) };

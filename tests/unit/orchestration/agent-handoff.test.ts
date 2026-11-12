@@ -5,6 +5,7 @@ import {tmpdir} from 'node:os';
 import {randomUUID} from 'node:crypto';
 import {AgentOrchestrationRuntime} from '../../../src/orchestration/runtime';
 import {liveExecutionInput,liveControlReceipt} from '../../../src/orchestration/live-execution-input';
+import {agentGoalRunParked,PARKED_WAKE_LIMIT} from '../../../src/orchestration/tasks/automation-session';
 import {SessionStore} from '../../../src/session/store';
 import {HistoryDB} from '../../../src/history/db';
 import type {SessionProcess} from '../../../src/session/process';
@@ -219,13 +220,15 @@ describe.each(['browser','computer'] as const)('%s: a typed hand-off command tha
   f.onTurn(()=>{
    const revision=f.runtime.store.task(f.taskId)!.revision;
    if(!sent){sent=true;f.runtime.tasks.update(f.agentContext(applied.inputId),f.taskId,revision,'play "Song" on Spotify in Chrome','when_ready');return;}
-   const report=f.runtime.store.get("SELECT id FROM conversation_inputs WHERE json_extract(ingress_json,'$.ingressKey') LIKE 'handoff-not-done:%' ORDER BY input_seq DESC LIMIT 1");
+   const report=f.runtime.store.get("SELECT id FROM conversation_inputs WHERE json_extract(ingress_json,'$.ingressKey') LIKE 'handoff-not-done:%' OR json_extract(ingress_json,'$.ingressKey') LIKE 'parked-cap:%' ORDER BY input_seq DESC LIMIT 1");
    if(report)onReport(String(report.id));
   });
   f.settle(gaveUp(adapter));
   await until(()=>sent);await f.idle();
   return f.prompts.length;
  };
+ // A computer command of the agent's that stops without a question parks instead (agentGoalRunParked: the service's
+ // parked notice wakes it); only past its command cap is it woken here, report-only (parkedRoundCapped).
  test('wakes the agent once, report-only: it cannot send a command, and a replayed settle never wakes it again',async()=>{
   const f=await fixture(adapter);try{
    const applied=f.command(odd,'text');
@@ -236,10 +239,11 @@ describe.each(['browser','computer'] as const)('%s: a typed hand-off command tha
     try{f.runtime.tasks.update({...f.agentContext(inputId),execute:false},f.taskId,revision,'try again','when_ready');refused.push('ok');}catch(error){refused.push((error as {code?:string}).code);}
    });
    const revision=f.runtime.store.task(f.taskId)!.revision;
+   if(adapter==='computer'){const t=f.runtime.store.task(f.taskId)!;expect(t.agentCommands).toBe(1);t.agentCommands=PARKED_WAKE_LIMIT;f.runtime.store.transaction(()=>f.runtime.store.saveTask(t,t.stateVersion));}
    f.settle(gaveUp(adapter));
    await until(()=>f.prompts.length===turns+1);await f.idle();
    const prompt=f.prompts.at(-1)!;
-   expect(prompt).toContain('has ended without doing it');expect(prompt).toContain('report-only');
+   expect(prompt).toContain(adapter==='computer'?'takes no more commands from you':'has ended without doing it');expect(prompt).toContain('report-only');
    expect(prompt).toContain('Execution eligible: false');
    expect(refused).toEqual(['USER_CONTROLS_AUTOMATION']);
    expect(f.runtime.store.task(f.taskId)!.revision).toBe(revision);
@@ -250,6 +254,24 @@ describe.each(['browser','computer'] as const)('%s: a typed hand-off command tha
    expect(f.handoffs()).toHaveLength(1);
    // Only the agent's own replies (the fixture's "Opening it.") reach the listener; no gateway line is spoken.
    expect(spoken(f.heard).every(text=>text==='Opening it.')).toBe(true);
+  }finally{await f.close();}
+ });
+ if(adapter==='computer')test('a command that stops without a question parks: no report-only wake, the parked notice decides',async()=>{
+  // Pod-jinawong 2.1.12, task 059a5cac rev 3: the agent's handed-off command stopped after 4 actions with no question
+  // and nobody was woken. The service notifies a parked round (agentGoalRunParked); the settle adds no second wake.
+  const f=await fixture(adapter);try{
+   const applied=f.command(odd,'text');
+   const turns=await handOff(f,applied);
+   f.settle(gaveUp(adapter));
+   await new Promise(r=>setTimeout(r,50));await f.idle();
+   expect(agentGoalRunParked(f.runtime.store.task(f.taskId)!)).toBe(true);
+   expect(f.prompts).toHaveLength(turns);
+   expect(f.runtime.store.get("SELECT 1 FROM conversation_inputs WHERE json_extract(ingress_json,'$.ingressKey') LIKE 'handoff-not-done:%'")).toBeUndefined();
+   // The agent's command counts toward its cap; the user's own next command starts the count again.
+   expect(f.runtime.store.task(f.taskId)!.agentCommands).toBe(1);
+   f.command('play the first song','text');
+   expect(f.runtime.store.task(f.taskId)!.agentCommands).toBeUndefined();
+   expect(agentGoalRunParked(f.runtime.store.task(f.taskId)!)).toBe(false);
   }finally{await f.close();}
  });
  test('live voice speaks the outcome instead: no extra agent turn',async()=>{
@@ -284,5 +306,60 @@ test('a computer hand-off goal that reached its goal is not reported',async()=>{
   f.settle({status:'succeeded',reason:'GOAL_REACHED',steps:3,evaluations:4,phase:'terminal',accessReleased:true,trace:[]});
   await new Promise(r=>setTimeout(r,50));await f.idle();
   expect(f.prompts).toHaveLength(turns);
+ }finally{await f.close();}
+});
+
+// Pod-jinawong r14, task f3042fe1 rev 5: the agent's command for a handed-off utterance failed; its notification stayed
+// pending and nobody told the user. It now wakes the agent once, report-only; the round says nothing itself.
+test('a computer hand-off command whose round ends (failed) wakes the agent once to report it',async()=>{
+ const f=await fixture('computer');try{
+  const applied=f.command(odd);
+  let sent=false;
+  f.onTurn(()=>{if(sent)return;sent=true;f.runtime.tasks.update(f.agentContext(applied.inputId),f.taskId,f.runtime.store.task(f.taskId)!.revision,'open Notion and type the story','when_ready');});
+  f.settle(gaveUpComputer());
+  await until(()=>sent);await f.idle();
+  const turns=f.prompts.length;f.heard.mockClear();
+  // No device is connected here: the gateway runs the agent's command and its round fails, as a real failure ends.
+  await until(()=>f.runtime.store.task(f.taskId)!.state==='failed');
+  await until(()=>f.prompts.length>turns);await f.idle();
+  expect(f.prompts.at(-1)).toContain('Your own command on automation task');
+  expect(f.prompts.at(-1)).toContain('has failed, and nobody has told the user yet');
+  expect(f.prompts.at(-1)).toContain('This turn is report-only');
+  expect(f.prompts).toHaveLength(turns+1);
+  // Live voice speaks that report (the agent's own reply), and only it.
+  expect(spoken(f.heard)).toEqual(['Opening it.']);f.heard.mockClear();
+  // Settling that ended round again speaks nothing and wakes nobody else (the notification is the one report).
+  const ended=f.runtime.store.task(f.taskId)!;
+  f.runtime.settleDirectRound(ended,{revision:ended.revision,inputId:ended.executionControl!.id,outcome:{type:'failed',failure:ended.failure!,computerReport:gaveUpComputer()}});
+  await new Promise(r=>setTimeout(r,50));await f.idle();
+  expect(f.heard).not.toHaveBeenCalled();
+  expect(f.prompts).toHaveLength(turns+1);
+ }finally{await f.close();}
+});
+
+// Pod-jinawong r14, task f3042fe1 rev 4: the user's answer to the agent's question ran on the task as a literal command.
+test('a reply to the agent\'s question goes to the agent, which may send it on as one command or end the task',async()=>{
+ const f=await fixture('computer');try{
+  const applied=f.command(odd);
+  f.onTurn(()=>{});
+  f.settle(gaveUpComputer());
+  await until(()=>f.prompts.length===1);await f.idle();
+  // The agent's turn asked the user something (follow_up asks_user, recorded with response.completed).
+  f.runtime.store.transaction(()=>f.runtime.store.appendEvent(f.runtime.store.task(f.taskId)!.conversationId,'response.completed',{responseId:randomUUID(),followUp:'asks_user'}));
+  const revision=f.runtime.store.task(f.taskId)!.revision;
+  const results:unknown[]=[];
+  f.onTurn(text=>{
+   if(!text.includes('answers the question you just asked'))return;
+   const reply=liveControlReceipt(f.runtime.store,results[0] as string)!;
+   try{f.runtime.tasks.update(f.agentContext(reply.inputId),f.taskId,revision,'open Notion and type the story','when_ready',undefined,[{application:'notion.id',label:'Page body',text:'Once upon a time.'}]);results.push('sent');}catch(error){results.push((error as {code?:string}).code);}
+  });
+  const reply=f.command('เอา ฝากนะ ทำไงอะ');results.push(reply.inputId);
+  expect(reply).toMatchObject({status:'needs_agent',code:'AGENT_QUESTION',taskId:f.taskId,revision});
+  await until(()=>results.length===2);await f.idle();
+  expect(results[1]).toBe('sent');
+  expect(f.prompts.at(-1)).toContain('เอา ฝากนะ ทำไงอะ');
+  // The agent's command carries the text it prepared; the user's own words never ran as a command.
+  expect(f.runtime.tasks.revision(f.taskId,revision+1)).toMatchObject({instructions:'open Notion and type the story',agentHandoffInputId:reply.inputId,computerInputs:[{application:'notion.id',label:'Page body',text:'Once upon a time.'}]});
+  expect(f.runtime.store.all('SELECT revision FROM task_revisions WHERE task_id=? AND json_extract(payload_json,\'$.instructions\')=?',f.taskId,'เอา ฝากนะ ทำไงอะ')).toEqual([]);
  }finally{await f.close();}
 });

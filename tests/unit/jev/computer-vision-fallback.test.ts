@@ -24,7 +24,7 @@ function fixture(vision?:(use?:string)=>any,revision=1){
  const connectors={get:()=>({connectorId:'c',scope:{device_id:'d',grant_id:'g'}}),connection:()=>({endpoint:'https://computer.example/mcp',headers:{}})};
  const adapter=new ComputerTaskAdapter({agentId:'a',root,connectors:connectors as any,allowed:()=>true,member:()=>true,active:()=>true,evaluate:jest.fn(),needsInput:()=>true,...(vision?{vision}:{})});
  const task={agentId:'a',taskId:'t',ownerPrincipalId:'p',conversationId:'c',revision,automationController:'user',gatewayTarget:{adapter:'computer',sessionId:'target'}} as any;
- const run=async(goal:string)=>{await adapter.submit(task,'r1',goal);for(let i=0;i<50;i++){const outcome=await adapter.inspect(task,'r1');if(typeof outcome==='object')return outcome as any;await new Promise(r=>setImmediate(r));}throw Error('not settled');};
+ const run=async(goal:string,inputs?:Array<{application:string;label:string;text:string}>)=>{await adapter.submit(task,'r1',goal,[],false,inputs);for(let i=0;i<50;i++){const outcome=await adapter.inspect(task,'r1');if(typeof outcome==='object')return outcome as any;await new Promise(r=>setImmediate(r));}throw Error('not settled');};
  return {run,close:async()=>{await adapter.close();rmSync(root,{recursive:true,force:true});}};
 }
 /** The Accessibility round as it ran: its progress reaches the round's receipt, as on the pod. */
@@ -46,6 +46,20 @@ test('no control over Accessibility: the rest of the goal runs from the screensh
   expect(runVisionComputerUse).toHaveBeenCalledTimes(1);
   expect(outcome.type).toBe('completed');
   expect(outcome.computerReport).toMatchObject({status:'succeeded',reason:'GOAL_REACHED',steps:4,evaluations:8});
+ }finally{await f.close();}
+});
+
+// Pod-jinawong r14, task f3042fe1: the vision fallback never got the round's prepared story (computer.ts passed only the goal).
+test('the fallback gets the round\'s prepared inputs, so it may type them',async()=>{
+ const f=fixture(fallbackOnly);try{
+  const inputs=[{application:'notion.id',label:'Page body',text:'Once upon a time.'}];
+  runComputerUse.mockImplementationOnce(stuckOn({...SPOTIFY,application:'notion.id',windowTitle:'Test story'}));
+  runVisionComputerUse.mockImplementationOnce(async(input:any)=>{
+   expect(input).toMatchObject({literalText:true,approvedOnly:true,preparedInputs:inputs});
+   return REACHED;
+  });
+  expect((await f.run('open Notion and type the story into the page body',inputs)).type).toBe('completed');
+  expect(runVisionComputerUse).toHaveBeenCalledTimes(1);
  }finally{await f.close();}
 });
 
@@ -113,6 +127,31 @@ test('no fallback without visionFallback, for a user one-shot command, or for an
    expect(runVisionComputerUse).not.toHaveBeenCalled();
   }finally{await f.close();}
  }
+});
+
+// Pod-jinawong task 56f64e16 rev 8: Spotify web's row Play only shows under the pointer. GetPod Desktop 0.1.1 answers
+// TARGET_NOT_REACHED when it cannot reach such a button even after hovering; the goal round goes on from the screenshot.
+// TARGET_OCCLUDED (another window covers the point) stops as before.
+const CHROME_PAGE={generation:'g1',application:'chrome.exe',windowTitle:'Search for sillyfools | Spotify - Google Chrome',apps:[],truncated:true,controls:[{ref:'c5',role:'AXButton',label:'Play',actions:['press']}]};
+const refusedClick=(code:string)=>({...STUCK,steps:0,lastAction:undefined,trace:{events:[ev(1,'acted',{action:'press',outcome:'not_executed',reason:code,nativePhase:'pointer_hit_ancestor',steps:0}),ev(2,'waiting',{reason:code,steps:0}),ev(3,'terminal',{status:'needs_input',reason:'COMMAND_WAITING_INPUT',steps:0})],truncated:false}});
+test('a button the helper could not reach under the pointer: the goal goes on from the screenshot',async()=>{
+ const f=fixture(fallbackOnly);try{
+  runComputerUse.mockImplementationOnce(stuckOn(CHROME_PAGE,refusedClick('TARGET_NOT_REACHED')));
+  runVisionComputerUse.mockImplementationOnce(async(input:any)=>{
+   expect(input).toMatchObject({impact:true,yieldAfterAction:false,literalText:true,approvedOnly:true});
+   expect(input.interactionContext).toContain('Accessibility already took 0 actions toward this goal in this round and then could not reach a button that only appears while the pointer is over it (nothing was clicked).');
+   return REACHED;
+  });
+  const outcome=await f.run('click Play on the song in Chrome');
+  expect(runVisionComputerUse).toHaveBeenCalledTimes(1);expect(outcome.type).toBe('completed');
+ }finally{await f.close();}
+});
+test('a click another window covered is no reason to click from the screenshot: no fallback',async()=>{
+ const f=fixture(fallbackOnly);try{
+  runComputerUse.mockImplementationOnce(stuckOn(CHROME_PAGE,refusedClick('TARGET_OCCLUDED')));
+  const outcome=await f.run('click Play on the song in Chrome');
+  expect(runVisionComputerUse).not.toHaveBeenCalled();expect(outcome.type).toBe('paused');
+ }finally{await f.close();}
 });
 
 /** A Jev choice: `choice` at `confidence`, the rest spread evenly. */

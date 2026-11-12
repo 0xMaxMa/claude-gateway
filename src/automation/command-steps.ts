@@ -138,6 +138,12 @@ export function withoutComputerUseDirective(command:string) {
   const end = command.indexOf('\n\n');
   return end < 0 ? '' : command.slice(end + 2);
 }
+/** Whether two command texts are the same words: the GetPod Desktop directive aside, Unicode-normalized,
+ *  whitespace collapsed and case folded. A structural comparison, never a reading of what the words mean. */
+export function sameCommandText(a:string, b:string) {
+  const words = (text:string) => withoutComputerUseDirective(text).normalize('NFC').replace(/\s+/gu, ' ').trim().toLocaleLowerCase();
+  return words(a) === words(b);
+}
 
 /**
  * Returns ordered atomic steps only for an unmistakable explicit step list.

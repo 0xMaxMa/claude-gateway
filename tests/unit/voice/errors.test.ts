@@ -1,4 +1,4 @@
-import { describeVoiceError, providerHttpError, providerVoiceError, voiceProviderRequest } from '../../../src/voice/errors';
+import { describeVoiceError, isVoiceModelMismatch, providerHttpError, providerVoiceError, voiceProviderRequest } from '../../../src/voice/errors';
 
 test.each([[402,'payment',false],[401,'authentication',false],[403,'permission',false],[429,'quota_or_rate_limit',false],[503,'unavailable',true],[504,'timeout',true],[400,'invalid_request',false]])('classifies HTTP %s without guessing', (status, category, retryable) => {
   expect(describeVoiceError(providerVoiceError('STT', status as number))).toMatchObject({ category, retryable, httpStatus: status });
@@ -71,4 +71,19 @@ test('daily quota needs structured per-day evidence, not a generic RESOURCE_EXHA
 });
 test('an empty transcript is recognized as no speech, not an unknown failure', () => {
   expect(describeVoiceError('EMPTY_TRANSCRIPT')).toEqual({ category: 'no_speech', message: 'No speech was recognized. Please speak again.', retryable: true });
+});
+test('an in-band voice_not_fine_tuned is a model failure that points at the voice, without provider text', () => {
+  const error = providerVoiceError('TTS', undefined, { message: "Voice '7XW5JhaNn90bnFojQ5DA' is not fine-tuned and cannot be used.", error: 'voice_not_fine_tuned', code: 1008 });
+  expect(error.code).toBe('TTS_PROVIDER_ERROR_VOICE_MODEL_MISMATCH_REASON_MODEL');
+  expect(isVoiceModelMismatch(error.code)).toBe(true);
+  const described = describeVoiceError(error);
+  expect(described).toMatchObject({ category: 'model', retryable: false });
+  expect(described.message).toContain('Choose another voice in voice settings');
+  expect(JSON.stringify(described)).not.toContain('7XW5');
+  for (const code of ['model_not_found', 'voice_not_found']) {
+    const other = providerVoiceError('TTS', undefined, { error: code });
+    expect(isVoiceModelMismatch(other.code)).toBe(false);
+    expect(describeVoiceError(other)).toMatchObject({ category: 'model', message: 'The selected model or voice is unavailable. Check the voice settings and provider access.' });
+  }
+  expect(isVoiceModelMismatch('VOICE_MODEL_MISMATCH')).toBe(false);
 });
