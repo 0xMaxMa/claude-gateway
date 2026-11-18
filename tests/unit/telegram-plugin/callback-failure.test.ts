@@ -3,7 +3,7 @@ import type { AddressInfo } from 'node:net';
 import { requestSessionInfo } from '../../../mcp/tools/telegram/session-browser';
 import { LiveTaskBrowser } from '../../../mcp/tools/telegram/task-browser';
 import {
-  CallbackHttpError, callbackFailureReply, classifyCallbackFailure, formatCallbackFailure,
+  CallbackHttpError, callbackFailureReply, callbackRejection, classifyCallbackFailure, formatCallbackFailure,
 } from '../../../mcp/tools/telegram/callback-failure';
 
 type Handler = (req: http.IncomingMessage, res: http.ServerResponse) => void;
@@ -46,17 +46,15 @@ test('a callback that does not answer in time is reported as busy, with timeout 
     .toBe('The agent is busy and did not answer in time. Please try /session again in a moment.');
 });
 
-test('a 503 from admission failure is reported as unavailable with its HTTP status', async () => {
-  const base = await serve((_req, res) => {
-    res.writeHead(503); res.end(JSON.stringify({ accepted: false, code: 'CHANNEL_ADMISSION_FAILED', retryable: true }));
-  });
+test('a non-OK status is kept for the log and stays a generic failure', async () => {
+  // /command answers 500 from its own catch blocks; it never sends 429/503.
+  const base = await serve((_req, res) => { res.writeHead(500); res.end(JSON.stringify({ success: false, error: 'boom' })); });
   const error = await openSession(base);
   expect(error).toBeInstanceOf(CallbackHttpError);
   const failure = classifyCallbackFailure(error);
-  expect(failure).toMatchObject({ kind: 'unavailable', status: 503, timeout: false });
-  expect(formatCallbackFailure('session', failure)).toContain('status=503');
-  expect(callbackFailureReply(failure.kind, 'session info', 'session'))
-    .toBe('The agent is restarting or unavailable. Please try /session again shortly.');
+  expect(failure).toMatchObject({ kind: 'failed', status: 500, timeout: false });
+  expect(formatCallbackFailure('session', failure)).toContain('status=500');
+  expect(callbackFailureReply(failure.kind, 'session info', 'session')).toBe('Could not load session info. Please try /session again.');
 });
 
 test('a callback port with nothing listening (agent restarting) is unavailable, and the URL is not logged', async () => {
@@ -68,23 +66,39 @@ test('a callback port with nothing listening (agent restarting) is unavailable, 
   expect(line).not.toContain(new URL(base).port);
 });
 
-test('other non-OK statuses and malformed bodies stay generic but keep their cause', async () => {
-  const base500 = await serve((_req, res) => { res.writeHead(500); res.end('{}'); });
-  const f500 = classifyCallbackFailure(await openSession(base500));
-  expect(f500).toMatchObject({ kind: 'failed', status: 500 });
-  expect(callbackFailureReply(f500.kind, 'session info', 'session')).toBe('Could not load session info. Please try /session again.');
+test('a success:false reply keeps the agent reason in the logged message', async () => {
+  const base = await serve((_req, res) => { res.writeHead(200); res.end(JSON.stringify({ success: false, text: 'Failed to get session info.' })); });
+  const failure = classifyCallbackFailure(await openSession(base));
+  expect(failure).toMatchObject({ kind: 'failed', message: 'Session info unavailable: Failed to get session info.' });
+  expect(callbackRejection(null).message).toBe('unavailable');
+  expect(callbackRejection({ success: false, error: 'Task controls require orchestration mode.' }).message)
+    .toBe('unavailable: Task controls require orchestration mode.');
+});
 
-  const malformed = await serve((_req, res) => { res.writeHead(200); res.end(JSON.stringify({ success: false, text: 'Failed to get session info.' })); });
-  const fBody = classifyCallbackFailure(await openSession(malformed));
-  expect(fBody).toMatchObject({ kind: 'failed', message: 'Session info unavailable' });
+test('a background refresh failure is reported once per failure streak', async () => {
+  let now = 0, fail = false;
+  const report = jest.fn();
+  const browser = new LiveTaskBrowser({
+    read: async () => { if (fail) throw new Error('refresh failed'); return { sessionId: 's', page: 0 }; },
+    render: () => ({ text: 'x', reply_markup: {} }),
+    send: async () => 1, edit: async () => {}, remove: async () => {}, close: async () => {},
+    allowed: () => true, persist: () => {}, report, now: () => now,
+  });
+  await browser.open('42', '42');
+  fail = true;
+  await browser.tick(); now += 20000; await browser.tick();
+  expect(report).toHaveBeenCalledTimes(1);
+  fail = false; now += 20000; await browser.tick();
+  fail = true; now += 20000; await browser.tick();
+  expect(report).toHaveBeenCalledTimes(2);
 });
 
 test('unconfigured callback, unauthorized open and Telegram errors are classified without leaking URLs', async () => {
-  expect(classifyCallbackFailure(await openSession(undefined)).kind).toBe('unavailable');
+  // A missing callback URL is a configuration error, not a restart.
+  expect(classifyCallbackFailure(await openSession(undefined))).toMatchObject({ kind: 'failed', message: 'not_configured' });
   expect(classifyCallbackFailure(new Error('TASK_BROWSER_UNAUTHORIZED'))).toMatchObject({ kind: 'failed', message: 'TASK_BROWSER_UNAUTHORIZED' });
   const telegram = Object.assign(new Error("Call to 'sendMessage' failed!"), { name: 'GrammyError', error_code: 400, description: 'Bad Request: see https://api.telegram.org/botSECRET/sendMessage' });
   const failure = classifyCallbackFailure(telegram);
-  // A Telegram 5xx/429 is not the agent being busy or restarting.
   expect(failure).toMatchObject({ kind: 'failed', status: 400 });
   expect(formatCallbackFailure('session', failure)).not.toContain('SECRET');
   expect(classifyCallbackFailure(Object.assign(new Error('x'), { error_code: 429 })).kind).toBe('failed');

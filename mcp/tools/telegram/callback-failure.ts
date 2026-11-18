@@ -10,9 +10,16 @@ export class CallbackHttpError extends Error {
   }
 }
 
-// Socket errors that mean nothing is listening, usually because the agent is
-// restarting and its callback port has not come back yet.
-const UNREACHABLE = new Set(['ECONNREFUSED', 'ECONNRESET', 'EPIPE', 'EHOSTUNREACH', 'ENOTFOUND', 'UND_ERR_SOCKET']);
+/** A `{success:false}` callback reply, keeping the agent's own reason for the log. */
+export function callbackRejection(body: unknown, fallback = 'unavailable'): Error {
+  const b = body as { error?: unknown; text?: unknown } | null;
+  const reason = typeof b?.error === 'string' && b.error ? b.error : typeof b?.text === 'string' && b.text ? b.text : '';
+  return new Error(reason ? `${fallback}: ${reason}` : fallback);
+}
+
+// Socket errors that mean nothing is listening on the callback port, usually
+// because the agent is restarting.
+const UNREACHABLE = new Set(['ECONNREFUSED', 'ECONNRESET', 'EPIPE', 'EHOSTUNREACH', 'UND_ERR_SOCKET']);
 
 export interface CallbackFailure {
   kind: CallbackFailureKind;
@@ -34,10 +41,9 @@ export function classifyCallbackFailure(error: unknown): CallbackFailure {
   const raw = typeof e?.description === 'string' ? e.description : typeof e?.message === 'string' ? e.message : String(error);
   // Never log a callback URL; the message is bounded so a large body cannot flood the log.
   const message = raw.replace(/https?:\/\/\S+/g, '[url]').replace(/\s+/g, ' ').slice(0, 160);
-  const fromCallback = error instanceof CallbackHttpError;
-  const kind: CallbackFailureKind =
-    timeout || (fromCallback && status === 429) ? 'busy'
-    : message === 'not_configured' || (code !== undefined && UNREACHABLE.has(code)) || (fromCallback && (status === 502 || status === 503 || status === 504)) ? 'unavailable'
+  // /command answers only 200/400/500, so status never means busy or restarting.
+  const kind: CallbackFailureKind = timeout ? 'busy'
+    : code !== undefined && UNREACHABLE.has(code) ? 'unavailable'
     : 'failed';
   return { kind, name, timeout, ...(status !== undefined ? { status } : {}), ...(code ? { code } : {}), message };
 }

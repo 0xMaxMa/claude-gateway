@@ -1,10 +1,12 @@
-import {parseSessionInfo} from '../../../mcp/tools/telegram/session-browser';
+import http from 'node:http';
+import type {AddressInfo} from 'node:net';
+import {parseSessionInfo,requestSessionInfo} from '../../../mcp/tools/telegram/session-browser';
 import {LiveTaskBrowser} from '../../../mcp/tools/telegram/task-browser';
 
 test('empty session is displayed, refreshed and replaced without an error or duplicate',async()=>{
  let result:unknown={success:true,sessionId:null,text:'No active session found.'};
  let id=0;
- const io={read:async()=>parseSessionInfo(true,result),render:(r:any)=>({text:r.text,reply_markup:{inline_keyboard:[]}}),
+ const io={read:async()=>parseSessionInfo(result),render:(r:any)=>({text:r.text,reply_markup:{inline_keyboard:[]}}),
   send:jest.fn(async()=>++id),edit:jest.fn(async()=>{}),remove:jest.fn(async()=>{}),close:jest.fn(async()=>{}),allowed:()=>true,persist:()=>{}};
  const browser=new LiveTaskBrowser(io);
  await browser.open('1','1');
@@ -19,8 +21,12 @@ test('empty session is displayed, refreshed and replaced without an error or dup
 });
 
 test.each([null,{}, {success:false,sessionId:null,text:'failure'}, {success:true,text:'missing ID'}, {success:true,sessionId:17,text:'invalid'}])('malformed callback is still rejected: %p',value=>{
- expect(()=>parseSessionInfo(true,value)).toThrow('Session info unavailable');
+ expect(()=>parseSessionInfo(value)).toThrow('Session info unavailable');
 });
-test('HTTP failure cannot be presented as an empty session',()=>{
- expect(()=>parseSessionInfo(false,{success:true,sessionId:null,text:'No active session found.'})).toThrow();
+test('HTTP failure cannot be presented as an empty session',async()=>{
+ const server=http.createServer((_q,r)=>{r.writeHead(500);r.end(JSON.stringify({success:true,sessionId:null,text:'No active session found.'}))});
+ await new Promise<void>(r=>server.listen(0,'127.0.0.1',r));
+ try{
+  await expect(requestSessionInfo(`http://127.0.0.1:${(server.address() as AddressInfo).port}`,'1')).rejects.toMatchObject({status:500});
+ }finally{await new Promise<void>(r=>server.close(()=>r()))}
 });

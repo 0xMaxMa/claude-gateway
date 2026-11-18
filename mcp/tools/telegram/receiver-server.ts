@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { commandHelp } from '../../../dist/agent/command-help.js';
 import { requestSessionInfo } from './session-browser';
-import { CallbackHttpError, callbackFailureReply, classifyCallbackFailure, formatCallbackFailure } from './callback-failure';
+import { CallbackHttpError, callbackFailureReply, callbackRejection, classifyCallbackFailure, formatCallbackFailure } from './callback-failure';
 import { fetchModelMenuResponses, sendModelMenuReply } from './model-menu-request';
 /**
  * Telegram channel for Claude Gateway.
@@ -1444,9 +1444,10 @@ async function taskBrowserRequest(chatId:string,userId:string,payload:Record<str
   if(!CALLBACK_URL_BASE)throw Error('not_configured')
   const response=await fetch(CALLBACK_URL_BASE+'/command',{method:'POST',headers:{'Content-Type':'application/json'},signal:AbortSignal.timeout(10000),body:JSON.stringify({command:'telegram_tasks',chat_id:chatId,payload:{...payload,user_id:userId}})})
   const result=await response.json().catch(error=>{throw response.ok?error:new CallbackHttpError(response.status)}) as TaskBrowser & {success?:boolean}
-  if((result as {error?:string}).error==='TASK_SESSION_CHANGED')throw Error('TASK_SESSION_CHANGED')
+  const error=(result as {error?:unknown}|null)?.error
+  if(error==='TASK_SESSION_CHANGED')throw Error('TASK_SESSION_CHANGED')
   if(!response.ok)throw new CallbackHttpError(response.status)
-  if(!result.success)throw Error('unavailable')
+  if(!result?.success)throw callbackRejection(result)
   if(typeof result.sessionId!=='string'||!result.sessionId)throw Error('unavailable')
   return result
 }
@@ -1480,6 +1481,7 @@ const liveTaskBrowser = new LiveTaskBrowser({
   remove: (chat, id) => bot.api.deleteMessage(chat, id),
   close: (chat, id) => bot.api.editMessageText(chat, id, 'Task view closed.', {reply_markup: {inline_keyboard: []}}),
   allowed: (chat, user) => ORCHESTRATION_ENABLED && chat === user && loadAccess().allowFrom.includes(user),
+  report: err => process.stderr.write(formatCallbackFailure('tasks refresh', classifyCallbackFailure(err))+'\n'),
   persist: entries => {
     mkdirSync(STATE_DIR, {recursive:true,mode:0o700})
     const temp = TASK_BROWSER_FILE + '.tmp'
@@ -1520,7 +1522,7 @@ async function taskStopRequest(chatId: string, userId: string, menuId?: string, 
   })
   const result=await response.json().catch(error=>{throw response.ok?error:new CallbackHttpError(response.status)}) as {success?:boolean;legacy?:boolean;text?:string;menuId?:string;tasks?:Array<{title:string;state:string}>}
   if (!response.ok) throw new CallbackHttpError(response.status)
-  if (!result.success) throw new Error('unavailable')
+  if (!result?.success) throw callbackRejection(result)
   return result
 }
 bot.command('stop',async (ctx,next)=>{
@@ -1603,6 +1605,7 @@ const liveSessionBrowser = new LiveTaskBrowser({
   remove: (chat,id) => bot.api.deleteMessage(chat,id),
   close: (chat,id) => bot.api.editMessageText(chat,id,'Session view closed.'),
   allowed: (chat,user) => chat === user && loadAccess().allowFrom.includes(user),
+  report: err => process.stderr.write(formatCallbackFailure('session refresh',classifyCallbackFailure(err))+'\n'),
   persist: entries => {
     mkdirSync(STATE_DIR,{recursive:true,mode:0o700})
     const temp=SESSION_BROWSER_FILE+'.tmp'
@@ -1771,7 +1774,10 @@ bot.on('callback_query:data', async ctx => {
       await ctx.answerCallbackQuery().catch(()=>{})
       const payload=data==='taskdismiss'?{action:'dismiss'}:taskBrowser[1]?{action:taskBrowser[1]==='taskcancel'?'cancel':'detail',task_id:taskBrowser[2]}:{page:Number(taskBrowser[4])}
       await liveTaskBrowser.navigate(String(ctx.callbackQuery.message.chat.id),String(ctx.from.id),ctx.callbackQuery.message.message_id,payload)
-    }catch{await ctx.answerCallbackQuery({text:'Task unavailable. Use /tasks to refresh.'}).catch(()=>{})}
+    }catch(err){
+      process.stderr.write(formatCallbackFailure('tasks button',classifyCallbackFailure(err))+'\n')
+      await ctx.answerCallbackQuery({text:'Task unavailable. Use /tasks to refresh.'}).catch(()=>{})
+    }
     return
   }
 
@@ -1799,7 +1805,10 @@ bot.on('callback_query:data', async ctx => {
       await ctx.answerCallbackQuery({text:Number(taskStop[2])===0?'Dismissed':'Stop requested.'}).catch(()=>{})
       await ctx.deleteMessage().catch(()=>{})
       if (Number(taskStop[2])!==0) await ctx.reply(result.text??'Stop requested.')
-    } catch { await ctx.answerCallbackQuery({text:'Selection unavailable. Use /stop to refresh.'}).catch(()=>{}) }
+    } catch (err) {
+      process.stderr.write(formatCallbackFailure('stop button', classifyCallbackFailure(err))+'\n')
+      await ctx.answerCallbackQuery({text:'Selection unavailable. Use /stop to refresh.'}).catch(()=>{})
+    }
     return
   }
 
