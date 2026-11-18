@@ -43,3 +43,12 @@ test('Gemini catalog retains documented genders for every voice', async () => {
   expect(voices).toEqual(expect.arrayContaining([{id:'Kore',name:'Kore',gender:'female'},{id:'Puck',name:'Puck',gender:'male'}]));
  } finally { if(previous===undefined) delete process.env.GEMINI_API_KEY; else process.env.GEMINI_API_KEY=previous; }
 });
+
+test('a voice catalog whose response body never settles rejects at its deadline', async () => {
+ const old=process.env.ELEVENLABS_API_KEY; process.env.ELEVENLABS_API_KEY='stalled-body-test';
+ const fetcher=jest.spyOn(global,'fetch').mockResolvedValue({ok:true,json:()=>new Promise(()=>{})} as unknown as Response);
+ try {
+  const result=voiceChoices({provider:'elevenlabs',voiceId:'fixture'}).then(()=> 'resolved',()=> 'rejected');
+  expect(await Promise.race([result,new Promise(resolve=>setTimeout(()=>resolve('hung'),11000))])).toBe('rejected');
+ } finally { fetcher.mockRestore(); if(old===undefined)delete process.env.ELEVENLABS_API_KEY;else process.env.ELEVENLABS_API_KEY=old; }
+}, 13000);

@@ -141,6 +141,32 @@ describe('AgentRunner (session pool)', () => {
   let gatewayConfig: GatewayConfig;
   let runner: AgentRunner;
 
+  it('keeps concurrent orchestration sessions in one chat independent', async () => {
+    agentConfig.orchestration = {enabled:true,channels:['telegram']};
+    gatewayConfig.gateway.orchestration = true;
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    const orchestration = await (runner as unknown as {getOrchestration(): Promise<{host: {createAgentSession: (...args: any[]) => Promise<SessionProcess>}}>}).getOrchestration();
+    const create = orchestration.host.createAgentSession;
+    const scope = {agentId:'alfred',source:'telegram',chatId:'shared-chat',accountId:'alfred',threadKey:'',principalId:'telegram:user'};
+    const store = (runner as unknown as {sessionStore: import('../../src/session/store').SessionStore}).sessionStore;
+    const firstId = await store.getActiveSessionId('alfred','shared-chat','telegram');
+    const secondId = (await store.createTelegramSession('alfred','shared-chat',undefined,'telegram')).id;
+    const first = await create(firstId, {}, undefined, {...scope,agentSessionId:firstId});
+    first.setProcessing(true);
+    await new Promise(resolve=>setTimeout(resolve,20));
+    const stop = jest.spyOn(first,'stop');
+    const second = await create(secondId, {}, undefined, {...scope,agentSessionId:secondId});
+    expect(stop).not.toHaveBeenCalled();
+    expect(getSessions(runner).size).toBe(2);
+    expect(second).not.toBe(first);
+    await store.setActiveSession('alfred','shared-chat',secondId,'telegram');
+    const stopSecond = jest.spyOn(second,'stop');
+    await (runner as unknown as {restartProcess(chatId:string):Promise<void>}).restartProcess('shared-chat');
+    expect(stopSecond).toHaveBeenCalledTimes(1);
+    expect(stop).not.toHaveBeenCalled();
+    expect(getSessions(runner).has(`orchestration:${firstId}`)).toBe(true);
+  });
+
   beforeEach(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ar-test-'));
     agentConfig = makeAgentConfig(path.join(tmpDir, 'workspace'));

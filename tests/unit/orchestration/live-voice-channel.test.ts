@@ -12,9 +12,10 @@ import { SessionStore } from '../../../src/session/store';
 import { HistoryDB } from '../../../src/history/db';
 import type { SessionProcess } from '../../../src/session/process';
 import type { AgentConfig, GatewayConfig } from '../../../src/types';
+import * as voiceCatalog from '../../../src/voice/providers/voice-catalog';
 
 jest.mock('../../../src/voice/providers/voice-catalog', () => ({
-  resolveVoiceId: async () => 'fixture', voiceChoices: async () => [{ id: 'fixture', name: 'Default' }],
+  resolveVoiceId: async () => 'fixture', voiceChoices: jest.fn(async () => [{ id: 'fixture', name: 'Default' }]),
 }));
 // Voice messages synthesize offline, so the result never depends on a provider key or the network.
 jest.mock('../../../src/voice/providers/registry', () => ({
@@ -24,6 +25,48 @@ jest.mock('../../../src/voice/providers/registry', () => ({
 
 const voice = { enabled: true, stt: { provider: 'elevenlabs', model: 'scribe_v2_realtime' }, tts: { provider: 'elevenlabs', model: 'eleven_v3_conversational', voiceId: 'fixture' },
   notes: { enabled: true, provider: 'elevenlabs', model: 'scribe_v2', replyWithVoice: true } };
+
+test('a stalled voice catalog does not delay a Telegram turn spawning', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'voice-spawn-')), dir = join(root, 'a'), workspace = join(dir, 'workspace');
+  mkdirSync(workspace, { recursive: true }); writeFileSync(join(workspace, 'CLAUDE.md'), 'Identity');
+  const agent = { id: 'a', description: 'fixture', env: '', workspace, claude: { model: 'fixture', extraFlags: [] }, telegram: { botToken: 'fixture' },
+    orchestration: { enabled: true, channels: ['telegram'] }, voice } as unknown as AgentConfig;
+  const gateway = { gateway: { orchestration: true, headless: true }, agents: [agent] } as GatewayConfig;
+  const sessions = new SessionStore(root), history = HistoryDB.forAgent(root, 'a'), sid = randomUUID();
+  const catalog = voiceCatalog.voiceChoices as jest.Mock;
+  catalog.mockImplementation(async () => {
+    await new Promise(resolve => setTimeout(resolve, 5000));
+    return [{id:'fixture',name:'Default',gender:'female'}];
+  });
+  const fetchSpy = jest.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({ok:true,result:{message_id:1}})));
+  let spawnedAt = 0, spawnCount = 0;
+  const runtime = await AgentOrchestrationRuntime.open(agent, gateway, dir, sessions, history, {
+    createAgentSession: async (_id, profile) => {
+      spawnedAt = Date.now(); spawnCount++;
+      return Object.assign(new EventEmitter(), {runtimeProfile:profile,start:async()=>{},stop:async()=>{},sendMessage:function(this:EventEmitter){
+        this.emit('output',JSON.stringify({type:'system',subtype:'init',tools:[]}));
+        this.emit('output',JSON.stringify({type:'result',result:'Answer'}));
+      }}) as unknown as SessionProcess;
+    }, releaseAgentSession:async()=>{},
+  });
+  const scope = { agentId:'a',agentSessionId:sid,source:'telegram' as const,accountId:'a',chatId:'42',threadKey:'',principalId:'telegram:42' };
+  try {
+    runtime.store.setTelegramVoiceMode('42','on');
+    const startedAt = Date.now();
+    await runtime.send({scope,text:'hello',trustedChannelMember:true},{execute:true,writeMemory:false},{timeoutMs:8000});
+    expect(spawnedAt).toBeGreaterThan(0);
+    expect(spawnedAt-startedAt).toBeLessThan(3000);
+    const stoppedAt = Date.now();
+    const stoppedTurn = runtime.send({scope,text:'stop this turn',trustedChannelMember:true},{execute:true,writeMemory:false},{timeoutMs:8000});
+    await new Promise(resolve => setTimeout(resolve, 100));
+    expect(runtime.stopResponse(sid)).toBe(true);
+    await expect(stoppedTurn).rejects.toMatchObject({code:'INTERRUPTED'});
+    expect(Date.now()-stoppedAt).toBeLessThan(1000);
+    expect(spawnCount).toBe(1);
+  } finally {
+    await runtime.close(); catalog.mockImplementation(async () => [{id:'fixture',name:'Default'}]); fetchSpy.mockRestore(); (history as any).db.close(); HistoryDB.evict(root,'a'); rmSync(root,{recursive:true,force:true});
+  }
+}, 12000);
 
 // A Telegram call turn shares the DM conversation, so its reply is delivered to
 // that chat. With `/voice on` the chat's voice-reply rule would also send the

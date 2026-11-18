@@ -175,7 +175,7 @@ export class AgentOrchestrationRuntime {
   private nextQuestionCheck = 0;
   private readonly scheduledReports = new Set<string>();
   private readonly seenSessions = new Set<string>();
-  private readonly active = new Map<string, { decision?: DecisionReceipt; turn?: ProcessTurn; evidenceAbort?:AbortController; stopping: boolean; stopReason?: 'user' | 'barge-in'; modality?: string; notification?: boolean; maintenance?: 'compact' }>();
+  private readonly active = new Map<string, { decision?: DecisionReceipt; turn?: ProcessTurn; evidenceAbort?:AbortController; setupAbort?:AbortController; stopping: boolean; stopReason?: 'user' | 'barge-in'; modality?: string; notification?: boolean; maintenance?: 'compact' }>();
   private capabilityCatalog?: CapabilityCatalog;
   private config;
   private draining = false;
@@ -1190,7 +1190,7 @@ export class AgentOrchestrationRuntime {
     const channelTts = this.telegramVoices.settings(channelVoiceKey(input.scope.source,input.scope.chatId,input.scope.threadKey));
     if (this.active.has(sessionId)) throw new OrchestrationError('CONFLICT');
     if (this.active.size >= this.config.conversation.maxActiveSessions) throw new OrchestrationError('CAPACITY_EXCEEDED');
-    const active: { decision?: DecisionReceipt; turn?: ProcessTurn; evidenceAbort?:AbortController; stopping: boolean; stopReason?: 'user' | 'barge-in'; modality?: string; notification?: boolean } = { stopping: false, modality: input.modality, notification: input.ingressKey?.startsWith('notification:') || input.ingressKey?.startsWith('question-review:') };
+    const active: { decision?: DecisionReceipt; turn?: ProcessTurn; evidenceAbort?:AbortController; setupAbort?:AbortController; stopping: boolean; stopReason?: 'user' | 'barge-in'; modality?: string; notification?: boolean } = { stopping: false, modality: input.modality, notification: input.ingressKey?.startsWith('notification:') || input.ingressKey?.startsWith('question-review:') };
     this.active.set(sessionId, active);
     let agentSession: SessionProcess | undefined, revoke: (() => void) | undefined;
     let transcriptCheckpoint: TranscriptCheckpoint | undefined;
@@ -1527,7 +1527,21 @@ export class AgentOrchestrationRuntime {
       let speechDirective = '';
       if (speechEnabled) {
         const listener = this.voiceListeners.get(sessionId);
-        const gender = channelSpeech ? await resolveVoiceId(channelTts).then(async id => (await voiceChoices(channelTts)).find(v => v.id === id)?.gender).catch(() => undefined) : listener?.principalId === input.scope.principalId ? listener.gender?.() : undefined;
+        let gender = listener?.principalId === input.scope.principalId ? listener.gender?.() : undefined;
+        if (channelSpeech) {
+          // Voice gender is cosmetic; a stalled catalog must not hold up the turn.
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          const controller = new AbortController();
+          active.setupAbort = controller;
+          try {
+            gender = await Promise.race([
+              resolveVoiceId(channelTts).then(async id => (await voiceChoices(channelTts)).find(v => v.id === id)?.gender).catch(() => undefined),
+              new Promise<undefined>(resolve => { timer = setTimeout(() => resolve(undefined), 2000); }),
+              new Promise<undefined>(resolve => controller.signal.addEventListener('abort', () => resolve(undefined), {once:true})),
+            ]);
+          } finally { if (timer) clearTimeout(timer); active.setupAbort = undefined; }
+        }
+        if (active.stopping || this.closing) throw new OrchestrationError('INTERRUPTED');
         // The full voice rules go into this CLI context once; while it still holds them, later
         // voice turns repeat only the short reminder and the persona's voice style.
         const style = speechVoiceStyle(gender), full = SPEECH_OVERLAY + style;
@@ -2013,6 +2027,7 @@ export class AgentOrchestrationRuntime {
     }
     active.stopping = true;
     active.stopReason = reason;
+    active.setupAbort?.abort();
     active.evidenceAbort?.abort(new OrchestrationError('INTERRUPTED'));
     if (active.turn) void active.turn.stop();
     return true;

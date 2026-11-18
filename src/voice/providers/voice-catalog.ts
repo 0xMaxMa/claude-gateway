@@ -99,7 +99,15 @@ export async function voiceChoices(config:{provider:string;voiceId:string;model?
   const key=createHash('sha256').update(config.provider+'\0'+credential).digest('hex');
   const compatible = (voices:VoiceChoice[]) => config.model ? voices.filter(v => !v.supported_model_ids || v.supported_model_ids.includes(nativeVoiceModel(config.provider,config.model!))) : voices;
   const cached=cache.get(key);if(cached&&cached.until>Date.now())return compatible(cached.voices);
-  const voices=await catalog.list(credential);
+  // A fetch signal can fire while response.json() is reading a body without
+  // settling that promise. Keep the catalog's deadline independent of fetch.
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(Error('VOICE_CATALOG_TIMEOUT')), config.provider === 'cartesia' ? 15000 : 10000);
+  });
+  let voices: VoiceChoice[];
+  try { voices = await Promise.race([catalog.list(credential), deadline]); }
+  finally { if (timer) clearTimeout(timer); }
   if(cache.size>=20)cache.delete(cache.keys().next().value!);
   cache.set(key,{until:Date.now()+300000,voices});return compatible(voices);
 }
