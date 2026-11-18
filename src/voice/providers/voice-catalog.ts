@@ -91,17 +91,43 @@ for (const provider of ['openrouter','upstream:openrouter']) catalogs[provider] 
     return [...voices.values()];
   },
 };
-const cache=new Map<string,{until:number;voices:VoiceChoice[]}>();
+const cache=new Map<string,{until:number;voices?:VoiceChoice[];error?:Error}>();
+const inflight=new Map<string,Promise<VoiceChoice[]>>();
+function remember(key:string,entry:{until:number;voices?:VoiceChoice[];error?:Error}):void {
+  if(!cache.has(key)&&cache.size>=20)cache.delete(cache.keys().next().value!);
+  cache.set(key,entry);
+}
 export async function voiceChoices(config:{provider:string;voiceId:string;model?:string}):Promise<VoiceChoice[]> {
   config = {...config, provider: canonicalVoiceProvider(config.provider)};
   const catalog=catalogs[config.provider];if(!catalog)throw Error('VOICE_CATALOG_UNSUPPORTED');
   const credential=catalog.key();if(!credential)throw Error('VOICE_CATALOG_UNAVAILABLE');
   const key=createHash('sha256').update(config.provider+'\0'+credential).digest('hex');
   const compatible = (voices:VoiceChoice[]) => config.model ? voices.filter(v => !v.supported_model_ids || v.supported_model_ids.includes(nativeVoiceModel(config.provider,config.model!))) : voices;
-  const cached=cache.get(key);if(cached&&cached.until>Date.now())return compatible(cached.voices);
-  const voices=await catalog.list(credential);
-  if(cache.size>=20)cache.delete(cache.keys().next().value!);
-  cache.set(key,{until:Date.now()+300000,voices});return compatible(voices);
+  const cached=cache.get(key);
+  if(cached&&cached.until>Date.now()){if(cached.error)throw cached.error;return compatible(cached.voices!);}
+  // Callers that arrive while a request is open share it instead of opening another.
+  let pending=inflight.get(key);
+  if(!pending){
+    pending=(async()=>{
+      // A fetch signal can fire while response.json() is reading a body without
+      // settling that promise. Keep the catalog's deadline independent of fetch.
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const deadline = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(Error('VOICE_CATALOG_TIMEOUT')), config.provider === 'cartesia' ? 15000 : 10000);
+      });
+      try {
+        const voices = await Promise.race([catalog.list(credential), deadline]);
+        remember(key,{until:Date.now()+300000,voices});
+        return voices;
+      } catch (error) {
+        // A stalled provider would otherwise cost every voice turn another full deadline.
+        if((error as Error).message==='VOICE_CATALOG_TIMEOUT')remember(key,{until:Date.now()+30000,error:error as Error});
+        throw error;
+      } finally { if (timer) clearTimeout(timer); inflight.delete(key); }
+    })();
+    inflight.set(key,pending);
+  }
+  return compatible(await pending);
 }
 
 // Keep Auto stable for this gateway process, separately for each provider/account.

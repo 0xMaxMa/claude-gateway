@@ -43,3 +43,35 @@ test('Gemini catalog retains documented genders for every voice', async () => {
   expect(voices).toEqual(expect.arrayContaining([{id:'Kore',name:'Kore',gender:'female'},{id:'Puck',name:'Puck',gender:'male'}]));
  } finally { if(previous===undefined) delete process.env.GEMINI_API_KEY; else process.env.GEMINI_API_KEY=previous; }
 });
+
+test('a voice catalog whose response body never settles rejects at its deadline', async () => {
+ const old=process.env.ELEVENLABS_API_KEY; process.env.ELEVENLABS_API_KEY='stalled-body-test';
+ const fetcher=jest.spyOn(global,'fetch').mockResolvedValue({ok:true,json:()=>new Promise(()=>{})} as unknown as Response);
+ jest.useFakeTimers();
+ try {
+  const result=voiceChoices({provider:'elevenlabs',voiceId:'fixture'}).then(()=> 'resolved',()=> 'rejected');
+  await jest.advanceTimersByTimeAsync(9999);
+  expect(await Promise.race([result,Promise.resolve('pending')])).toBe('pending');
+  await jest.advanceTimersByTimeAsync(1);
+  expect(await result).toBe('rejected');
+ } finally { jest.useRealTimers(); fetcher.mockRestore(); if(old===undefined)delete process.env.ELEVENLABS_API_KEY;else process.env.ELEVENLABS_API_KEY=old; }
+});
+
+test('a stalled catalog is requested once and its timeout is reused briefly', async () => {
+ const old=process.env.ELEVENLABS_API_KEY; process.env.ELEVENLABS_API_KEY='stalled-shared-test';
+ const fetcher=jest.spyOn(global,'fetch').mockResolvedValue({ok:true,json:()=>new Promise(()=>{})} as unknown as Response);
+ jest.useFakeTimers();
+ try {
+  const first=voiceChoices({provider:'elevenlabs',voiceId:''}), second=voiceChoices({provider:'elevenlabs',voiceId:''});
+  const settled=Promise.allSettled([first,second]);
+  await jest.advanceTimersByTimeAsync(10000);
+  expect((await settled).map(r=>r.status==='rejected'&&(r.reason as Error).message)).toEqual(['VOICE_CATALOG_TIMEOUT','VOICE_CATALOG_TIMEOUT']);
+  expect(fetcher).toHaveBeenCalledTimes(1);
+  await expect(voiceChoices({provider:'elevenlabs',voiceId:''})).rejects.toThrow('VOICE_CATALOG_TIMEOUT');
+  expect(fetcher).toHaveBeenCalledTimes(1);
+  await jest.advanceTimersByTimeAsync(30000);
+  fetcher.mockResolvedValue({ok:true,json:async()=>({voices:[{voice_id:'back',name:'Back'}]})} as Response);
+  expect(await voiceChoices({provider:'elevenlabs',voiceId:''})).toEqual([{id:'back',name:'Back'}]);
+  expect(fetcher).toHaveBeenCalledTimes(2);
+ } finally { jest.useRealTimers(); fetcher.mockRestore(); if(old===undefined)delete process.env.ELEVENLABS_API_KEY;else process.env.ELEVENLABS_API_KEY=old; }
+});
