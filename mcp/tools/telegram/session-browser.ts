@@ -20,6 +20,7 @@ export async function requestSessionInfo(base: string | undefined, chatId: strin
     method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(timeoutMs),
     body: JSON.stringify({ command: 'session_info', chat_id: chatId }),
   });
-  if (!response.ok) throw new CallbackHttpError(response.status);
+  // Read the error body: it carries the agent's reason and frees the socket.
+  if (!response.ok) throw new CallbackHttpError(response.status, await response.json().catch(() => null));
   return parseSessionInfo(await response.json());
 }

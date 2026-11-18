@@ -10,7 +10,7 @@ export interface TaskBrowserResult {
   page?: number;
 }
 export interface TaskBrowserMenu { text: string; reply_markup: unknown }
-interface Entry extends TaskBrowserMessage { fingerprint?: string; retryAt?: number; finished?: boolean }
+interface Entry extends TaskBrowserMessage { fingerprint?: string; retryAt?: number; finished?: boolean; refreshReported?: boolean }
 interface Dependencies {
   read(chat: string, user: string, payload: Record<string, unknown>): Promise<TaskBrowserResult>;
   render(result: TaskBrowserResult): TaskBrowserMenu;
@@ -90,10 +90,10 @@ export class LiveTaskBrowser {
     if (JSON.stringify(view) !== JSON.stringify(e.view)) { e.view = view; this.persist(); }
     const finished = !!result.task && ['completed','failed','cancelled'].includes(result.task.state);
     const menu = this.io.render(result), fingerprint = JSON.stringify(menu);
-    if (fingerprint === e.fingerprint) { e.retryAt = undefined; e.finished = finished; return; }
+    if (fingerprint === e.fingerprint) { e.refreshReported = false; e.finished = finished; return; }
     try { await this.io.edit(e.chatId,e.messageId,menu); }
     catch (error) { if (!unchanged(error)) throw error; }
-    e.fingerprint = fingerprint; e.retryAt = undefined; e.finished = finished;
+    e.fingerprint = fingerprint; e.retryAt = undefined; e.refreshReported = false; e.finished = finished;
   }
   private async failure(e: Entry, error: any) {
     if (description(error).includes('TASK_SESSION_CHANGED')) { await this.retire(e); return; }
@@ -113,10 +113,9 @@ export class LiveTaskBrowser {
         }
         try { await this.update(e,await this.io.read(e.chatId,e.userId,{...e.view,session_id:e.sessionId})); }
         catch (error) {
-          const first = e.retryAt === undefined;
           await this.failure(e,error).catch(() => {});
           // A retired or expired view is normal; only a view still waiting to refresh is reported.
-          if (first && this.entries.get(e.chatId) === e) this.io.report?.(error);
+          if (!e.refreshReported && this.entries.get(e.chatId) === e) { e.refreshReported = true; this.io.report?.(error); }
         }
       });
     }

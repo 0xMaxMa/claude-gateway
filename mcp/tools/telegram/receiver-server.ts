@@ -1446,7 +1446,7 @@ async function taskBrowserRequest(chatId:string,userId:string,payload:Record<str
   const result=await response.json().catch(error=>{throw response.ok?error:new CallbackHttpError(response.status)}) as TaskBrowser & {success?:boolean}
   const error=(result as {error?:unknown}|null)?.error
   if(error==='TASK_SESSION_CHANGED')throw Error('TASK_SESSION_CHANGED')
-  if(!response.ok)throw new CallbackHttpError(response.status)
+  if(!response.ok)throw new CallbackHttpError(response.status,result)
   if(!result?.success)throw callbackRejection(result)
   if(typeof result.sessionId!=='string'||!result.sessionId)throw Error('unavailable')
   return result
@@ -1521,7 +1521,7 @@ async function taskStopRequest(chatId: string, userId: string, menuId?: string, 
     body:JSON.stringify({command:'task_stop',chat_id:chatId,payload:{user_id:userId,menu_id:menuId,index}}),
   })
   const result=await response.json().catch(error=>{throw response.ok?error:new CallbackHttpError(response.status)}) as {success?:boolean;legacy?:boolean;text?:string;menuId?:string;tasks?:Array<{title:string;state:string}>}
-  if (!response.ok) throw new CallbackHttpError(response.status)
+  if (!response.ok) throw new CallbackHttpError(response.status, result)
   if (!result?.success) throw callbackRejection(result)
   return result
 }
@@ -1775,7 +1775,8 @@ bot.on('callback_query:data', async ctx => {
       const payload=data==='taskdismiss'?{action:'dismiss'}:taskBrowser[1]?{action:taskBrowser[1]==='taskcancel'?'cancel':'detail',task_id:taskBrowser[2]}:{page:Number(taskBrowser[4])}
       await liveTaskBrowser.navigate(String(ctx.callbackQuery.message.chat.id),String(ctx.from.id),ctx.callbackQuery.message.message_id,payload)
     }catch(err){
-      process.stderr.write(formatCallbackFailure('tasks button',classifyCallbackFailure(err))+'\n')
+      // A button on a replaced or closed menu is expected, not a failure.
+      if(!(err instanceof Error&&err.message==='TASK_BROWSER_EXPIRED'))process.stderr.write(formatCallbackFailure('tasks button',classifyCallbackFailure(err))+'\n')
       await ctx.answerCallbackQuery({text:'Task unavailable. Use /tasks to refresh.'}).catch(()=>{})
     }
     return

@@ -54,6 +54,7 @@ test('a non-OK status is kept for the log and stays a generic failure', async ()
   const failure = classifyCallbackFailure(error);
   expect(failure).toMatchObject({ kind: 'failed', status: 500, timeout: false });
   expect(formatCallbackFailure('session', failure)).toContain('status=500');
+  expect(failure.message).toBe('callback HTTP 500: boom');
   expect(callbackFailureReply(failure.kind, 'session info', 'session')).toBe('Could not load session info. Please try /session again.');
 });
 
@@ -73,6 +74,28 @@ test('a success:false reply keeps the agent reason in the logged message', async
   expect(callbackRejection(null).message).toBe('unavailable');
   expect(callbackRejection({ success: false, error: 'Task controls require orchestration mode.' }).message)
     .toBe('unavailable: Task controls require orchestration mode.');
+});
+
+test('Bun refused-connection errors (the receiver runtime) mean the agent is unavailable', () => {
+  // Shape observed from Bun 1.3 fetch against a closed port.
+  const bun = Object.assign(new Error('Unable to connect. Is the computer able to access the url?'), { code: 'ConnectionRefused' });
+  expect(classifyCallbackFailure(bun)).toMatchObject({ kind: 'unavailable', code: 'ConnectionRefused' });
+});
+
+test('a failed button press does not hide the next background refresh failure', async () => {
+  let now = 0, fail = false;
+  const report = jest.fn();
+  const browser = new LiveTaskBrowser({
+    read: async () => { if (fail) throw new Error('refresh failed'); return { sessionId: 's', page: 0 }; },
+    render: () => ({ text: 'x', reply_markup: {} }),
+    send: async () => 1, edit: async () => {}, remove: async () => {}, close: async () => {},
+    allowed: () => true, persist: () => {}, report, now: () => now,
+  });
+  await browser.open('42', '42');
+  fail = true;
+  await expect(browser.navigate('42', '42', 1, { page: 1 })).rejects.toThrow('refresh failed');
+  now += 20000; await browser.tick();
+  expect(report).toHaveBeenCalledTimes(1);
 });
 
 test('a background refresh failure is reported once per failure streak', async () => {
@@ -99,7 +122,12 @@ test('unconfigured callback, unauthorized open and Telegram errors are classifie
   expect(classifyCallbackFailure(new Error('TASK_BROWSER_UNAUTHORIZED'))).toMatchObject({ kind: 'failed', message: 'TASK_BROWSER_UNAUTHORIZED' });
   const telegram = Object.assign(new Error("Call to 'sendMessage' failed!"), { name: 'GrammyError', error_code: 400, description: 'Bad Request: see https://api.telegram.org/botSECRET/sendMessage' });
   const failure = classifyCallbackFailure(telegram);
-  expect(failure).toMatchObject({ kind: 'failed', status: 400 });
+  expect(failure).toMatchObject({ kind: 'failed', telegramCode: 400 });
+  expect(failure.status).toBeUndefined();
+  expect(formatCallbackFailure('session', failure)).toContain('telegram_code=400');
   expect(formatCallbackFailure('session', failure)).not.toContain('SECRET');
   expect(classifyCallbackFailure(Object.assign(new Error('x'), { error_code: 429 })).kind).toBe('failed');
+  // A Telegram network failure keeps its code for the log but is not an agent restart.
+  const telegramNetwork = Object.assign(new Error('Network request failed'), { name: 'HttpError', error: { code: 'ECONNREFUSED' } });
+  expect(classifyCallbackFailure(telegramNetwork)).toMatchObject({ kind: 'failed', code: 'ECONNREFUSED' });
 });
