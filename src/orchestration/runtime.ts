@@ -1528,7 +1528,7 @@ export class AgentOrchestrationRuntime {
       if (speechEnabled) {
         const listener = this.voiceListeners.get(sessionId);
         let gender = listener?.principalId === input.scope.principalId ? listener.gender?.() : undefined;
-        if (channelSpeech) {
+        if (channelSpeech && !active.stopping && !this.closing) {
           // Voice gender is cosmetic; a stalled catalog must not hold up the turn.
           let timer: ReturnType<typeof setTimeout> | undefined;
           const controller = new AbortController();

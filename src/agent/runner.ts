@@ -133,6 +133,11 @@ export interface SessionCwdView {
   active: boolean;
 }
 
+/** Map key of a managed channel process. Sessions sharing a chat each get their own. */
+function managedSessionKey(sessionId: string): string {
+  return `orchestration:${sessionId}`;
+}
+
 function realpathOrNull(p: string): string | null {
   try {
     return fs.realpathSync(p);
@@ -643,7 +648,7 @@ export class AgentRunner extends EventEmitter {
             await refreshCliSkillRegistry(() => this.skillRegistry, this.agentConfig, this.gatewayConfig);
           },
           onManagedTurn: (sessionId, text, metrics, skills) => {
-            const key = `orchestration:${sessionId}`;
+            const key = managedSessionKey(sessionId);
             this.skillLearning?.onTurnStart(key, sessionId, text, managedTurnSkills(skills, metrics.usedSkills, this.skillRegistry, metrics.usedSkillFiles), metrics.startedAt);
             for (const id of metrics.toolIds) this.skillLearning?.onToolUse(key, id);
             this.skillLearning?.onTokenUsage(key, metrics.inputTokens, metrics.totalTokens);
@@ -652,7 +657,7 @@ export class AgentRunner extends EventEmitter {
           createAgentSession: async (sessionId, profile, model, scope) => {
             // Orchestration owns turns by agent session ID. Different sessions
             // can share a chat and must never stop one another's subprocess.
-            const key = scope?.source === 'api' ? sessionId : `orchestration:${sessionId}`;
+            const key = scope?.source === 'api' ? sessionId : managedSessionKey(sessionId);
             const old = this.sessions.get(key);
             if (old) {
               if (old.isProcessing) throw Object.assign(new Error('Agent session is busy'), { code: 'CONFLICT' });
@@ -1740,7 +1745,7 @@ export class AgentRunner extends EventEmitter {
       const sessionId = this.agentConfig.orchestration?.enabled
         ? await this.sessionStore.getActiveSessionId(this.agentConfig.id, chatId, this.channelFor(chatId))
         : this.sessions.get(chatId)?.sessionId;
-      const session = sessionId ? this.sessions.get(`orchestration:${sessionId}`) ??
+      const session = sessionId ? this.sessions.get(managedSessionKey(sessionId)) ??
         (this.sessions.get(chatId)?.sessionId === sessionId ? this.sessions.get(chatId) : undefined) : undefined;
       if (!session && !(sessionId && this.orchestration?.isBusy(sessionId))) {
         respond({ success: true, restarted: false });
@@ -3606,7 +3611,7 @@ export class AgentRunner extends EventEmitter {
    */
   private async switchSession(chatId: string, newSessionId: string): Promise<void> {
     const oldSessionId = await this.sessionStore.getActiveSessionId(this.agentConfig.id, chatId, this.channelFor(chatId));
-    const managedKey = `orchestration:${oldSessionId}`;
+    const managedKey = managedSessionKey(oldSessionId);
     const key = this.sessions.has(managedKey) ? managedKey : chatId;
     const existing = this.sessions.get(key);
     if (existing?.sessionId === oldSessionId) {
@@ -3625,7 +3630,7 @@ export class AgentRunner extends EventEmitter {
     const legacy = this.sessions.get(chatId);
     const sessionId = expectedSessionId ?? (this.agentConfig.orchestration?.enabled
       ? await this.sessionStore.getActiveSessionId(this.agentConfig.id, chatId, this.channelFor(chatId)) : legacy?.sessionId ?? chatId);
-    const managedKey = `orchestration:${sessionId}`;
+    const managedKey = managedSessionKey(sessionId);
     const key = this.sessions.has(managedKey) ? managedKey : chatId;
     const existing = this.sessions.get(key);
     if (existing && expectedSessionId && existing.sessionId !== expectedSessionId) throw new Error('The active session changed. Run /restart again.');
@@ -4882,7 +4887,7 @@ export class AgentRunner extends EventEmitter {
       if (seen.has(dedupKey)) continue;
       seen.add(dedupKey);
       const direct = this.sessions.get(e.chatId);
-      const proc = e.source === 'api' ? direct : this.sessions.get(`orchestration:${e.sessionId}`) ??
+      const proc = e.source === 'api' ? direct : this.sessions.get(managedSessionKey(e.sessionId)) ??
         (direct?.sessionId === e.sessionId ? direct : undefined);
       // Running only when the live process IS this incarnation: a stale entry
       // from before a respawn must not borrow the new process's running state.

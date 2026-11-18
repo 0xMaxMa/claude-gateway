@@ -34,10 +34,9 @@ test('a stalled voice catalog does not delay a Telegram turn spawning', async ()
   const gateway = { gateway: { orchestration: true, headless: true }, agents: [agent] } as GatewayConfig;
   const sessions = new SessionStore(root), history = HistoryDB.forAgent(root, 'a'), sid = randomUUID();
   const catalog = voiceCatalog.voiceChoices as jest.Mock;
-  catalog.mockImplementation(async () => {
-    await new Promise(resolve => setTimeout(resolve, 5000));
-    return [{id:'fixture',name:'Default',gender:'female'}];
-  });
+  // Lookups stay open until the test releases them, so no timer outlives the test.
+  const stalled: Array<() => void> = [];
+  catalog.mockImplementation(() => new Promise(resolve => stalled.push(() => resolve([{id:'fixture',name:'Default',gender:'female'}]))));
   const fetchSpy = jest.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({ok:true,result:{message_id:1}})));
   let spawnedAt = 0, spawnCount = 0;
   const runtime = await AgentOrchestrationRuntime.open(agent, gateway, dir, sessions, history, {
@@ -64,6 +63,7 @@ test('a stalled voice catalog does not delay a Telegram turn spawning', async ()
     expect(Date.now()-stoppedAt).toBeLessThan(1000);
     expect(spawnCount).toBe(1);
   } finally {
+    for (const release of stalled) release();
     await runtime.close(); catalog.mockImplementation(async () => [{id:'fixture',name:'Default'}]); fetchSpy.mockRestore(); (history as any).db.close(); HistoryDB.evict(root,'a'); rmSync(root,{recursive:true,force:true});
   }
 }, 12000);
