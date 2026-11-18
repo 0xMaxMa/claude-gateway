@@ -1443,7 +1443,7 @@ async function replyCallbackFailure(ctx:Context,err:unknown,command:string,what:
 async function taskBrowserRequest(chatId:string,userId:string,payload:Record<string,unknown>={}) {
   if(!CALLBACK_URL_BASE)throw Error('not_configured')
   const response=await fetch(CALLBACK_URL_BASE+'/command',{method:'POST',headers:{'Content-Type':'application/json'},signal:AbortSignal.timeout(10000),body:JSON.stringify({command:'telegram_tasks',chat_id:chatId,payload:{...payload,user_id:userId}})})
-  const result=await response.json() as TaskBrowser & {success?:boolean}
+  const result=await response.json().catch(error=>{throw response.ok?error:new CallbackHttpError(response.status)}) as TaskBrowser & {success?:boolean}
   if((result as {error?:string}).error==='TASK_SESSION_CHANGED')throw Error('TASK_SESSION_CHANGED')
   if(!response.ok)throw new CallbackHttpError(response.status)
   if(!result.success)throw Error('unavailable')
@@ -1518,7 +1518,7 @@ async function taskStopRequest(chatId: string, userId: string, menuId?: string, 
     method:'POST',headers:{'Content-Type':'application/json'},signal:AbortSignal.timeout(10000),
     body:JSON.stringify({command:'task_stop',chat_id:chatId,payload:{user_id:userId,menu_id:menuId,index}}),
   })
-  const result=await response.json() as {success?:boolean;legacy?:boolean;text?:string;menuId?:string;tasks?:Array<{title:string;state:string}>}
+  const result=await response.json().catch(error=>{throw response.ok?error:new CallbackHttpError(response.status)}) as {success?:boolean;legacy?:boolean;text?:string;menuId?:string;tasks?:Array<{title:string;state:string}>}
   if (!response.ok) throw new CallbackHttpError(response.status)
   if (!result.success) throw new Error('unavailable')
   return result

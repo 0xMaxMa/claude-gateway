@@ -29,7 +29,7 @@ afterEach(async () => {
 // returns the error it rejects with.
 async function openSession(base: string | undefined, timeoutMs = 2000): Promise<unknown> {
   const browser = new LiveTaskBrowser({
-    read: chat => requestSessionInfo(base, chat, fetch, timeoutMs),
+    read: chat => requestSessionInfo(base, chat, timeoutMs),
     render: r => ({ text: (r as unknown as { text: string }).text, reply_markup: { inline_keyboard: [] } }),
     send: async () => 1, edit: async () => {}, remove: async () => {}, close: async () => {},
     allowed: () => true, persist: () => {},
