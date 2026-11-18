@@ -87,6 +87,8 @@ export class TaskBridge {
   computerEnabled?: () => boolean;
   /** Models task_spawn may name; the runtime supplies the live gateway.models. */
   models: () => Promise<ModelConfig[]> = () => selectableModels(undefined);
+  /** A call open this long is logged once with the step it is waiting on, and again when it closes (#679). */
+  slowCallWarnMs = 30_000;
   narrateCall?: (attemptId: string, generation: number, actionId: string, args: Record<string, unknown>, signal: AbortSignal) => Promise<unknown>;
   jevCall?: (scope: Scope, args: Record<string, unknown>, actionId: string, signal: AbortSignal) => Promise<unknown>;
   private readonly scopes = new Map<string, Scope>();
@@ -123,6 +125,17 @@ export class TaskBridge {
       let startedSubagent: string | undefined;
       let toolName = '';
       let commandArgs: Record<string, unknown> = {};
+      const startedAt = Date.now();
+      let step = 'read_body';
+      const logCall = (message: string) => console.warn(JSON.stringify({ ts: new Date().toISOString(), level: 'warn', message,
+        data: { agentId: this.tasks.store.agentId, tool: toolName || undefined, step, elapsedMs: Date.now() - startedAt } }));
+      const pending = setTimeout(() => logCall('Task bridge call still pending'), this.slowCallWarnMs);
+      pending.unref();
+      response.once('close', () => {
+        clearTimeout(pending);
+        if (!response.writableFinished) logCall('Task bridge caller disconnected before the response');
+        else if (Date.now() - startedAt >= this.slowCallWarnMs) logCall('Task bridge call finished slowly');
+      });
       function deny(reason: string): never { denialReason = reason; throw new OrchestrationError('ACCESS_DENIED'); }
       try {
         if (request.method !== 'POST' || request.url !== '/call' || request.headers.origin) deny('INVALID_BRIDGE_REQUEST');
@@ -137,6 +150,7 @@ export class TaskBridge {
           if (bytes > 131072) throw new OrchestrationError('PAYLOAD_TOO_LARGE');
           chunks.push(buffer);
         }
+        step = 'dispatch';
         const command = JSON.parse(Buffer.concat(chunks).toString('utf8'));
         if (!command || typeof command.tool !== 'string' || !command.args || typeof command.args !== 'object' || Array.isArray(command.args) || typeof command.action_id !== 'string' || command.action_id.length > 256) throw new OrchestrationError('INVALID_INPUT');
         if(this.scopes.get(token!)!==scope)deny('TICKET_INVALID_OR_REVOKED');
@@ -166,7 +180,9 @@ export class TaskBridge {
           try {
             // Agent-supplied bound on every spawn path (host, container, with or without intake), before the gateway adds input IDs.
             if (command.tool === 'task_spawn') assertAgentContextRefs(a.context_refs);
+            step = 'before_mutation';
             if (mutation) await scope.beforeMutation?.(command.tool, a, context.actionId);
+            step = 'dispatch';
             if(this.scopes.get(token!)!==scope)deny('TICKET_INVALID_OR_REVOKED');
             switch (command.tool) {
               case 'capabilities_list': {
@@ -212,6 +228,7 @@ export class TaskBridge {
                 }
                 let model: string | undefined;
                 if (a.model !== undefined) {
+                  step = 'task_spawn:models';
                   const models = await this.models();
                   try { model = (findModel(models, a.model) ?? resolveModelId(models, a.model)).id; }
                   catch (error) {
@@ -228,11 +245,15 @@ export class TaskBridge {
                 if (a.target_profile !== 'skill-worker' && (a.skill_name !== undefined || a.skill_args !== undefined)) throw new OrchestrationError('INVALID_INPUT');
                 const spoken = typeof a.spoken_acknowledgement === 'string' ? a.spoken_acknowledgement.trim() : '';
                 if (scope.onTaskQueued && (!stripAudioTags(spoken).trim() || spoken.length > 600 || spoken.includes('```'))) throw new OrchestrationError('VOICE_ACKNOWLEDGEMENT_REQUIRED');
+                step = 'task_spawn:cwd_pin';
                 const cwd = gatewayTarget ? undefined : await this.tasks.cwdPin(context, a.working_directory, a.continue_task_id);
+                step = 'task_spawn:validate_profile';
                 await this.tasks.validateSpawnProfile(context, a.target_profile);
                 // Profile resolution may yield while another input arrives. Recheck
                 // readiness immediately before the synchronous task transaction.
+                step = 'task_spawn:before_mutation_recheck';
                 await scope.beforeMutation?.(command.tool, a, context.actionId);
+                step = 'task_spawn:commit';
                 if(this.scopes.get(token!)!==scope)deny('TICKET_INVALID_OR_REVOKED');
                 const task = this.tasks.spawn(context, { cwd, title: a.title, instructions: a.instructions, computerInputs:a.computer_inputs, ...(a.run_as_goal !== undefined ? { runAsGoal: a.run_as_goal } : {}), targetProfile: a.target_profile, gatewayTarget, browserFields:a.browser_fields, workingDirectory: a.working_directory, contextRefs: a.context_refs, continueTaskId: a.continue_task_id, continuationPolicy: a.continuation_policy, ...(model ? { model, requestedModel: a.model } : {}), ...(a.effort ? { effort: a.effort } : {}), ...(skill ? { skill } : {}) });
                 scope.onTaskQueued?.(spoken);
