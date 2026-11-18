@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { commandHelp } from '../../../dist/agent/command-help.js';
-import { parseSessionInfo } from './session-browser';
+import { requestSessionInfo } from './session-browser';
+import { CallbackHttpError, callbackFailureReply, classifyCallbackFailure, formatCallbackFailure } from './callback-failure';
 import { fetchModelMenuResponses, sendModelMenuReply } from './model-menu-request';
 /**
  * Telegram channel for Claude Gateway.
@@ -1431,11 +1432,21 @@ bot.command('voices',async ctx=>{
 
 type TaskView = TaskDetail & {taskId:string;title:string;state:string;progress?:string;question?:string;updatedAt:number;startedAt?:number;finishedAt?:number;canStop:boolean}
 type TaskBrowser = {sessionId:string;task?:TaskView;tasks?:TaskView[];page?:number;pages?:number;total?:number}
+// Log why a callback-backed command failed, then tell the user whether the
+// agent is busy, restarting, or failed. The reply itself may fail too.
+async function replyCallbackFailure(ctx:Context,err:unknown,command:string,what:string) {
+  const failure=classifyCallbackFailure(err)
+  process.stderr.write(formatCallbackFailure(command,failure)+'\n')
+  try{await ctx.reply(callbackFailureReply(failure.kind,what,command))}
+  catch(replyErr){process.stderr.write(formatCallbackFailure(`${command} reply`,classifyCallbackFailure(replyErr))+'\n')}
+}
 async function taskBrowserRequest(chatId:string,userId:string,payload:Record<string,unknown>={}) {
   if(!CALLBACK_URL_BASE)throw Error('not_configured')
   const response=await fetch(CALLBACK_URL_BASE+'/command',{method:'POST',headers:{'Content-Type':'application/json'},signal:AbortSignal.timeout(10000),body:JSON.stringify({command:'telegram_tasks',chat_id:chatId,payload:{...payload,user_id:userId}})})
   const result=await response.json() as TaskBrowser & {success?:boolean}
-  if(!response.ok||!result.success)throw Error((result as {error?:string}).error==='TASK_SESSION_CHANGED'?'TASK_SESSION_CHANGED':'unavailable')
+  if((result as {error?:string}).error==='TASK_SESSION_CHANGED')throw Error('TASK_SESSION_CHANGED')
+  if(!response.ok)throw new CallbackHttpError(response.status)
+  if(!result.success)throw Error('unavailable')
   if(typeof result.sessionId!=='string'||!result.sessionId)throw Error('unavailable')
   return result
 }
@@ -1480,7 +1491,7 @@ bot.command('tasks',async ctx=>{
   if(ctx.chat?.type!=='private'||!isCallbackAuthorized(ctx))return
   if(!ORCHESTRATION_ENABLED){await ctx.reply('Task controls require orchestration mode.');return}
   try{await liveTaskBrowser.open(String(ctx.chat.id),String(ctx.from!.id))}
-  catch{await ctx.reply('Could not load tasks. Please try /tasks again.')}
+  catch(err){await replyCallbackFailure(ctx,err,'tasks','tasks')}
 })
 
 // /pstack-setup (Telegram also takes /pstack_setup: command names cannot contain '-').
@@ -1508,7 +1519,8 @@ async function taskStopRequest(chatId: string, userId: string, menuId?: string, 
     body:JSON.stringify({command:'task_stop',chat_id:chatId,payload:{user_id:userId,menu_id:menuId,index}}),
   })
   const result=await response.json() as {success?:boolean;legacy?:boolean;text?:string;menuId?:string;tasks?:Array<{title:string;state:string}>}
-  if (!response.ok || !result.success) throw new Error('unavailable')
+  if (!response.ok) throw new CallbackHttpError(response.status)
+  if (!result.success) throw new Error('unavailable')
   return result
 }
 bot.command('stop',async (ctx,next)=>{
@@ -1521,7 +1533,7 @@ bot.command('stop',async (ctx,next)=>{
     for (const [i,task] of (result.tasks??[]).entries()) keyboard.text(`${i+1}. ${task.title.slice(0,65)} (${task.state})`,`taskstop:${result.menuId}:${i+1}`).row()
     if (result.tasks?.length) keyboard.text('Dismiss',`taskstop:${result.menuId}:0`)
     await ctx.reply(result.text??'Nothing to stop.',result.tasks?.length?{reply_markup:keyboard}:{})
-  } catch { await ctx.reply('Could not load tasks. Please try /stop again.') }
+  } catch (err) { await replyCallbackFailure(ctx, err, 'stop', 'tasks') }
 })
 
 // Voice settings are handled directly; no model call or TTS for this menu.
@@ -1584,14 +1596,7 @@ const SESSION_BROWSER_FILE = join(STATE_DIR, 'session-browser.json')
 let restoredSessionBrowsers: TaskBrowserMessage[] = []
 try { const saved = JSON.parse(readFileSync(SESSION_BROWSER_FILE, 'utf8')); if (Array.isArray(saved)) restoredSessionBrowsers = saved } catch {}
 const liveSessionBrowser = new LiveTaskBrowser({
-  read: async (chat) => {
-    if (!CALLBACK_URL_BASE) throw new Error('not_configured')
-    const response = await fetch(CALLBACK_URL_BASE + '/command', {
-      method:'POST', headers:{'Content-Type':'application/json'}, signal:AbortSignal.timeout(10000),
-      body:JSON.stringify({command:'session_info',chat_id:chat}),
-    })
-    return parseSessionInfo(response.ok, await response.json())
-  },
+  read: chat => requestSessionInfo(CALLBACK_URL_BASE, chat),
   render: result => ({text:(result as {sessionId:string;text:string}).text,reply_markup:{inline_keyboard:[]}}),
   send: async (chat,menu) => (await bot.api.sendMessage(chat,menu.text,{parse_mode:'HTML'})).message_id,
   edit: (chat,id,menu) => bot.api.editMessageText(chat,id,menu.text,{parse_mode:'HTML'}),
@@ -1608,7 +1613,7 @@ setInterval(()=>{void liveSessionBrowser.tick().catch(()=>{})},3000).unref()
 bot.command('session',async ctx=>{
   if(ctx.chat?.type!=='private'||!isCallbackAuthorized(ctx))return
   try{await liveSessionBrowser.open(String(ctx.chat.id),String(ctx.from!.id))}
-  catch{await ctx.reply('Could not load session info. Please try /session again.')}
+  catch(err){await replyCallbackFailure(ctx,err,'session','session info')}
 })
 
 // /sessions — list sessions with inline keyboard for switching/deleting
