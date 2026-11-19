@@ -226,6 +226,8 @@ function startMockCallbackServer(port: number) {
   const commands: Array<Record<string, unknown>> = []
   const voice = new Map<string, string>()
   let stallGetModels = false
+  // Command -> canned failure reply, to exercise the receiver's error paths.
+  const failures = new Map<string, { status: number; body: string }>()
   const server = http.createServer((req, res) => {
     let raw = ''
     req.on('data', c => { raw += c })
@@ -234,6 +236,8 @@ function startMockCallbackServer(port: number) {
       try { body = raw ? JSON.parse(raw) : {} } catch {}
       commands.push(body)
       if (stallGetModels && body['command'] === 'get_models') return
+      const failure = failures.get(String(body['command']))
+      if (failure) { res.writeHead(failure.status, { 'Content-Type': 'application/json' }); res.end(failure.body); return }
       res.writeHead(200, { 'Content-Type': 'application/json' })
       if (body['command'] === 'telegram_voice') {
         const mode = (body['payload'] as any)?.mode, chat = String(body['chat_id'])
@@ -269,6 +273,7 @@ function startMockCallbackServer(port: number) {
   server.listen(port, '127.0.0.1')
   return {
     commands,
+    failures,
     setStallGetModels(value: boolean) { stallGetModels = value },
     close: () => new Promise<void>(r => server.close(() => r())),
   }
@@ -283,6 +288,7 @@ describe.each([{orchestration:true,interactive:false},{orchestration:false,inter
   let mcp: ReturnType<typeof makeMcpReader>
   let idSeq = 10
   let mockCb: ReturnType<typeof startMockCallbackServer>
+  const stderrLines: string[] = []
 
   function nextId() { return ++idSeq }
 
@@ -326,7 +332,6 @@ describe.each([{orchestration:true,interactive:false},{orchestration:false,inter
       stdio: ['pipe', 'pipe', 'pipe'],
     })
 
-    const stderrLines: string[] = []
     proc.stderr!.on('data', (c: Buffer) => {
       stderrLines.push(c.toString().trim())
     })
@@ -641,6 +646,45 @@ describe.each([{orchestration:true,interactive:false},{orchestration:false,inter
     expect(stopped.body.text).toContain('Stopping');expect((stopped.body.reply_markup as any).inline_keyboard.flat().some((b:any)=>b.text==='🔴 Stop task')).toBe(false)
     at=Date.now();mock.queueUpdate({callback_query:{id:'task-dismiss',chat_instance:'tasks',from,message:{...message,message_id:500},data:'taskdismiss'}})
     await mock.waitForCall('deleteMessage',at,20000)
+  })
+
+  test('failed /command callbacks are logged and classified; an expired /stop menu is not',async()=>{
+    if(!orchestration)return
+    const from={id:Number(USER_ID),is_bot:false,first_name:'User'},chat={id:Number(USER_ID),type:'private'}
+    const message={message_id:980,date:Math.floor(Date.now()/1000),from,chat,text:'/voices',entities:[{type:'bot_command',offset:0,length:7}]}
+    const rejected={status:500,body:JSON.stringify({success:false,error:'fixture_failure'})}
+    const logged=async(command:string)=>{
+      const deadline=Date.now()+20000
+      while(Date.now()<deadline){const line=stderrLines.join('\n').split('\n').find(l=>l.includes(`/${command} failed (`));if(line)return line;await sleep(50)}
+      throw new Error(`no failure log for /${command}`)
+    }
+    const press=async(data:string)=>{const at=Date.now();mock.queueUpdate({callback_query:{id:'fail-'+data,chat_instance:'fail',from,message,data}});return mock.waitForCall('answerCallbackQuery',at,20000)}
+    try{
+      for(const command of ['telegram_voices','telegram_pstack','telegram_voice'])mockCb.failures.set(command,rejected)
+      mockCb.failures.set('telegram_question',{status:502,body:'<html>bad gateway</html>'})
+      for(const [text,command] of [['/voices','voices'],['/pstack_setup','pstack_setup'],['/voice','voice']]){
+        const at=Date.now();mock.queueUpdate({message:{...message,text,entities:[{type:'bot_command',offset:0,length:text.length}]}})
+        await mock.waitForCall('sendMessage',at,20000)
+        expect(await logged(command)).toMatch(/kind=failed .*status=500 .*fixture_failure/)
+      }
+      await press('voicepick:22222222-2222-2222-2222-222222222222:female:0')
+      expect(await logged('voices button')).toContain('status=500')
+      await press('ps:h')
+      expect(await logged('pstack_setup button')).toContain('status=500')
+      await press('voice:on')
+      expect(await logged('voice button')).toContain('status=500')
+      await press('orch:q:44444444-4444-4444-4444-444444444444:snooze')
+      expect(await logged('question button')).toContain('status=502')
+
+      mockCb.failures.set('task_stop',{status:200,body:JSON.stringify({success:false,error:'Selection unavailable.',code:'STOP_MENU_EXPIRED'})})
+      const expired=await press('taskstop:11111111-1111-1111-1111-111111111111:1')
+      expect(expired.body.text).toBe('Selection unavailable. Use /stop to refresh.')
+      mockCb.failures.set('task_stop',rejected)
+      await press('taskstop:11111111-1111-1111-1111-111111111111:1')
+      expect(await logged('stop button')).toContain('status=500')
+      expect(stderrLines.join('\n').split('\n').filter(l=>l.includes('/stop button failed ('))).toHaveLength(1)
+      expect(stderrLines.join('\n')).not.toContain('STOP_MENU_EXPIRED')
+    }finally{mockCb.failures.clear()}
   })
 
   test('registered commands and help follow orchestration and interactive config',async()=>{
