@@ -5,6 +5,7 @@ import { createApiRouter } from '../../src/api/router';
 import { apiPrincipal } from '../../src/orchestration/identity';
 import { AgentRunner } from '../../src/agent/runner';
 import { AgentConfig } from '../../src/types';
+import { OrchestrationError } from '../../src/orchestration/types';
 
 test('task answer requires authentication, agent and tool access, and explicit question identity', async () => {
   const answerApiTask=jest.fn(async () => ({taskId:'task-a',state:'queued'}));
@@ -67,4 +68,29 @@ test('Telegram text question confirmation sends a separate message in its topic'
     expect(send).toHaveBeenCalledWith('https://api.telegram.org/botfixture-token/sendMessage',expect.objectContaining({method:'POST'}));
     expect(JSON.parse(send.mock.calls[0][1]!.body as string)).toMatchObject({chat_id:'123',message_thread_id:9,text:'Reminder muted.'});
   } finally { send.mockRestore(); }
+});
+
+test('Telegram task_stop logs the real failure, but not an expired menu, and returns its code', async () => {
+  const runner=Object.create(AgentRunner.prototype) as any;
+  runner.agentConfig={id:'a',orchestration:{enabled:true,channels:['telegram']}};
+  runner.sessionStore={getActiveSessionId:jest.fn(async ()=>'active-session')};
+  runner.logger={warn:jest.fn()};
+  const choose=jest.fn();
+  runner.getOrchestration=jest.fn(async ()=>({stopControls:{choose}}));
+  const res={writeHead:jest.fn(),end:jest.fn()};
+  const body={command:'task_stop',chat_id:'123',payload:{user_id:'123',menu_id:'menu-a',index:1}};
+  const last=()=>JSON.parse(res.end.mock.calls.at(-1)![0]);
+
+  choose.mockImplementationOnce(()=>{throw new OrchestrationError('STOP_MENU_EXPIRED');});
+  await runner.handleCommandRequest(JSON.stringify(body),res);
+  expect(last()).toEqual({success:false,error:'Selection unavailable. Use /stop to refresh the task list.',code:'STOP_MENU_EXPIRED'});
+  expect(runner.logger.warn).not.toHaveBeenCalled();
+
+  choose.mockImplementationOnce(()=>{throw new Error('database is locked at http://127.0.0.1:9/x token=fixture-secret');});
+  await runner.handleCommandRequest(JSON.stringify(body),res);
+  expect(last()).toEqual({success:false,error:'Selection unavailable. Use /stop to refresh the task list.'});
+  expect(runner.logger.warn).toHaveBeenCalledWith('Telegram task_stop failed',expect.objectContaining({error:'Error',message:expect.stringContaining('database is locked')}));
+  const logged=JSON.stringify(runner.logger.warn.mock.calls);
+  expect(logged).not.toContain('127.0.0.1');
+  expect(logged).not.toContain('fixture-secret');
 });

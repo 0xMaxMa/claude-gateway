@@ -3,7 +3,7 @@ import type { AddressInfo } from 'node:net';
 import { requestSessionInfo } from '../../../mcp/tools/telegram/session-browser';
 import { LiveTaskBrowser } from '../../../mcp/tools/telegram/task-browser';
 import {
-  CallbackHttpError, callbackFailureReply, callbackRejection, classifyCallbackFailure, formatCallbackFailure,
+  CallbackHttpError, callbackFailureReply, callbackRejection, classifyCallbackFailure, formatCallbackFailure, readCallbackResult,
 } from '../../../mcp/tools/telegram/callback-failure';
 
 type Handler = (req: http.IncomingMessage, res: http.ServerResponse) => void;
@@ -130,4 +130,24 @@ test('unconfigured callback, unauthorized open and Telegram errors are classifie
   // A Telegram network failure keeps its code for the log but is not an agent restart.
   const telegramNetwork = Object.assign(new Error('Network request failed'), { name: 'HttpError', error: { code: 'ECONNREFUSED' } });
   expect(classifyCallbackFailure(telegramNetwork)).toMatchObject({ kind: 'failed', code: 'ECONNREFUSED' });
+});
+
+test('readCallbackResult keeps the HTTP status, the agent reason and its error code', async () => {
+  const base = await serve((req, res) => {
+    const [status, body] = req.url === '/500' ? [500, '{"success":false,"error":"voice_settings_unavailable"}']
+      : req.url === '/html' ? [502, '<html>bad gateway</html>']
+      : req.url === '/expired' ? [200, '{"success":false,"error":"Selection unavailable.","code":"STOP_MENU_EXPIRED"}']
+      : [200, '{"success":true,"text":"ok"}'];
+    res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(body);
+  });
+  const read = (path: string) => fetch(base + path).then(r => readCallbackResult<{ success?: boolean; text?: string }>(r)).catch((e: unknown) => e);
+  expect(await read('/ok')).toEqual({ success: true, text: 'ok' });
+  const http500 = classifyCallbackFailure(await read('/500'));
+  expect(http500).toMatchObject({ kind: 'failed', status: 500 });
+  expect(http500.message).toContain('voice_settings_unavailable');
+  expect(classifyCallbackFailure(await read('/html'))).toMatchObject({ kind: 'failed', status: 502 });
+  const expired = await read('/expired') as { code?: string; message: string };
+  expect(expired.code).toBe('STOP_MENU_EXPIRED');
+  expect(expired.message).toBe('unavailable: Selection unavailable.');
+  expect(classifyCallbackFailure(expired)).toMatchObject({ kind: 'failed', code: 'STOP_MENU_EXPIRED' });
 });

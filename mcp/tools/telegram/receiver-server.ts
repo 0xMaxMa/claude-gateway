@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { commandHelp } from '../../../dist/agent/command-help.js';
 import { requestSessionInfo } from './session-browser';
-import { CallbackHttpError, callbackFailureReply, callbackRejection, classifyCallbackFailure, formatCallbackFailure } from './callback-failure';
+import { CallbackHttpError, callbackFailureReply, callbackRejection, classifyCallbackFailure, formatCallbackFailure, logCallbackFailure, readCallbackResult } from './callback-failure';
 import { fetchModelMenuResponses, sendModelMenuReply } from './model-menu-request';
 /**
  * Telegram channel for Claude Gateway.
@@ -1405,9 +1405,7 @@ type VoicePicker = {menuId:string;provider:string;page:number;pages:number;gende
 async function voicePickerRequest(chatId:string,userId:string,payload:Record<string,unknown>={}) {
   if(!CALLBACK_URL_BASE)throw new Error('not_configured')
   const response=await fetch(CALLBACK_URL_BASE+'/command',{method:'POST',headers:{'Content-Type':'application/json'},signal:AbortSignal.timeout(20000),body:JSON.stringify({command:'telegram_voices',chat_id:chatId,payload:{...payload,user_id:userId}})})
-  const result=await response.json() as VoicePicker & {success?:boolean;name?:string}
-  if(!response.ok||!result.success)throw new Error('unavailable')
-  return result
+  return readCallbackResult<VoicePicker & {success?:boolean;name?:string}>(response)
 }
 function voicePickerMenu(menu:VoicePicker) {
   const keyboard=new InlineKeyboard()
@@ -1427,17 +1425,18 @@ bot.command('voices',async ctx=>{
   if(ctx.chat?.type!=='private'||!isCallbackAuthorized(ctx))return
   if(!ORCHESTRATION_ENABLED){await ctx.reply('Voice controls require orchestration mode.');return}
   try{const menu=voicePickerMenu(await voicePickerRequest(String(ctx.chat.id),String(ctx.from!.id)));await ctx.reply(menu.text,{reply_markup:menu.reply_markup})}
-  catch{await ctx.reply('Voice list unavailable. Check the TTS provider configuration and try /voices again.')}
+  catch(err){await replyCallbackFailure(ctx,err,'voices','the voice list','Voice list unavailable. Check the TTS provider configuration and try /voices again.')}
 })
 
 type TaskView = TaskDetail & {taskId:string;title:string;state:string;progress?:string;question?:string;updatedAt:number;startedAt?:number;finishedAt?:number;canStop:boolean}
 type TaskBrowser = {sessionId:string;task?:TaskView;tasks?:TaskView[];page?:number;pages?:number;total?:number}
 // Log why a callback-backed command failed, then tell the user whether the
 // agent is busy, restarting, or failed. The reply itself may fail too.
-async function replyCallbackFailure(ctx:Context,err:unknown,command:string,what:string) {
+// `failedReply` replaces the generic text when the agent answered with an error.
+async function replyCallbackFailure(ctx:Context,err:unknown,command:string,what:string,failedReply?:string) {
   const failure=classifyCallbackFailure(err)
   process.stderr.write(formatCallbackFailure(command,failure)+'\n')
-  try{await ctx.reply(callbackFailureReply(failure.kind,what,command))}
+  try{await ctx.reply(failure.kind==='failed'&&failedReply?failedReply:callbackFailureReply(failure.kind,what,command))}
   catch(replyErr){process.stderr.write(formatCallbackFailure(`${command} reply`,classifyCallbackFailure(replyErr))+'\n')}
 }
 async function taskBrowserRequest(chatId:string,userId:string,payload:Record<string,unknown>={}) {
@@ -1481,7 +1480,7 @@ const liveTaskBrowser = new LiveTaskBrowser({
   remove: (chat, id) => bot.api.deleteMessage(chat, id),
   close: (chat, id) => bot.api.editMessageText(chat, id, 'Task view closed.', {reply_markup: {inline_keyboard: []}}),
   allowed: (chat, user) => ORCHESTRATION_ENABLED && chat === user && loadAccess().allowFrom.includes(user),
-  report: err => process.stderr.write(formatCallbackFailure('tasks refresh', classifyCallbackFailure(err))+'\n'),
+  report: err => logCallbackFailure('tasks refresh', err),
   persist: entries => {
     mkdirSync(STATE_DIR, {recursive:true,mode:0o700})
     const temp = TASK_BROWSER_FILE + '.tmp'
@@ -1503,15 +1502,13 @@ bot.command('tasks',async ctx=>{
 async function pstackMenuRequest(chatId:string,userId:string,data:string) {
   if(!CALLBACK_URL_BASE)throw Error('not_configured')
   const response=await fetch(CALLBACK_URL_BASE+'/command',{method:'POST',headers:{'Content-Type':'application/json'},signal:AbortSignal.timeout(20000),body:JSON.stringify({command:'telegram_pstack',chat_id:chatId,payload:{user_id:userId,data}})})
-  const result=await response.json() as {success?:boolean}
-  if(!response.ok||!result.success)throw Error('unavailable')
-  return pstackMenuMarkup(result)
+  return pstackMenuMarkup(await readCallbackResult<{success?:boolean}>(response))
 }
 bot.hears(PSTACK_MENU_COMMAND,async (ctx,next)=>{
   if(ctx.chat?.type!=='private'||!CALLBACK_URL_BASE)return next()
   if(!isCallbackAuthorized(ctx))return
   try{const menu=await pstackMenuRequest(String(ctx.chat.id),String(ctx.from!.id),'ps:h');await ctx.reply(menu.text,{reply_markup:menu.reply_markup})}
-  catch{await ctx.reply('pstack setup unavailable. Please try /pstack_setup again.')}
+  catch(err){await replyCallbackFailure(ctx,err,'pstack_setup','pstack setup','pstack setup unavailable. Please try /pstack_setup again.')}
 })
 
 async function taskStopRequest(chatId: string, userId: string, menuId?: string, index?: number) {
@@ -1520,10 +1517,7 @@ async function taskStopRequest(chatId: string, userId: string, menuId?: string, 
     method:'POST',headers:{'Content-Type':'application/json'},signal:AbortSignal.timeout(10000),
     body:JSON.stringify({command:'task_stop',chat_id:chatId,payload:{user_id:userId,menu_id:menuId,index}}),
   })
-  const result=await response.json().catch(error=>{throw response.ok?error:new CallbackHttpError(response.status)}) as {success?:boolean;legacy?:boolean;text?:string;menuId?:string;tasks?:Array<{title:string;state:string}>}
-  if (!response.ok) throw new CallbackHttpError(response.status, result)
-  if (!result?.success) throw callbackRejection(result)
-  return result
+  return readCallbackResult<{success?:boolean;legacy?:boolean;text?:string;menuId?:string;tasks?:Array<{title:string;state:string}>}>(response)
 }
 bot.command('stop',async (ctx,next)=>{
   if (!ORCHESTRATION_ENABLED || ctx.chat?.type!=='private') return next()
@@ -1547,8 +1541,8 @@ async function telegramVoiceSetting(chatId: string, mode?: VoiceReplyMode): Prom
     body: JSON.stringify({ command: 'telegram_voice', chat_id: chatId, payload: { mode } }),
     signal: AbortSignal.timeout(10000),
   })
-  const result = await response.json() as { success?: boolean; enabled?: boolean; mode?: VoiceReplyMode }
-  if (!response.ok || !result.success || typeof result.enabled !== 'boolean') throw new Error('unavailable')
+  const result = await readCallbackResult<{ success?: boolean; enabled?: boolean; mode?: VoiceReplyMode }>(response)
+  if (typeof result.enabled !== 'boolean') throw new Error('invalid voice settings reply')
   return result.mode ?? (result.enabled ? 'on' : 'off')
 }
 function voiceMenu(mode: VoiceReplyMode) {
@@ -1567,7 +1561,7 @@ bot.command('voice', async ctx => {
   try {
     const menu = voiceMenu(await telegramVoiceSetting(String(ctx.chat.id), choice ? choice as VoiceReplyMode : undefined))
     await ctx.reply(menu.text, choice ? {} : { reply_markup: menu.reply_markup })
-  } catch { await ctx.reply('Voice settings are unavailable. Check the agent TTS configuration.') }
+  } catch (err) { await replyCallbackFailure(ctx, err, 'voice', 'voice settings', 'Voice settings are unavailable. Check the agent TTS configuration.') }
 })
 
 // /call — open a live voice call as a Telegram Mini App bound to this DM. The
@@ -1589,7 +1583,7 @@ bot.command('call', async ctx => {
     }
     // web_app buttons open the Mini App with signed initData; Telegram requires HTTPS.
     await ctx.reply('Tap to start a voice call. Your words and the replies also appear here.', { ...(ctx.message?.message_thread_id ? { message_thread_id: ctx.message.message_thread_id } : {}), reply_markup: new InlineKeyboard().webApp('\u{1F399} Start voice call', data.url) })
-  } catch { await ctx.reply('Could not start a voice call right now.') }
+  } catch (err) { await replyCallbackFailure(ctx, err, 'call', 'a voice call', 'Could not start a voice call right now.') }
 })
 
 // Reuse the /tasks live-message lifecycle: serialize reads/replacement, edit only
@@ -1605,7 +1599,7 @@ const liveSessionBrowser = new LiveTaskBrowser({
   remove: (chat,id) => bot.api.deleteMessage(chat,id),
   close: (chat,id) => bot.api.editMessageText(chat,id,'Session view closed.'),
   allowed: (chat,user) => chat === user && loadAccess().allowFrom.includes(user),
-  report: err => process.stderr.write(formatCallbackFailure('session refresh',classifyCallbackFailure(err))+'\n'),
+  report: err => logCallbackFailure('session refresh', err),
   persist: entries => {
     mkdirSync(STATE_DIR,{recursive:true,mode:0o700})
     const temp=SESSION_BROWSER_FILE+'.tmp'
@@ -1663,7 +1657,8 @@ bot.command('sessions', async ctx => {
     lines.push('Tap a session to switch, \ud83d\uddd1 to delete')
 
     await ctx.reply(lines.join('\n'), { reply_markup: keyboard })
-  } catch {
+  } catch (err) {
+    logCallbackFailure('sessions', err)
     await ctx.reply('Failed to get sessions.')
   }
 })
@@ -1727,10 +1722,10 @@ bot.on('callback_query:data', async ctx => {
       if(!CALLBACK_URL_BASE)throw Error('not_configured')
       const message=ctx.callbackQuery.message
       const response=await fetch(CALLBACK_URL_BASE+'/command',{method:'POST',headers:{'Content-Type':'application/json'},signal:AbortSignal.timeout(10000),body:JSON.stringify({command:'telegram_question',chat_id:String(message.chat.id),payload:{user_id:String(ctx.from.id),question_id:questionControl[1],action:questionControl[2],thread:'message_thread_id' in message?String(message.message_thread_id??''):''}})})
-      const result=await response.json() as {success?:boolean;text?:string;error?:string}
+      const result=await response.json().catch(error=>{throw response.ok?error:new CallbackHttpError(response.status)}) as {success?:boolean;text?:string;error?:string}
       const confirmation=(response.ok&&result.success?result.text:result.error)??'Question unavailable or already answered.'
       await ctx.answerCallbackQuery({text:confirmation.slice(0,180)}).catch(()=>{})
-    }catch{await ctx.answerCallbackQuery({text:'Question unavailable. Use /tasks to refresh.'}).catch(()=>{})}
+    }catch(err){logCallbackFailure('question button',err);await ctx.answerCallbackQuery({text:'Question unavailable. Use /tasks to refresh.'}).catch(()=>{})}
     return
   }
 
@@ -1741,11 +1736,11 @@ bot.on('callback_query:data', async ctx => {
     try{
       if(!CALLBACK_URL_BASE)throw Error('not_configured')
       const response=await fetch(CALLBACK_URL_BASE+'/command',{method:'POST',headers:{'Content-Type':'application/json'},signal:AbortSignal.timeout(10000),body:JSON.stringify({command:'telegram_voice_retry',chat_id:String(ctx.callbackQuery.message.chat.id),payload:{user_id:String(ctx.from.id),input_id:voiceRetry[1]}})})
-      const result=await response.json() as {success?:boolean;text?:string;error?:string}
+      const result=await response.json().catch(error=>{throw response.ok?error:new CallbackHttpError(response.status)}) as {success?:boolean;text?:string;error?:string}
       await ctx.answerCallbackQuery({text:((response.ok&&result.success?result.text:result.error)??'Voice note cannot be retried.').slice(0,180)}).catch(()=>{})
       // Any answer settles this button: a retry was queued, or the note cannot be retried.
       if(response.ok&&result.success)await ctx.editMessageReplyMarkup({reply_markup:undefined}).catch(()=>{})
-    }catch{await ctx.answerCallbackQuery({text:'Voice retry unavailable. Please send the voice note again.'}).catch(()=>{})}
+    }catch(err){logCallbackFailure('voice retry button',err);await ctx.answerCallbackQuery({text:'Voice retry unavailable. Please send the voice note again.'}).catch(()=>{})}
     return
   }
 
@@ -1763,7 +1758,7 @@ bot.on('callback_query:data', async ctx => {
         if(action==='voicepick') await confirmSelection(ctx,`✅ Agent voice: ${result.name} · ${result.provider}`)
         else await ctx.deleteMessage().catch(()=>{})
       }
-    }catch{await ctx.answerCallbackQuery({text:'Voice list changed or unavailable. Use /voices again.'}).catch(()=>{})}
+    }catch(err){logCallbackFailure('voices button',err);await ctx.answerCallbackQuery({text:'Voice list changed or unavailable. Use /voices again.'}).catch(()=>{})}
     return
   }
 
@@ -1776,7 +1771,7 @@ bot.on('callback_query:data', async ctx => {
       await liveTaskBrowser.navigate(String(ctx.callbackQuery.message.chat.id),String(ctx.from.id),ctx.callbackQuery.message.message_id,payload)
     }catch(err){
       // A button on a replaced or closed menu is expected, not a failure.
-      if(!(err instanceof Error&&err.message==='TASK_BROWSER_EXPIRED'))process.stderr.write(formatCallbackFailure('tasks button',classifyCallbackFailure(err))+'\n')
+      if(!(err instanceof Error&&err.message==='TASK_BROWSER_EXPIRED'))logCallbackFailure('tasks button',err)
       await ctx.answerCallbackQuery({text:'Task unavailable. Use /tasks to refresh.'}).catch(()=>{})
     }
     return
@@ -1791,7 +1786,7 @@ bot.on('callback_query:data', async ctx => {
       // Turn on/off ends the menu with its result and no buttons, as a /voice choice does.
       if(menu.done){await confirmSelection(ctx,menu.text).catch(()=>{});return}
       await ctx.editMessageText(menu.text,{reply_markup:menu.reply_markup}).catch(()=>{})
-    }catch{await ctx.answerCallbackQuery({text:'pstack setup unavailable. Use /pstack_setup again.'}).catch(()=>{})}
+    }catch(err){logCallbackFailure('pstack_setup button',err);await ctx.answerCallbackQuery({text:'pstack setup unavailable. Use /pstack_setup again.'}).catch(()=>{})}
     return
   }
 
@@ -1807,7 +1802,8 @@ bot.on('callback_query:data', async ctx => {
       await ctx.deleteMessage().catch(()=>{})
       if (Number(taskStop[2])!==0) await ctx.reply(result.text??'Stop requested.')
     } catch (err) {
-      process.stderr.write(formatCallbackFailure('stop button', classifyCallbackFailure(err))+'\n')
+      // A button on an expired or replaced menu is expected, not a failure.
+      if ((err as {code?:unknown}|null)?.code !== 'STOP_MENU_EXPIRED') logCallbackFailure('stop button', err)
       await ctx.answerCallbackQuery({text:'Selection unavailable. Use /stop to refresh.'}).catch(()=>{})
     }
     return
@@ -1828,7 +1824,7 @@ bot.on('callback_query:data', async ctx => {
       const confirmation=voiceModeConfirmation(data.slice(6))
       await ctx.answerCallbackQuery({text:confirmation}).catch(()=>{})
       await confirmSelection(ctx,confirmation)
-    } catch { await ctx.answerCallbackQuery({ text: 'Could not update voice settings. Please try again.' }).catch(() => {}) }
+    } catch (err) { logCallbackFailure('voice button', err); await ctx.answerCallbackQuery({ text: 'Could not update voice settings. Please try again.' }).catch(() => {}) }
     return
   }
 
@@ -2015,7 +2011,8 @@ bot.on('callback_query:data', async ctx => {
       } else {
         await ctx.answerCallbackQuery({ text: result.error ?? 'Failed' }).catch(() => {})
       }
-    } catch {
+    } catch (err) {
+      logCallbackFailure('model button', err)
       await ctx.answerCallbackQuery({ text: 'Request failed' }).catch(() => {})
     }
     return
@@ -2062,7 +2059,8 @@ bot.on('callback_query:data', async ctx => {
         await ctx.answerCallbackQuery({ text: result.error ?? 'Failed' }).catch(() => {})
         await ctx.editMessageText(`Restart failed: ${result.error ?? 'unknown error'}`).catch(() => {})
       }
-    } catch {
+    } catch (err) {
+      logCallbackFailure('restart button', err)
       await ctx.answerCallbackQuery({ text: 'Request failed' }).catch(() => {})
     }
     return
@@ -2099,7 +2097,8 @@ bot.on('callback_query:data', async ctx => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ command: 'compact_confirm', chat_id: chatId }),
       })
-    } catch {
+    } catch (err) {
+      logCallbackFailure('compact button', err)
       await ctx.answerCallbackQuery({ text: 'Request failed' }).catch(() => {})
     }
     return
@@ -2133,7 +2132,8 @@ bot.on('callback_query:data', async ctx => {
       } else {
         await ctx.answerCallbackQuery({ text: result.error ?? 'Failed' }).catch(() => {})
       }
-    } catch {
+    } catch (err) {
+      logCallbackFailure('session switch button', err)
       await ctx.answerCallbackQuery({ text: 'Request failed' }).catch(() => {})
     }
     return
@@ -2187,7 +2187,8 @@ bot.on('callback_query:data', async ctx => {
         await ctx.answerCallbackQuery({ text: result.error ?? 'Failed' }).catch(() => {})
         await ctx.editMessageText(`Delete failed: ${result.error ?? 'unknown error'}`).catch(() => {})
       }
-    } catch {
+    } catch (err) {
+      logCallbackFailure('session delete button', err)
       await ctx.answerCallbackQuery({ text: 'Request failed' }).catch(() => {})
     }
     return
@@ -2226,7 +2227,8 @@ bot.on('callback_query:data', async ctx => {
       } else {
         await ctx.reply(`\u274C Clear failed: ${result.error ?? 'Unknown error'}`).catch(() => {})
       }
-    } catch {
+    } catch (err) {
+      logCallbackFailure('session clear button', err)
       await ctx.answerCallbackQuery({ text: 'Request failed' }).catch(() => {})
     }
     return
@@ -2270,7 +2272,8 @@ bot.on('callback_query:data', async ctx => {
       } else {
         await ctx.answerCallbackQuery({ text: result.error ?? 'Failed' }).catch(() => {})
       }
-    } catch {
+    } catch (err) {
+      logCallbackFailure('session new button', err)
       await ctx.answerCallbackQuery({ text: 'Request failed' }).catch(() => {})
     }
     return

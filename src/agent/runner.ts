@@ -14,6 +14,8 @@ import { chunkText } from '../telegram/chunks';
 import { resolveChannelFile } from '../orchestration/file-delivery';
 import type { ControlMenu } from '../orchestration/channel-controls';
 import { VOICE_REPLY_MODES, VoiceReplyMode } from '../orchestration/voice-reply-policy';
+import { OrchestrationError } from '../orchestration/types';
+import { redactLine } from '../cli/redact';
 import {applyGatewayOrchestration} from '../orchestration/gateway-config';
 import { channelSender, ChannelSender } from '../orchestration/delivery';
 import { sendControlMenu } from '../orchestration/control-delivery';
@@ -1616,7 +1618,12 @@ export class AgentRunner extends EventEmitter {
           const menu=runtime.stopControls.open(sessionId,principalId);
           respond({success:true,...menu,text:stopMenuText(menu,true)});
         }
-      } catch { respond({success:false,error:'Selection unavailable. Use /stop to refresh the task list.'}); }
+      } catch (error) {
+        // An expired or replaced menu is expected; anything else is a real failure.
+        const code = error instanceof OrchestrationError ? error.code : undefined;
+        if (code !== 'STOP_MENU_EXPIRED') this.logger.warn('Telegram task_stop failed', { code, error: error instanceof Error ? error.name : typeof error, message: redactLine(String(error instanceof Error ? error.message : error)).replace(/https?:\/\/\S+/g, '[url]').slice(0, 160) });
+        respond({success:false,error:'Selection unavailable. Use /stop to refresh the task list.',...(code ? {code} : {})});
+      }
       return;
     }
 

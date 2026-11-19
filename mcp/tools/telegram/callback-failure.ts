@@ -16,10 +16,21 @@ function rejectionReason(body: unknown): string {
   return typeof b?.error === 'string' && b.error ? b.error : typeof b?.text === 'string' && b.text ? b.text : '';
 }
 
-/** A `{success:false}` callback reply, keeping the agent's own reason for the log. */
+/** A `{success:false}` callback reply, keeping the agent's own reason and
+ * error code (e.g. STOP_MENU_EXPIRED) for the log and the caller. */
 export function callbackRejection(body: unknown, fallback = 'unavailable'): Error {
   const reason = rejectionReason(body);
-  return new Error(reason ? `${fallback}: ${reason}` : fallback);
+  const code = (body as { code?: unknown } | null)?.code;
+  return Object.assign(new Error(reason ? `${fallback}: ${reason}` : fallback), typeof code === 'string' && code ? { code } : {});
+}
+
+/** Reads a /command reply, throwing with the HTTP status or the agent's own
+ * reason so a failure log keeps them. */
+export async function readCallbackResult<T extends { success?: boolean }>(response: Response): Promise<T> {
+  const result = await response.json().catch(error => { throw response.ok ? error : new CallbackHttpError(response.status); }) as T;
+  if (!response.ok) throw new CallbackHttpError(response.status, result);
+  if (!result?.success) throw callbackRejection(result);
+  return result;
 }
 
 // Socket errors that mean nothing is listening on the callback port, usually
@@ -69,4 +80,9 @@ export function callbackFailureReply(kind: CallbackFailureKind, what: string, co
   if (kind === 'busy') return `The agent is busy and did not answer in time. Please try /${command} again in a moment.`;
   if (kind === 'unavailable') return `The agent is restarting or unavailable. Please try /${command} again shortly.`;
   return `Could not load ${what}. Please try /${command} again.`;
+}
+
+/** Logs a failed callback-backed command or button without replying. */
+export function logCallbackFailure(command: string, error: unknown): void {
+  process.stderr.write(formatCallbackFailure(command, classifyCallbackFailure(error)) + '\n');
 }
