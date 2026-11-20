@@ -22,6 +22,9 @@ import type { ModelConfig } from '../types';
 /** A stale catalog beats a hung picker — the fetch sits in front of a UI action. */
 const CATALOG_TIMEOUT_MS = 5_000;
 
+/** Hard bound on one shared catalog request, for a fetch whose abort signal never fires. */
+const CATALOG_DEADLINE_MS = 2 * CATALOG_TIMEOUT_MS;
+
 /**
  * How long a successful fetch is reused. The picker calls this on every press
  * and `GET /api/v1/models` on every request, so an uncached read would put a
@@ -278,8 +281,7 @@ export async function fetchModelCatalog(
   }
 
   inFlightKey = key;
-  let request!: Promise<ModelConfig[] | null>;
-  request = (async (): Promise<ModelConfig[] | null> => {
+  const attempt = (async (): Promise<ModelConfig[] | null> => {
     try {
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
       const token = catalogAuthToken(now);
@@ -298,13 +300,24 @@ export async function fetchModelCatalog(
       return parsed ?? stale;
     } catch {
       return stale; // unreachable, timed out, or unparseable
-    } finally {
-      if (inFlight === request) {
-        inFlight = null;
-        inFlightKey = null;
-      }
     }
   })();
+  // Every task_spawn/subagent_spawn that names a model awaits this shared promise, so
+  // it must settle even when the fetch ignores its abort signal (2026-11-20: one hung
+  // fetch blocked every spawn for hours). The abandoned fetch may still fill the cache.
+  let deadline: NodeJS.Timeout | undefined;
+  const request: Promise<ModelConfig[] | null> = Promise.race([
+    attempt,
+    new Promise<ModelConfig[] | null>((resolve) => {
+      deadline = setTimeout(() => resolve(stale), CATALOG_DEADLINE_MS);
+    }),
+  ]).finally(() => {
+    clearTimeout(deadline);
+    if (inFlight === request) {
+      inFlight = null;
+      inFlightKey = null;
+    }
+  });
   inFlight = request;
   return request;
 }

@@ -374,4 +374,25 @@ describe('model catalog — fetch policy', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     for (const r of results) expect(r!.map((m) => m.id)).toEqual(['claude-opus-5', 'claude-opus-5[1m]', 'live']);
   });
+
+  it('releases callers and the shared request when a fetch never settles', async () => {
+    jest.useFakeTimers();
+    try {
+      process.env.ANTHROPIC_BASE_URL = 'https://proxy.example.com';
+      // Ignores its abort signal and never settles: the request that pinned every
+      // task_spawn/subagent_spawn with a model behind one pending promise.
+      fetchMock.mockImplementationOnce(() => new Promise(() => {}));
+
+      const hung = [fetchModelCatalog(STATIC), fetchModelCatalog(STATIC)];
+      await jest.advanceTimersByTimeAsync(10_000);
+      await expect(Promise.all(hung)).resolves.toEqual([null, null]);
+
+      fetchMock.mockResolvedValueOnce(ok({ data: [{ id: 'live' }] }));
+      const next = await fetchModelCatalog(STATIC);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(next!.map((m) => m.id)).toContain('live');
+    } finally {
+      jest.useRealTimers();
+    }
+  });
 });
