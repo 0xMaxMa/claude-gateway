@@ -2079,6 +2079,10 @@ bot.on('callback_query:data', async ctx => {
       await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
       return
     }
+    if (!CALLBACK_URL_BASE) {
+      await ctx.answerCallbackQuery({ text: 'Not available.' }).catch(() => {})
+      return
+    }
     try {
       const { sessions, activeId } = await listSessionsRequest(CALLBACK_URL_BASE, String(ctx.callbackQuery.message?.chat.id ?? ctx.from.id))
       const menu = sessionListMenu(sessions, activeId, Number(sessionPage[1]))

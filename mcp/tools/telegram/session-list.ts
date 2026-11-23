@@ -68,7 +68,15 @@ export async function listSessionsRequest(base: string | undefined, chatId: stri
   if (!response.ok) throw new CallbackHttpError(response.status, result)
   // A successful list_sessions reply carries `sessions` and no `success` flag.
   if (result?.success === false || !Array.isArray(result?.sessions)) throw callbackRejection(result)
-  const sessions = (result.sessions as Array<Partial<SessionListEntry> | null>).filter((s): s is SessionListEntry =>
-    typeof s?.id === 'string' && typeof s.name === 'string' && Number.isFinite(s.messageCount) && Number.isFinite(s.lastActive))
+  // Only the id is needed to switch or delete; the other fields are display-only,
+  // so a row missing them is still listed (an unnamed one shows as Untitled).
+  const rows = result.sessions as Array<Partial<SessionListEntry> | null>
+  const sessions = rows.filter(s => typeof s?.id === 'string' && s.id !== '').map(s => ({
+    id: s!.id!,
+    name: typeof s!.name === 'string' ? s!.name : '',
+    messageCount: Number.isFinite(s!.messageCount) ? s!.messageCount! : 0,
+    lastActive: Number.isFinite(s!.lastActive) ? s!.lastActive! : 0,
+  }))
+  if (sessions.length < rows.length) process.stderr.write(`telegram channel: /sessions skipped ${rows.length - sessions.length} session row(s) without an id\n`)
   return { sessions, activeId: typeof result.activeSessionId === 'string' ? result.activeSessionId : '' }
 }

@@ -117,7 +117,14 @@ function startMockTelegramServer(port: number) {
           ok(true)
           break
 
-        case 'sendMessage':
+        case 'sendMessage': {
+          // Real Telegram rejects an inline keyboard over 100 buttons (#686).
+          const markup = typeof body['reply_markup'] === 'string' ? JSON.parse(body['reply_markup'] as string) : body['reply_markup']
+          if (((markup as any)?.inline_keyboard ?? []).flat().length > 100) {
+            res.writeHead(400, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ ok: false, error_code: 400, description: 'Bad Request: reply markup is too long' }))
+            break
+          }
           ok({
             message_id: 500,
             chat: { id: Number(body['chat_id']), type: 'private' },
@@ -125,6 +132,7 @@ function startMockTelegramServer(port: number) {
             date: Math.floor(Date.now() / 1000),
           })
           break
+        }
 
         case 'setMessageReaction':
           ok(true)
@@ -253,6 +261,9 @@ function startMockCallbackServer(port: number) {
       } else if(body.command==='telegram_voices') {
         const payload=body.payload as any
         res.end(JSON.stringify(payload.action?{success:true,name:'Dynamic voice'}:{success:true,menuId:'22222222-2222-2222-2222-222222222222',provider:'fixture-provider',page:0,pages:1,selected:'Dynamic voice',gender:payload.gender,groups:['male','female'],voices:payload.gender?[{name:'Dynamic voice',gender:'female',index:0,selected:true}]:[]}))
+      } else if (body['command'] === 'list_sessions') {
+        const sessions = Array.from({ length: 68 }, (_, i) => ({ id: `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`, name: `Session ${i + 1}`, messageCount: i, lastActive: Date.now() - i * 60_000 }))
+        res.end(JSON.stringify({ sessions, activeSessionId: sessions[0].id }))
       } else if (body['command'] === 'cli_pair') {
         res.end(JSON.stringify({ success: true, pairingId: 'a'.repeat(36), code: '1234', url: 'https://host.example/cli/' + 'a'.repeat(36) }))
       } else if (body['command'] === 'get_model') {
@@ -700,6 +711,32 @@ describe.each([{orchestration:true,interactive:false},{orchestration:false,inter
     expect(String(help.body.text).includes('/voice')).toBe(orchestration)
     expect(String(help.body.text).includes('/cli')).toBe(interactive)
   })
+
+  test('/sessions with 68 sessions sends a page Telegram accepts and pages in direct messages only (#686)', async () => {
+    const from = { id: Number(USER_ID), is_bot: false, first_name: 'Tester' }
+    const chat = { id: Number(USER_ID), type: 'private' }
+    let at = Date.now()
+    mock.queueUpdate({ message: { message_id: 990, date: Math.floor(at / 1000), from, chat, text: '/sessions', entities: [{ type: 'bot_command', offset: 0, length: 9 }] } })
+    const sent = await mock.waitForCall('sendMessage', at, 20000)
+    expect(String(sent.body.text)).not.toContain('Failed')
+    expect(String(sent.body.text).split('\n')[0]).toBe('🗂 Sessions (68) · Page 1/9')
+    const data = (sent.body.reply_markup as any).inline_keyboard.flat().map((b: any) => b.callback_data)
+    expect(data.length).toBeLessThanOrEqual(100)
+    expect(data).toContain('session_page:1')
+    const message = { message_id: 500, date: Math.floor(at / 1000), chat, from, text: sent.body.text }
+    at = Date.now()
+    mock.queueUpdate({ callback_query: { id: 'sessions-next', chat_instance: 'sessions', from, message, data: 'session_page:1' } })
+    const edited = await mock.waitForCall('editMessageText', at, 20000)
+    expect(String(edited.body.text).split('\n')[0]).toBe('🗂 Sessions (68) · Page 2/9')
+    expect((edited.body.reply_markup as any).inline_keyboard.flat().map((b: any) => b.callback_data)).toEqual(expect.arrayContaining(['session_page:0', 'session_page:2']))
+    expect((await mock.waitForCall('answerCallbackQuery', at, 20000)).body.callback_query_id).toBe('sessions-next')
+    const lists = mockCb.commands.filter(c => c.command === 'list_sessions')
+    at = Date.now()
+    mock.queueUpdate({ callback_query: { id: 'sessions-group', chat_instance: 'sessions', from, message: { ...message, chat: { id: -100123, type: 'supergroup' } }, data: 'session_page:1' } })
+    const denied = await mock.waitForCall('answerCallbackQuery', at, 20000)
+    expect(denied.body.text).toBe('Not authorized.')
+    expect(mockCb.commands.filter(c => c.command === 'list_sessions')).toHaveLength(lists.length)
+  }, 30000)
 
   test('/models Dismiss acknowledges and deletes the picker without setting a model', async () => {
     const t0 = Date.now()

@@ -92,10 +92,10 @@ afterEach(async () => {
 test('/sessions against a stubbed agent with 68 sessions renders a page Telegram accepts', async () => {
   const seen: unknown[] = [];
   const list = sessions(68);
-  const base = await agent(200, JSON.stringify({ sessions: [...list, { id: 1 }, null, { id: 'nan', name: 'x', messageCount: 1, lastActive: null }], activeSessionId: list[3].id }), seen);
+  const base = await agent(200, JSON.stringify({ sessions: [...list, { id: 1 }, null, { id: '' }], activeSessionId: list[3].id }), seen);
   const { sessions: got, activeId } = await listSessionsRequest(base, '42');
   expect(seen).toEqual([{ command: 'list_sessions', chat_id: '42' }]);
-  expect(got).toHaveLength(68); // malformed rows are dropped
+  expect(got).toHaveLength(68); // rows without an id are dropped
   const menu = sessionListMenu(got, activeId, 0, NOW);
   expect(buttons(menu).length).toBe(8 * 2 + 3);
   expect(buttons(menu)[6].text).toBe('\u{1F7E2} Session 4');
@@ -118,4 +118,13 @@ test('labels never split an emoji or come out empty', () => {
   const labels = buttons(menu).filter(b => b.callback_data.startsWith('session_switch:')).map(b => b.text);
   for (const text of [...labels, menu.text]) expect(Buffer.from(text, 'utf8').toString('utf8')).toBe(text);
   expect(labels[1]).toBe('Untitled');
+});
+
+test('a session missing display fields is still listed and switchable', async () => {
+  const id = '00000000-0000-4000-8000-0000000000aa';
+  const base = await agent(200, JSON.stringify({ sessions: [{ id }, ...sessions(1)], activeSessionId: '' }));
+  const { sessions: got } = await listSessionsRequest(base, '42');
+  expect(got).toContainEqual({ id, name: '', messageCount: 0, lastActive: 0 });
+  const menu = sessionListMenu(got, '', 0, NOW);
+  expect(buttons(menu)).toContainEqual({ text: 'Untitled', callback_data: `session_switch:${id}` });
 });
