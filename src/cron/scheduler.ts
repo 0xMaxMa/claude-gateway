@@ -48,6 +48,8 @@ interface IntervalState {
  */
 function scheduleEvery(intervalMs: number, state: IntervalState, run: () => Promise<void>): { stop(): void } {
   const current = Math.floor(Date.now() / intervalMs);
+  // A new task starts after the boundary that just passed.
+  state.lastBoundary ??= current;
   let next = state.lastBoundary === current - 1 ? current : current + 1;
   let timer: ReturnType<typeof setTimeout>;
   const arm = () => {

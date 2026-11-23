@@ -1838,4 +1838,18 @@ describe('CronManager cron validation (#652)', () => {
       }
     },
   );
+
+  it('an update that does not change a saved reversed schedule still succeeds', async () => {
+    const { manager, agentId } = makeManager();
+    await manager.start();
+    try {
+      const job = await manager.create({ agentId, name: 'legacy', scheduleKind: 'cron', schedule: '0 9 * * *', command: 'echo x' });
+      // Simulate a job saved before reversed ranges were rejected.
+      (manager as unknown as { jobs: Map<string, { schedule: string }> }).jobs.get(job.id)!.schedule = '0 22-6 * * *';
+      await expect(manager.update(job.id, { timezone: 'Asia/Bangkok' })).resolves.toMatchObject({ timezone: 'Asia/Bangkok' });
+      await expect(manager.update(job.id, { schedule: '0 23-5 * * *' })).rejects.toThrow(/Invalid cron expression/);
+    } finally {
+      manager.stop();
+    }
+  });
 });

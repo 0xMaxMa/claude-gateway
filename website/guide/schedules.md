@@ -22,7 +22,7 @@ tasks:
     prompt: "Check if there are any reminders to send."
 ```
 
-Cron expressions use five fields: minute, hour, day, month, weekday. They are validated with node-cron, so lists of ranges (`0 9-11,13-17 * * 1-5`) and names (`MON-FRI`, `JAN`) work. A reversed range such as `17-9` or `FRI-MON` is rejected. Supported interval examples include `30m`, `1h`, `6h`, `1d`, and `1w`. Heartbeats use the gateway process timezone; managed cron jobs have their own timezone and default to UTC. The default proactive rate limit is 30 minutes; a `HEARTBEAT_OK` reply suppresses the Telegram message.
+Cron expressions use five fields: minute, hour, day, month, weekday. They are validated with node-cron, so lists of ranges (`0 9-11,13-17 * * 1-5`) and names (`MON-FRI`, `JAN`) work. Ranges that node-cron would run at different values than written are rejected: a reversed range (`17-9`, `FRI-MON`), a range with two dashes, or a weekday range ending in `7` (use `0` or `SUN`). A step on a range counts from 0, not from the range start, so `9-17/2` runs at 10, 12, 14 and 16; list the values (`9,11,13,15,17`) instead. Supported interval examples include `30m`, `1h`, `6h`, `1d`, and `1w`. Heartbeats use the gateway process timezone; managed cron jobs have their own timezone and default to UTC. The default proactive rate limit is 30 minutes; a `HEARTBEAT_OK` reply suppresses the Telegram message.
 
 ## Inspect a managed job
 

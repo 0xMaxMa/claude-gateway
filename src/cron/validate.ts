@@ -8,15 +8,23 @@ function cronValue(token: string): number {
 }
 
 /**
- * True when a cron expression contains a range whose start is above its end,
- * such as `17-9` or `FRI-MON`. node-cron accepts these and silently swaps the
- * ends, so `0 17-9 * * *` would run at 9..17 instead of overnight.
+ * True when a cron expression has a range that node-cron accepts but runs at
+ * different values than written:
+ * - a reversed range (`17-9`, `FRI-MON`), whose ends node-cron swaps;
+ * - a range with more than one dash (`9-17-8`);
+ * - a weekday range ending in 7 (`1-7`), because node-cron rewrites the first
+ *   7 in the weekday field to 0 before it expands ranges.
  */
-export function hasReversedCronRange(expr: string): boolean {
-  return expr.split(/\s+/).some((field) =>
-    field.split(',').some((part) => {
+export function hasMisreadCronRange(expr: string): boolean {
+  const fields = expr.trim().split(/\s+/);
+  return fields.some((field, i) => {
+    const isWeekday = i === fields.length - 1;
+    return field.split(',').some((part) => {
       const ends = part.split('/')[0].split('-');
-      return ends.length === 2 && cronValue(ends[0]) > cronValue(ends[1]);
-    }),
-  );
+      if (ends.length === 1) return false;
+      if (ends.length > 2) return true;
+      const [start, end] = ends.map(cronValue);
+      return start > end || (isWeekday && (start === 7 || end === 7));
+    });
+  });
 }

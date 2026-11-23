@@ -529,4 +529,20 @@ describe('CronScheduler schedules (#652)', () => {
     expect(firedAt).toEqual([]);
     scheduler.stop();
   });
+
+  it('a reload just after the first boundary of a new interval task keeps that run', () => {
+    jest.useFakeTimers({ now: new Date('2026-01-01T00:10:00Z') });
+    const scheduler = new CronScheduler(AGENT_ID, makeMockRunner('ok'), makeLogger(), makeAgentConfig());
+    const firedAt = recordFirings(scheduler);
+
+    scheduler.load(intervalContent('45m'));
+    // 00:45 passes, but a reload runs before the pending timer callback.
+    const boundary = new Date('2026-01-01T00:45:00Z').getTime();
+    jest.setSystemTime(boundary + 1);
+    scheduler.load(intervalContent('45m'));
+    jest.advanceTimersByTime(0);
+
+    expect(firedAt).toEqual([boundary + 1]);
+    scheduler.stop();
+  });
 });
