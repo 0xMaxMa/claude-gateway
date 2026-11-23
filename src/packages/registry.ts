@@ -1,6 +1,6 @@
-import { execSync } from 'child_process';
-import { closeSync, openSync, readSync, readdirSync, realpathSync, renameSync, rmSync } from 'fs';
-import { join, sep } from 'path';
+import { execFile, execSync } from 'child_process';
+import { closeSync, openSync, readSync, realpathSync } from 'fs';
+import { sep } from 'path';
 import { compareSemver } from '../config/migrator';
 import { RecoveryResult, npmCopyPresent, updateWithStagingRecovery } from './npm-staging';
 
@@ -175,65 +175,38 @@ function getNpmGlobalRoot(): string {
   }).trim();
 }
 
-function cleanStaleNpmTempDirs(npmRoot: string, packageName: string): void {
-  const match = packageName.match(/^(@[^/]+)\/(.+)$/);
-  if (!match) return;
-  const [, scope, basename] = match;
-
-  const scopeDir = join(npmRoot, scope);
-  let entries: string[];
-  try {
-    entries = readdirSync(scopeDir, { withFileTypes: false }) as string[];
-  } catch {
-    return;
-  }
-
-  const prefix = `.${basename}-`;
-  for (const entry of entries) {
-    if (entry.startsWith(prefix)) {
-      try {
-        rmSync(join(scopeDir, entry), { recursive: true, force: true });
-      } catch {
-        // best-effort: ignore errors on individual temp dir removal
+/**
+ * Run a command without blocking the event loop (the HTTP API awaits package
+ * updates, and an install can take minutes). Rejects with the child's stderr
+ * attached, as `execSync` does, so `errorText` reads both the same way.
+ */
+function runAsync(file: string, args: string[], timeoutMs: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    execFile(file, args, { timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024 }, (err, _stdout, stderr) => {
+      if (!err) {
+        resolve();
+        return;
       }
-    }
-  }
+      const withStderr = err as Error & { stderr?: unknown };
+      if (withStderr.stderr === undefined) withStderr.stderr = stderr;
+      reject(withStderr);
+    });
+  });
 }
 
-/**
- * Move the package dir out of npm's way for the retry, keeping it so a failed
- * retry can put it back: deleting it first would leave the package uninstalled
- * whenever the retry fails too. Returns a function that undoes or finalises the
- * move, or null when there was nothing to move.
- */
-function movePackageDirAside(npmRoot: string, packageName: string): ((keepNew: boolean) => void) | null {
-  const match = packageName.match(/^(@[^/]+)\/(.+)$/);
-  if (!match) return null;
-  const [, scope, basename] = match;
-  const dir = join(npmRoot, scope, basename);
-  const aside = join(npmRoot, `.claude-gateway-retry-${process.pid}-${Date.now()}`);
+/** `npm install -g <spec>`; resolves to null on success or npm's error text. */
+async function npmInstallGlobal(spec: string): Promise<string | null> {
   try {
-    renameSync(dir, aside);
-  } catch {
+    await runAsync('npm', ['install', '-g', spec], 300_000);
     return null;
+  } catch (err) {
+    return errorText(err, 'install failed');
   }
-  return (keepNew) => {
-    try {
-      if (!keepNew) {
-        rmSync(dir, { recursive: true, force: true });
-        renameSync(aside, dir);
-      } else {
-        rmSync(aside, { recursive: true, force: true });
-      }
-    } catch {
-      // best-effort; the aside dir is left in place for manual recovery
-    }
-  };
 }
 
 function errorText(err: unknown, fallback: string): string {
   return (
-    (err as { stderr?: Buffer }).stderr?.toString() ||
+    (err as { stderr?: Buffer | string }).stderr?.toString() ||
     (err as { message?: string }).message ||
     fallback
   );
@@ -281,7 +254,7 @@ function pathBinIsNative(bin: string, npmRoot: string): boolean {
  * because the recovery may rename the package dir aside, which breaks the
  * `claude` that npm linked onto PATH.
  */
-export function runNativeUpdate(config: PackageConfig, target: string): RecoveryResult {
+export async function runNativeUpdate(config: PackageConfig, target: string): Promise<RecoveryResult> {
   // Guarded here as well as at the call sites: without a bin there is no
   // updater to run, and shelling out would execute `undefined update`.
   const bin = config.bin;
@@ -295,23 +268,21 @@ export function runNativeUpdate(config: PackageConfig, target: string): Recovery
   }
   if (npmRoot && npmCopyPresent(npmRoot, config.npm) && !pathBinIsNative(bin, npmRoot)) {
     if (!SEMVER_RE.test(target)) return { error: `refusing to install invalid version: ${target}` };
-    const update = (): string | null => {
-      try {
-        execSync(`npm install -g ${config.npm}@${target}`, { stdio: ['pipe', 'pipe', 'pipe'], timeout: 300_000 });
-        return null;
-      } catch (err) {
-        return errorText(err, 'install failed');
-      }
-    };
+    const spec = `${config.npm}@${target}`;
     try {
-      return updateWithStagingRecovery({ npmRoot, packageName: config.npm, binName: bin, update });
+      return await updateWithStagingRecovery({
+        npmRoot,
+        packageName: config.npm,
+        binName: bin,
+        update: () => npmInstallGlobal(spec),
+      });
     } catch (err) {
       return { error: `update recovery failed: ${errorText(err, 'unknown error')}` };
     }
   }
 
   try {
-    execSync(`${bin} update`, { stdio: ['pipe', 'pipe', 'pipe'], timeout: 300_000 });
+    await runAsync(bin, ['update'], 300_000);
   } catch (err) {
     return { error: errorText(err, 'update failed') };
   }
@@ -321,46 +292,37 @@ export function runNativeUpdate(config: PackageConfig, target: string): Recovery
 }
 
 /**
- * Install `version` of an npm-global package.
+ * Install `version` of an npm-global package (claude-gateway).
  *
  * A previously interrupted install can leave `.<pkg>-<hash>` staging dirs in the
- * npm global root that make the next install fail with ENOTEMPTY/ENOTDIR, so
- * those are pre-cleaned and the install is retried once with the package
- * directory moved aside (and restored if the retry fails too). Returns null on
- * success, or the error text.
+ * npm global root that make the next install fail with ENOTEMPTY/ENOTDIR. The
+ * install runs inside `updateWithStagingRecovery`, the same recovery claude-code
+ * uses: a staging dir is removed only once the installed package is proven to
+ * run, a broken package dir is moved aside rather than deleted and put back if
+ * the install fails, and the result is checked by running the package's own
+ * `<basename> --version` bin. Resolves to null on success, or the error text.
  */
-export function installNpmVersion(packageName: string, version: string): string | null {
+export async function installNpmVersion(packageName: string, version: string): Promise<string | null> {
   if (!SEMVER_RE.test(version)) return `refusing to install invalid version: ${version}`;
   const spec = `${packageName}@${version}`;
   let npmRoot = '';
   try {
     npmRoot = getNpmGlobalRoot();
   } catch {
-    // non-fatal: skip pre-clean if npm root unavailable
+    // No npm root to recover in: npm reports its own error, if any.
   }
-
-  if (npmRoot) {
-    cleanStaleNpmTempDirs(npmRoot, packageName);
-  }
+  if (!npmRoot) return npmInstallGlobal(spec);
 
   try {
-    execSync(`npm install -g ${spec}`, { stdio: ['pipe', 'pipe', 'pipe'], timeout: 300_000 });
-    return null;
+    const result = await updateWithStagingRecovery({
+      npmRoot,
+      packageName,
+      // The gateway's bin is named after the package (`claude-gateway`).
+      binName: packageName.slice(packageName.lastIndexOf('/') + 1),
+      update: () => npmInstallGlobal(spec),
+    });
+    return result.error;
   } catch (err) {
-    const stderr = (err as { stderr?: Buffer }).stderr?.toString() ?? '';
-    if (!npmRoot || !(stderr.includes('ENOTEMPTY') || stderr.includes('ENOTDIR'))) {
-      return errorText(err, 'install failed');
-    }
-    // Remove stale temp dirs, move the package dir out of npm's way, retry once
-    cleanStaleNpmTempDirs(npmRoot, packageName);
-    const finish = movePackageDirAside(npmRoot, packageName);
-    try {
-      execSync(`npm install -g ${spec}`, { stdio: ['pipe', 'pipe', 'pipe'], timeout: 300_000 });
-      finish?.(true);
-      return null;
-    } catch (retryErr) {
-      finish?.(false);
-      return errorText(retryErr, 'install failed');
-    }
+    return `update recovery failed: ${errorText(err, 'unknown error')}`;
   }
 }

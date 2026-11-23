@@ -132,7 +132,7 @@ export function createPackagesRouter(apiKeys?: ApiKey[]): Router {
       // staging-dir recovery) for an npm-global one, so an `npm install -g`
       // never writes a second copy beside a native install.
       if (config.update === 'native' && config.bin) {
-        const result = runNativeUpdate(config, target);
+        const result = await runNativeUpdate(config, target);
         if (result.error !== null) {
           res.status(500).json({ error: result.error });
           return;
@@ -148,7 +148,7 @@ export function createPackagesRouter(apiKeys?: ApiKey[]): Router {
       }
 
       // npm-global packages (e.g. claude-gateway) update via npm install -g.
-      const installErr = installNpmVersion(packageName, target);
+      const installErr = await installNpmVersion(packageName, target);
       if (installErr !== null) {
         res.status(500).json({ error: installErr });
         return;

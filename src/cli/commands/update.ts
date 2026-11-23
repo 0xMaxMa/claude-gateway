@@ -140,14 +140,14 @@ async function update(id: PackageId, flags: Record<string, string | boolean>): P
   // picks the native updater or npm from how the package is installed.
   let to: string | null;
   if (config.update === 'native' && config.bin) {
-    const result = runNativeUpdate(config, target);
+    const result = await runNativeUpdate(config, target);
     if (result.error !== null) {
       process.stderr.write(`Update failed: ${result.error}\n`);
       return 1;
     }
     to = result.version;
   } else {
-    const error = installNpmVersion(config.npm, target);
+    const error = await installNpmVersion(config.npm, target);
     if (error !== null) {
       process.stderr.write(`Update failed: ${error}\n`);
       return 1;

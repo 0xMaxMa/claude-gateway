@@ -190,9 +190,16 @@ export interface StagingRecoveryOptions {
   npmRoot: string;
   packageName: string;
   binName: string;
-  /** Runs the updater. Returns null on success or its error text. It must not
-   *  depend on the package dir, which may be renamed aside while it runs. */
-  update: () => string | null;
+  /** Runs the updater. Resolves to null on success or its error text. It must
+   *  not depend on the package dir, which may be renamed aside while it runs,
+   *  and it must not block the event loop: the HTTP API awaits it. */
+  update: () => Promise<string | null>;
+}
+
+/** npm's error codes for the rename that collides with a leftover staging dir
+ *  (npm prints `npm error code ENOTEMPTY`). Only these are worth a retry. */
+function isStagingCollision(errorText: string): boolean {
+  return errorText.includes('ENOTEMPTY') || errorText.includes('ENOTDIR');
 }
 
 /**
@@ -206,10 +213,11 @@ export interface StagingRecoveryOptions {
  * - After the update, probe the package dir. Only when it is runnable are the
  *   staging dirs and the renamed-aside dir removed. Otherwise the renamed dir
  *   is put back, so a failure leaves the state as it was.
- * - A failure while a staging dir exists is retried once, whatever the
- *   updater printed: `claude update` does not reliably pass npm's ENOTEMPTY on.
+ * - A failure is retried once when npm reports the staging-dir collision
+ *   (ENOTEMPTY/ENOTDIR) and a staging dir still exists. Any other failure is
+ *   returned as is: a retry would not change it and doubles the wait.
  */
-export function updateWithStagingRecovery(opts: StagingRecoveryOptions): RecoveryResult {
+export async function updateWithStagingRecovery(opts: StagingRecoveryOptions): Promise<RecoveryResult> {
   const { npmRoot, packageName, binName, update } = opts;
   const release = acquireUpdateLock(npmRoot);
   if (!release) {
@@ -223,7 +231,7 @@ export function updateWithStagingRecovery(opts: StagingRecoveryOptions): Recover
       if (!layout) return { error: `cannot locate ${packageName} under ${npmRoot}` };
       const aside = prepare(layout, npmRoot, packageName, binName);
 
-      const updateErr = update();
+      const updateErr = await update();
       if (updateErr === null) {
         const version = probePackageDir(layout.packageDir, packageName, binName);
         if (version !== null) {
@@ -248,7 +256,7 @@ export function updateWithStagingRecovery(opts: StagingRecoveryOptions): Recover
 
       rollback(layout, aside, packageName, binName);
       lastError = updateErr;
-      if (currentStaging(npmRoot, packageName).length === 0) break;
+      if (!isStagingCollision(updateErr) || currentStaging(npmRoot, packageName).length === 0) break;
     }
     return { error: lastError + describeStaging(npmRoot, packageName) };
   } finally {

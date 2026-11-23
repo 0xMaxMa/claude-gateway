@@ -30,12 +30,14 @@ import {
   writeFileSync,
 } from 'fs';
 import { tmpdir } from 'os';
-import { dirname, join, resolve } from 'path';
+import { basename, dirname, join, resolve } from 'path';
 import { acquireUpdateLock, probePackageDir } from '../../src/packages/npm-staging';
 import type { RecoveryResult } from '../../src/packages/npm-staging';
 
 const REPO = resolve(__dirname, '..', '..');
 const PKG = '@fake-cc/claude-code';
+/** Stands in for `@0xmaxma/claude-gateway`, which installNpmVersion updates. */
+const GW_PKG = '@fake-gw/claude-gateway';
 
 let tmp: string;
 let prefix: string;
@@ -53,11 +55,11 @@ function writeExec(path: string, body: string): void {
 }
 
 /** A claude-code package dir whose `bin/claude` is runnable (or truncated). */
-function writePackage(dir: string, version: string, runnable: boolean): void {
+function writePackage(dir: string, version: string, runnable: boolean, name = PKG, bin = 'claude'): void {
   mkdirSync(join(dir, 'bin'), { recursive: true });
-  writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: PKG, version, bin: { claude: 'bin/claude' } }));
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({ name, version, bin: { [bin]: `bin/${bin}` } }));
   writeExec(
-    join(dir, 'bin', 'claude'),
+    join(dir, 'bin', bin),
     runnable ? `echo "${version} (Claude Code)"` : 'echo "claude is truncated" >&2; exit 1',
   );
 }
@@ -65,12 +67,12 @@ function writePackage(dir: string, version: string, runnable: boolean): void {
 /** npm's own retire path (arborist lib/retire-path.js): the name every retry collides with. */
 function npmRetirePath(from: string): string {
   const hash = createHash('sha1').update(from).digest('base64').replace(/[^a-zA-Z0-9]+/g, '').slice(0, 8);
-  return join(dirname(from), `.claude-code-${hash}`);
+  return join(dirname(from), `.${basename(from)}-${hash}`);
 }
 
-function runs(dir: string): string | null {
+function runs(dir: string, bin = 'claude'): string | null {
   try {
-    return execFileSync(join(dir, 'bin', 'claude'), ['--version'], { encoding: 'utf-8' }).trim();
+    return execFileSync(join(dir, 'bin', bin), ['--version'], { encoding: 'utf-8' }).trim();
   } catch {
     return null;
   }
@@ -100,7 +102,7 @@ function claudeOnPath(target: { symlink: string } | { script: string; shebang: b
 const NATIVE_CLAUDE = [
   'case "$1" in',
   '  --version) echo "${PATH_CLAUDE_VERSION:-1.0.0} (Claude Code)" ;;',
-  '  update) echo $(( $(cat "$CC_STATE/claude-updates" 2>/dev/null || echo 0) + 1 )) > "$CC_STATE/claude-updates" ;;',
+  '  update) [ -n "$SLEEP" ] && sleep "$SLEEP"; echo $(( $(cat "$CC_STATE/claude-updates" 2>/dev/null || echo 0) + 1 )) > "$CC_STATE/claude-updates" ;;',
   'esac',
 ].join('\n');
 
@@ -115,9 +117,19 @@ function sandboxNpmInstall(): { status: number | null; stderr: string } {
 
 /** `runNativeUpdate` for the fake package, in a child process confined to the sandbox. */
 function runNativeUpdateInSandbox(extra: Record<string, string> = {}): RecoveryResult {
-  const r = spawnSandboxChild({ ...env, ...extra });
+  return runInSandbox('runNativeUpdate', extra).result as RecoveryResult;
+}
+
+/** `installNpmVersion` for the fake gateway package, confined the same way. */
+function installNpmVersionInSandbox(extra: Record<string, string> = {}): string | null {
+  return runInSandbox('installNpmVersion', { CC_TGZ: env.GW_TGZ as string, ...extra }).result as string | null;
+}
+
+/** `ticks` counts 50 ms timer callbacks that ran while the update was in flight. */
+function runInSandbox(fn: 'runNativeUpdate' | 'installNpmVersion', extra: Record<string, string>): { result: unknown; ticks: number } {
+  const r = spawnSandboxChild({ ...env, ...extra, SANDBOX_FN: fn });
   if (r.status !== 0) throw new Error(`sandbox child failed (${r.status}): ${r.stderr}`);
-  return JSON.parse(r.stdout) as RecoveryResult;
+  return JSON.parse(r.stdout) as { result: unknown; ticks: number };
 }
 
 function spawnSandboxChild(childEnv: NodeJS.ProcessEnv): { status: number | null; stdout: string; stderr: string } {
@@ -132,9 +144,17 @@ function spawnSandboxChild(childEnv: NodeJS.ProcessEnv): { status: number | null
       process.stderr.write('refusing to run outside the sandbox: ' + [root, claude, npm].join(' '));
       process.exit(99);
     }
-    const { runNativeUpdate } = require(${JSON.stringify(join(REPO, 'src', 'packages', 'registry'))});
+    const { runNativeUpdate, installNpmVersion } = require(${JSON.stringify(join(REPO, 'src', 'packages', 'registry'))});
     const config = { npm: ${JSON.stringify(PKG)}, channel: 'latest', detect: 'binary', bin: 'claude', update: 'native' };
-    process.stdout.write(JSON.stringify(runNativeUpdate(config, '1.0.1')));
+    let ticks = 0;
+    const timer = setInterval(() => ticks++, 50);
+    (async () => {
+      const result = process.env.SANDBOX_FN === 'installNpmVersion'
+        ? await installNpmVersion(${JSON.stringify(GW_PKG)}, '1.0.1')
+        : await runNativeUpdate(config, '1.0.1');
+      clearInterval(timer);
+      process.stdout.write(JSON.stringify({ result: result === undefined ? null : result, ticks }));
+    })();
   `;
   return spawnSync(process.execPath, ['-r', 'ts-node/register/transpile-only', '-e', script], {
     cwd: REPO,
@@ -163,7 +183,9 @@ beforeAll(() => {
       '  for a in "$@"; do spec=$a; done; echo "$spec" >> "$CC_STATE/specs"',
       '  n=$(( $(cat "$CC_STATE/installs" 2>/dev/null || echo 0) + 1 )); echo $n > "$CC_STATE/installs"',
       '  if [ -n "$MUST_RUN" ] && ! "$MUST_RUN" --version >/dev/null 2>&1; then echo "no runnable claude during update" >&2; exit 3; fi',
-      '  if [ "$n" -le "${FAIL_TIMES:-0}" ]; then echo "simulated install failure $n" >&2; exit 1; fi',
+      '  [ -n "$SLEEP" ] && sleep "$SLEEP"',
+      // FAIL_CODE makes the failure read like npm's own (`npm error code ENOTEMPTY`).
+      '  if [ "$n" -le "${FAIL_TIMES:-0}" ]; then echo "${FAIL_CODE:+npm error code $FAIL_CODE }simulated install failure $n" >&2; exit 1; fi',
       '  [ -n "$NO_INSTALL" ] && exit 0',
       '  exec npm-real install -g --offline --no-audit --no-fund "$CC_TGZ"',
       'fi',
@@ -182,13 +204,18 @@ beforeAll(() => {
     ].join('\n'),
   );
 
-  const src = join(tmp, 'src');
-  writePackage(src, '1.0.1', true);
-  execFileSync(join(binDir, 'npm-real'), ['pack', '--silent', '--pack-destination', tmp], {
-    cwd: src,
-    stdio: 'pipe',
-    env: { PATH: `${binDir}:/usr/bin:/bin`, HOME: tmp, npm_config_cache: join(tmp, 'npm-cache') },
-  });
+  for (const [dir, name, bin] of [
+    ['src', PKG, 'claude'],
+    ['gw-src', GW_PKG, 'claude-gateway'],
+  ] as const) {
+    const src = join(tmp, dir);
+    writePackage(src, '1.0.1', true, name, bin);
+    execFileSync(join(binDir, 'npm-real'), ['pack', '--silent', '--pack-destination', tmp], {
+      cwd: src,
+      stdio: 'pipe',
+      env: { PATH: `${binDir}:/usr/bin:/bin`, HOME: tmp, npm_config_cache: join(tmp, 'npm-cache') },
+    });
+  }
 });
 
 afterAll(() => {
@@ -212,6 +239,7 @@ beforeEach(() => {
     npm_config_globalconfig: join(tmp, 'npmrc-global'),
     CC_STATE: stateDir,
     CC_TGZ: join(tmp, 'fake-cc-claude-code-1.0.1.tgz'),
+    GW_TGZ: join(tmp, 'fake-gw-claude-gateway-1.0.1.tgz'),
   };
 });
 
@@ -282,7 +310,7 @@ describe('runNativeUpdate on an npm-global claude-code with a stale staging dir 
     writePackage(mainDir, '1.0.0', false);
     writePackage(stagingDir, '1.0.0', true);
 
-    const result = runNativeUpdateInSandbox({ FAIL_TIMES: '9' });
+    const result = runNativeUpdateInSandbox({ FAIL_TIMES: '9', FAIL_CODE: 'ENOTEMPTY' });
 
     expect(result.error).toContain('simulated install failure');
     expect(result.error).toContain(stagingDir);
@@ -292,12 +320,33 @@ describe('runNativeUpdate on an npm-global claude-code with a stale staging dir 
     expect(installCalls()).toBe(2);
   });
 
-  it('AC3: the install fails once while a staging dir exists → recovered and retried once', () => {
+  it('AC3: npm reports ENOTEMPTY once while a staging dir exists → recovered and retried once', () => {
     writePackage(mainDir, '1.0.0', false);
     writePackage(stagingDir, '1.0.0', true);
 
-    expect(runNativeUpdateInSandbox({ FAIL_TIMES: '1' })).toEqual({ error: null, version: '1.0.1' });
+    expect(runNativeUpdateInSandbox({ FAIL_TIMES: '1', FAIL_CODE: 'ENOTEMPTY' })).toEqual({ error: null, version: '1.0.1' });
     expect(installCalls()).toBe(2);
+  });
+
+  it('a failure that is not the staging collision is not retried, even with a staging dir', () => {
+    writePackage(mainDir, '1.0.0', false);
+    writePackage(stagingDir, '1.0.0', true);
+
+    const result = runNativeUpdateInSandbox({ FAIL_TIMES: '9', FAIL_CODE: 'E404' });
+
+    expect(result.error).toContain('npm error code E404 simulated install failure 1');
+    expect(installCalls()).toBe(1);
+    expect(runs(stagingDir)).toBe('1.0.0 (Claude Code)');
+    expect(JSON.parse(readFileSync(join(mainDir, 'package.json'), 'utf-8')).version).toBe('1.0.0');
+  });
+
+  it('does not block the event loop while npm runs', () => {
+    writePackage(mainDir, '1.0.0', true);
+
+    const { result, ticks } = runInSandbox('runNativeUpdate', { SLEEP: '1' });
+
+    expect(result).toEqual({ error: null, version: '1.0.1' });
+    expect(ticks).toBeGreaterThanOrEqual(5);
   });
 
   it('AC4: a failure with no staging dir → no retry, the npm error unchanged', () => {
@@ -374,6 +423,15 @@ describe('runNativeUpdate on a native install', () => {
     expect(existsSync(join(npmRoot, '.claude-gateway-update.lock'))).toBe(false);
   });
 
+  it('does not block the event loop while `claude update` runs', () => {
+    claudeOnPath({ script: NATIVE_CLAUDE, shebang: false });
+
+    const { result, ticks } = runInSandbox('runNativeUpdate', { PATH_CLAUDE_VERSION: '1.0.1', SLEEP: '1' });
+
+    expect(result).toEqual({ error: null, version: '1.0.1' });
+    expect(ticks).toBeGreaterThanOrEqual(5);
+  });
+
   it('a native install beside an old broken npm copy → native updater, native version, npm copy untouched', () => {
     claudeOnPath({ script: NATIVE_CLAUDE, shebang: false });
     writePackage(mainDir, '0.5.0', false);
@@ -383,6 +441,67 @@ describe('runNativeUpdate on a native install', () => {
     expect(claudeUpdateCalls()).toBe(1);
     expect(installCalls()).toBe(0);
     expect(existsSync(mainDir) && existsSync(stagingDir)).toBe(true);
+  });
+});
+
+describe('installNpmVersion (claude-gateway) uses the same recovery', () => {
+  let gwDir: string;
+  let gwStaging: string;
+  beforeEach(() => {
+    gwDir = join(npmRoot, '@fake-gw', 'claude-gateway');
+    gwStaging = npmRetirePath(gwDir);
+  });
+  const gwRuns = (dir: string) => runs(dir, 'claude-gateway');
+  const gwVersion = (dir: string) => JSON.parse(readFileSync(join(dir, 'package.json'), 'utf-8')).version;
+
+  it('runnable package dir + stale staging → staging removed, target installed', () => {
+    writePackage(gwDir, '1.0.0', true, GW_PKG, 'claude-gateway');
+    writePackage(gwStaging, '0.9.0', true, GW_PKG, 'claude-gateway');
+
+    expect(installNpmVersionInSandbox()).toBeNull();
+    expect(gwRuns(gwDir)).toBe('1.0.1 (Claude Code)');
+    expect(existsSync(gwStaging)).toBe(false);
+    expect(readFileSync(join(stateDir, 'specs'), 'utf-8')).toBe(`${GW_PKG}@1.0.1\n`);
+  });
+
+  it('broken package dir + the only working copy in staging + ENOTEMPTY every time → both kept', () => {
+    writePackage(gwDir, '1.0.0', false, GW_PKG, 'claude-gateway');
+    writePackage(gwStaging, '1.0.0', true, GW_PKG, 'claude-gateway');
+
+    const error = installNpmVersionInSandbox({ FAIL_TIMES: '9', FAIL_CODE: 'ENOTEMPTY' });
+
+    expect(error).toContain('ENOTEMPTY');
+    expect(gwRuns(gwStaging)).toBe('1.0.0 (Claude Code)');
+    expect(gwVersion(gwDir)).toBe('1.0.0');
+    expect(installCalls()).toBe(2);
+  });
+
+  it('install exits 0 but the new copy does not run → error, the working staging copy kept', () => {
+    writePackage(gwDir, '1.0.0', false, GW_PKG, 'claude-gateway');
+    writePackage(gwStaging, '1.0.0', true, GW_PKG, 'claude-gateway');
+
+    expect(installNpmVersionInSandbox({ NO_INSTALL: '1' })).toMatch(/is not runnable/);
+    expect(gwRuns(gwStaging)).toBe('1.0.0 (Claude Code)');
+    expect(gwVersion(gwDir)).toBe('1.0.0');
+  });
+
+  it('a non-collision failure is returned unchanged with no retry', () => {
+    writePackage(gwDir, '1.0.0', true, GW_PKG, 'claude-gateway');
+
+    expect(installNpmVersionInSandbox({ FAIL_TIMES: '9', FAIL_CODE: 'E404' })).toBe(
+      'npm error code E404 simulated install failure 1\n',
+    );
+    expect(installCalls()).toBe(1);
+    expect(gwRuns(gwDir)).toBe('1.0.0 (Claude Code)');
+  });
+
+  it('does not block the event loop while npm runs', () => {
+    writePackage(gwDir, '1.0.0', true, GW_PKG, 'claude-gateway');
+
+    const { result, ticks } = runInSandbox('installNpmVersion', { CC_TGZ: env.GW_TGZ as string, SLEEP: '1' });
+
+    expect(result).toBeNull();
+    expect(ticks).toBeGreaterThanOrEqual(5);
   });
 });
 
