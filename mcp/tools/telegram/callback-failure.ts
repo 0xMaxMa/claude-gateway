@@ -76,7 +76,10 @@ export function formatCallbackFailure(command: string, f: CallbackFailure): stri
     `${f.status !== undefined ? ` status=${f.status}` : ''}${f.telegramCode !== undefined ? ` telegram_code=${f.telegramCode}` : ''}${f.code ? ` code=${f.code}` : ''} message=${JSON.stringify(f.message)})`;
 }
 
-export function callbackFailureReply(kind: CallbackFailureKind, what: string, command: string): string {
+/** `telegramCode`: Telegram itself rejected the reply, so the agent is fine and
+ * the user is told that instead of a generic failure. */
+export function callbackFailureReply(kind: CallbackFailureKind, what: string, command: string, telegramCode?: number): string {
+  if (telegramCode !== undefined) return `Telegram rejected the ${what} reply (error ${telegramCode}). Please try /${command} again; if it keeps failing, report it.`;
   if (kind === 'busy') return `The agent is busy and did not answer in time. Please try /${command} again in a moment.`;
   if (kind === 'unavailable') return `The agent is restarting or unavailable. Please try /${command} again shortly.`;
   return `Could not load ${what}. Please try /${command} again.`;

@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { commandHelp } from '../../../dist/agent/command-help.js';
 import { requestSessionInfo } from './session-browser';
+import { listSessionsRequest, sessionListMenu } from './session-list';
 import { CallbackHttpError, callbackFailureReply, callbackRejection, classifyCallbackFailure, formatCallbackFailure, logCallbackFailure, readCallbackResult } from './callback-failure';
 import { fetchModelMenuResponses, sendModelMenuReply } from './model-menu-request';
 /**
@@ -1436,7 +1437,7 @@ type TaskBrowser = {sessionId:string;task?:TaskView;tasks?:TaskView[];page?:numb
 async function replyCallbackFailure(ctx:Context,err:unknown,command:string,what:string,failedReply?:string) {
   const failure=classifyCallbackFailure(err)
   process.stderr.write(formatCallbackFailure(command,failure)+'\n')
-  try{await ctx.reply(failure.kind==='failed'&&failedReply?failedReply:callbackFailureReply(failure.kind,what,command))}
+  try{await ctx.reply(failure.kind==='failed'&&failedReply&&failure.telegramCode===undefined?failedReply:callbackFailureReply(failure.kind,what,command,failure.telegramCode))}
   catch(replyErr){process.stderr.write(formatCallbackFailure(`${command} reply`,classifyCallbackFailure(replyErr))+'\n')}
 }
 async function taskBrowserRequest(chatId:string,userId:string,payload:Record<string,unknown>={}) {
@@ -1613,7 +1614,8 @@ bot.command('session',async ctx=>{
   catch(err){await replyCallbackFailure(ctx,err,'session','session info')}
 })
 
-// /sessions — list sessions with inline keyboard for switching/deleting
+// /sessions — list sessions with inline keyboard for switching/deleting.
+// Paged so one keyboard stays under Telegram's button limit (#686).
 bot.command('sessions', async ctx => {
   if (ctx.chat?.type !== 'private') return
   const access = loadAccess()
@@ -1621,45 +1623,11 @@ bot.command('sessions', async ctx => {
   if (!CALLBACK_URL_BASE) return
 
   try {
-    const res = await fetch(CALLBACK_URL_BASE + '/command', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ command: 'list_sessions', chat_id: String(ctx.chat.id) }),
-    })
-    const data = (await res.json()) as {
-      sessions?: Array<{ id: string; name: string; messageCount: number; lastActive: number }>
-      activeSessionId?: string
-    }
-    const sessions = data.sessions ?? []
-    const activeId = data.activeSessionId ?? ''
-
-    const keyboard = new InlineKeyboard()
-    for (const s of sessions) {
-      const isActive = s.id === activeId
-      const label = isActive ? `\ud83d\udfe2 ${s.name}` : s.name
-      if (sessions.length > 1) {
-        keyboard.text(label, `session_switch:${s.id}`).text('\ud83d\uddd1', `session_delete:${s.id}`).row()
-      } else {
-        keyboard.text(label, `session_switch:${s.id}`).row()
-      }
-    }
-    keyboard.text('\u2795 New Session', 'session_new').row()
-    keyboard.text('Dismiss', 'session_back')
-
-    const lines = [`\ud83d\uddc2 Sessions (${sessions.length})`, '']
-    for (const s of sessions) {
-      const isActive = s.id === activeId
-      const ago = Math.round((Date.now() - s.lastActive) / 60000)
-      const ageStr = ago < 60 ? `${ago}m ago` : `${Math.round(ago / 60)}h ago`
-      lines.push(`${isActive ? '\ud83d\udfe2' : '\u26aa'} ${s.name} \u00b7 ${s.messageCount} msgs \u00b7 ${ageStr}`)
-    }
-    lines.push('')
-    lines.push('Tap a session to switch, \ud83d\uddd1 to delete')
-
-    await ctx.reply(lines.join('\n'), { reply_markup: keyboard })
+    const { sessions, activeId } = await listSessionsRequest(CALLBACK_URL_BASE, String(ctx.chat.id))
+    const menu = sessionListMenu(sessions, activeId, 0)
+    await ctx.reply(menu.text, { reply_markup: menu.reply_markup })
   } catch (err) {
-    logCallbackFailure('sessions', err)
-    await ctx.reply('Failed to get sessions.')
+    await replyCallbackFailure(ctx, err, 'sessions', 'sessions')
   }
 })
 
@@ -2100,6 +2068,31 @@ bot.on('callback_query:data', async ctx => {
     } catch (err) {
       logCallbackFailure('compact button', err)
       await ctx.answerCallbackQuery({ text: 'Request failed' }).catch(() => {})
+    }
+    return
+  }
+
+  // Handle /sessions paging: session_page:<n>
+  const sessionPage = /^session_page:(\d{1,4})$/.exec(data)
+  if (sessionPage) {
+    if (!isCallbackAuthorized(ctx)) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    try {
+      const { sessions, activeId } = await listSessionsRequest(CALLBACK_URL_BASE, String(ctx.callbackQuery.message?.chat.id ?? ctx.from.id))
+      const menu = sessionListMenu(sessions, activeId, Number(sessionPage[1]))
+      await ctx.editMessageText(menu.text, { reply_markup: menu.reply_markup })
+      await ctx.answerCallbackQuery().catch(() => {})
+    } catch (err) {
+      // Tapping the page already shown leaves the text unchanged; nothing failed.
+      if (/message is not modified/i.test(String((err as { description?: unknown })?.description ?? ''))) {
+        await ctx.answerCallbackQuery().catch(() => {})
+        return
+      }
+      const failure = classifyCallbackFailure(err)
+      process.stderr.write(formatCallbackFailure('sessions page', failure) + '\n')
+      await ctx.answerCallbackQuery({ text: callbackFailureReply(failure.kind, 'sessions', 'sessions', failure.telegramCode).slice(0, 180) }).catch(() => {})
     }
     return
   }
