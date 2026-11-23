@@ -43,7 +43,8 @@ interface IntervalState {
  * the frequent reloads triggered by any workspace write (MEMORY.md included)
  * do not restart the count. Each boundary runs at most once: a tick that
  * arrives before its boundary (clock moved back) waits again, and a late tick
- * runs once and skips the boundaries it missed. `state` outlives a reload, so a
+ * runs once and skips the boundaries it missed. A clock moved back by more than
+ * one interval re-anchors to the current time. `state` outlives a reload, so a
  * reload that lands after a boundary but before its timer ran still runs it.
  */
 function scheduleEvery(intervalMs: number, state: IntervalState, run: () => Promise<void>): { stop(): void } {
@@ -52,11 +53,18 @@ function scheduleEvery(intervalMs: number, state: IntervalState, run: () => Prom
   state.lastBoundary ??= current;
   let next = state.lastBoundary === current - 1 ? current : current + 1;
   let timer: ReturnType<typeof setTimeout>;
+  let stopped = false;
   const arm = () => {
+    // run() may reload HEARTBEAT.md, which stops this task before arm() runs.
+    if (stopped) return;
     timer = setTimeout(tick, Math.max(0, next * intervalMs - Date.now()));
   };
   const tick = () => {
     const now = Date.now();
+    // The clock moved back past the boundary that already ran (NTP correcting a
+    // clock that was ahead, a restored VM): count from the current time again,
+    // as cron does, instead of staying silent until the clock catches up.
+    if (now < (next - 1) * intervalMs) next = Math.floor(now / intervalMs) + 1;
     if (now >= next * intervalMs) {
       state.lastBoundary = Math.floor(now / intervalMs);
       next = state.lastBoundary + 1;
@@ -65,7 +73,12 @@ function scheduleEvery(intervalMs: number, state: IntervalState, run: () => Prom
     arm();
   };
   arm();
-  return { stop: () => clearTimeout(timer) };
+  return {
+    stop: () => {
+      stopped = true;
+      clearTimeout(timer);
+    },
+  };
 }
 
 export class CronScheduler extends EventEmitter {
@@ -127,6 +140,9 @@ export class CronScheduler extends EventEmitter {
 
     // Carry interval state over for tasks that survive the reload; drop the rest.
     const intervalStates = new Map<string, IntervalState>();
+    // Task names are not unique, so the nth task with the same name and
+    // interval keeps the nth state; two such tasks never share one.
+    const occurrences = new Map<string, number>();
     for (const task of heartbeatTasks) {
       // Store for triggerTask() support
       this.taskDefs.set(task.name, { name: task.name, prompt: task.prompt });
@@ -145,7 +161,10 @@ export class CronScheduler extends EventEmitter {
         this.tasks.push(nodeCron.schedule(task.cron, run));
       } else {
         this.logger.info(`Scheduling heartbeat task "${task.name}"`, { intervalMs: task.intervalMs });
-        const key = `${task.name}\0${task.intervalMs}`;
+        const base = `${task.name}\0${task.intervalMs}`;
+        const n = occurrences.get(base) ?? 0;
+        occurrences.set(base, n + 1);
+        const key = `${base}\0${n}`;
         const state = this.intervalStates.get(key) ?? {};
         intervalStates.set(key, state);
         this.tasks.push(scheduleEvery(task.intervalMs, state, run));

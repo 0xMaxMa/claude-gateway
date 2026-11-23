@@ -22,7 +22,7 @@ tasks:
     prompt: "Check if there are any reminders to send."
 ```
 
-Cron expressions use five fields: minute, hour, day, month, weekday. They are validated with node-cron, so lists of ranges (`0 9-11,13-17 * * 1-5`) and names (`MON-FRI`, `JAN`) work. Ranges that node-cron would run at different values than written are rejected: a reversed range (`17-9`, `FRI-MON`), a range with two dashes, or a weekday range ending in `7` (use `0` or `SUN`). A step on a range counts from 0, not from the range start, so `9-17/2` runs at 10, 12, 14 and 16; list the values (`9,11,13,15,17`) instead. Supported interval examples include `30m`, `1h`, `6h`, `1d`, and `1w`. Heartbeats use the gateway process timezone; managed cron jobs have their own timezone and default to UTC. The default proactive rate limit is 30 minutes; a `HEARTBEAT_OK` reply suppresses the Telegram message.
+Cron expressions use five fields: minute, hour, day, month, weekday. They are validated with node-cron, so lists of ranges (`0 9-11,13-17 * * 1-5`) and names (`MON-FRI`, `JAN`) work. Ranges that node-cron would run at different values than written are rejected: a reversed range (`17-9`, `FRI-MON`), a range with two dashes or a missing end (`5-`), or a weekday range ending in `7` (use `0` or `SUN`). A step on a range counts from 0, not from the range start, so `9-17/2` runs at 10, 12, 14 and 16; list the values (`9,11,13,15,17`) instead. Supported interval examples include `30m`, `1h`, `6h`, `1d`, and `1w`. Heartbeats use the gateway process timezone; managed cron jobs have their own timezone and default to UTC. The default proactive rate limit is 30 minutes; a `HEARTBEAT_OK` reply suppresses the Telegram message.
 
 ## Inspect a managed job
 
@@ -66,7 +66,7 @@ Minute values that divide 60 and hour values that divide 24 convert to a wall-cl
 | `1d` | `0 0 * * *` | At midnight |
 | `1w` | `0 0 * * 0` | At midnight on Sunday |
 
-Any other value has no even cron equivalent. For example, `*/45` fires at :00 and :45, so the gaps alternate between 45 and 15 minutes. These values, such as `45m` or `5h`, run at a fixed gap instead. They fire at multiples of the interval since the Unix epoch (UTC), so the times do not depend on when `HEARTBEAT.md` was loaded, reloaded or the gateway restarted. A `5h` task therefore does not start at local midnight.
+Any other value has no even cron equivalent. For example, `*/45` fires at :00 and :45, so the gaps alternate between 45 and 15 minutes. These values, such as `45m` or `5h`, run at a fixed gap instead. They fire at multiples of the interval since the Unix epoch (UTC), so the times do not depend on when `HEARTBEAT.md` was loaded, reloaded or the gateway restarted. If the system clock moves back by more than one interval, the schedule counts from the new time. A `5h` task therefore does not start at local midnight.
 
 Minute values are 1–59, hour values 1–23, and day/week support only `1d`/`1w`. For example, `2d` and `24h` are not supported shorthand. The 30-minute proactive rate limit is shared across the agent's heartbeat tasks, so a recently sent proactive message can suppress another task. Inspect the `suppressed` and `rateLimited` result fields when delivery is absent. Heartbeat response collection defaults to a 60-second timeout.
 

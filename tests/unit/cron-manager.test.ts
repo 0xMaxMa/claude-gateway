@@ -1824,8 +1824,8 @@ describe('#609 cron policy for isolated and app agents', () => {
 });
 
 describe('CronManager cron validation (#652)', () => {
-  it.each(['0 17-9 * * *', '0 9 * * FRI-MON'])(
-    'rejects reversed range "%s", which node-cron would silently swap',
+  it.each(['0 17-9 * * *', '0 9 * * FRI-MON', '0 5- 9 * * *'])(
+    'rejects misread range "%s", which node-cron would silently run differently',
     async (schedule) => {
       const { manager, agentId } = makeManager();
       await manager.start();

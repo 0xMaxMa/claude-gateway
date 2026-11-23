@@ -11,7 +11,7 @@ function cronValue(token: string): number {
  * True when a cron expression has a range that node-cron accepts but runs at
  * different values than written:
  * - a reversed range (`17-9`, `FRI-MON`), whose ends node-cron swaps;
- * - a range with more than one dash (`9-17-8`);
+ * - a range with more than one dash (`9-17-8`) or a missing end (`5-`);
  * - a weekday range ending in 7 (`1-7`), because node-cron rewrites the first
  *   7 in the weekday field to 0 before it expands ranges.
  */
@@ -24,6 +24,8 @@ export function hasMisreadCronRange(expr: string): boolean {
       if (ends.length === 1) return false;
       if (ends.length > 2) return true;
       const [start, end] = ends.map(cronValue);
+      // A missing end (`5-`) is not a range node-cron expands; it runs at 5.
+      if (Number.isNaN(start) || Number.isNaN(end)) return true;
       return start > end || (isWeekday && (start === 7 || end === 7));
     });
   });

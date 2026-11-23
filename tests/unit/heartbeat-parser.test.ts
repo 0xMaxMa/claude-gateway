@@ -269,6 +269,8 @@ describe('heartbeat-parser cron validation matches node-cron (#652)', () => {
     '0 9 * * 5-7',
     '0 9 * * 0-7',
     '0 9-17-8 * * *', // multi-dash range
+    '5- * * * *', // missing range end; node-cron would run this at minute 5
+    '0 9-,13 * * *',
   ])('rejects cron "%s" with InvalidCronError', (cron) => {
     expect(() => parseHeartbeat(cronTask(cron))).toThrow(InvalidCronError);
   });

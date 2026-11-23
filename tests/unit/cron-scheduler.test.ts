@@ -545,4 +545,51 @@ describe('CronScheduler schedules (#652)', () => {
     expect(firedAt).toEqual([boundary + 1]);
     scheduler.stop();
   });
+
+  it('a clock moved back by days keeps the interval running instead of waiting it out', () => {
+    jest.useFakeTimers({ now: new Date('2026-01-01T00:00:00Z') });
+    const scheduler = new CronScheduler(AGENT_ID, makeMockRunner('ok'), makeLogger(), makeAgentConfig());
+    const firedAt = recordFirings(scheduler);
+
+    scheduler.load(intervalContent('45m'));
+    jest.advanceTimersByTime(45 * 60_000);
+    expect(firedAt).toHaveLength(1);
+
+    // The clock was 3 days ahead and NTP corrects it.
+    jest.setSystemTime(Date.now() - 3 * 24 * 3_600_000);
+    jest.advanceTimersByTime(2 * 45 * 60_000);
+    expect(firedAt).toHaveLength(2);
+    const gap = 45 * 60_000;
+    expect(firedAt[1] % gap).toBe(0);
+    scheduler.stop();
+  });
+
+  it('two tasks with the same name and interval each keep their run across a reload', () => {
+    jest.useFakeTimers({ now: new Date('2026-01-01T00:10:00Z') });
+    const scheduler = new CronScheduler(AGENT_ID, makeMockRunner('ok'), makeLogger(), makeAgentConfig());
+    const content = `tasks:
+  - name: every
+    interval: 45m
+    prompt: "First."
+  - name: every
+    interval: 45m
+    prompt: "Second."
+`;
+    const prompts: string[] = [];
+    jest.spyOn(scheduler, 'runTask').mockImplementation(async (_name, prompt) => {
+      prompts.push(prompt);
+      // The first run writes to the workspace, which reloads HEARTBEAT.md
+      // before the second task's 00:45 timer has run.
+      if (prompts.length === 1) scheduler.load(content);
+    });
+
+    scheduler.load(content);
+    // A zero-delay timer set during a fake-timer tick is due 1 ms later.
+    jest.advanceTimersByTime(35 * 60_000 + 1);
+
+    expect(prompts).toEqual(['First.', 'Second.']);
+    jest.advanceTimersByTime(45 * 60_000);
+    expect(prompts).toEqual(['First.', 'Second.', 'First.', 'Second.']);
+    scheduler.stop();
+  });
 });
