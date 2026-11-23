@@ -500,7 +500,7 @@ test('a subagent_spawn stuck on the model catalog logs the subagent_spawn:models
   await new Promise<void>(resolve => {
     const req = request(auth.url, { method: 'POST', headers: { Authorization: 'Bearer ' + auth.token } }, () => resolve());
     req.on('error', () => resolve());
-    setTimeout(() => { req.destroy(); resolve(); }, 300);
+    setTimeout(() => { req.destroy(); resolve(); }, 1000);
     req.end(JSON.stringify({ tool: 'subagent_spawn', args: { description: 'Review', prompt: 'Review the diff', run_in_background: true, model: 'sonnet' }, action_id: `act-${n}` }));
   });
   await new Promise(resolve => setTimeout(resolve, 50));

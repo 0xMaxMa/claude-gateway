@@ -273,6 +273,7 @@ export class TaskBridge {
                   if(!a.task_id||a.browser_evidence!==undefined||a.computer_trace_offset!==undefined||!['recorded','fresh','screenshot'].includes(a.computer_evidence))throw new OrchestrationError('INVALID_INPUT');
                   const task=this.tasks.status(context.conversationId,context.principalId,a.task_id)[0],adapter=this.gatewayAdapters.get('computer');
                   if(task.ownerPrincipalId!==context.principalId||task.gatewayTarget?.adapter!=='computer'||!adapter?.computerEvidence)throw new OrchestrationError('ACCESS_DENIED');
+                  step='task_status:computer_evidence';
                   const evidence=await adapter.computerEvidence(task,a.computer_evidence,this.cancellations.get(token!)?.signal);
                   if(this.scopes.get(token!)!==scope)deny('TICKET_INVALID_OR_REVOKED');this.tasks.store.assertMember(context.conversationId,context.principalId);
                   const {screenshot,...computerEvidence}=evidence;result={tasks:rows,computerEvidence,...(evidence.evidenceId&&(task.computerReport?.status==='needs_verification'||agentGoalRunParked(task))?{verification:{tool:'task_update',arguments:{task_id:task.taskId,expected_revision:task.revision,mode:'verify_computer',expected_request_id:evidence.requestId,evidence_id:evidence.evidenceId},instruction:agentGoalRunParked(task)?'If this fresh evidence shows the goal is done, call this verification first with the concrete visible facts in instruction, then answer the user; it completes the task and ends the device session. Otherwise follow the parked-run note.':'If this fresh evidence proves the complete goal, supply the concrete visible facts in instruction. Otherwise continue the SAME task with an updated plan; never ask the user to do the work themselves.'}}:{}),...(screenshot?{screenshot}:{})};
@@ -280,6 +281,7 @@ export class TaskBridge {
                   if(!a.task_id||a.browser_evidence!==undefined||!Number.isSafeInteger(a.computer_trace_offset)||a.computer_trace_offset<0)throw new OrchestrationError('INVALID_INPUT');
                   const task=this.tasks.status(context.conversationId,context.principalId,a.task_id)[0],adapter=this.gatewayAdapters.get('computer');
                   if(task.ownerPrincipalId!==context.principalId||task.gatewayTarget?.adapter!=='computer'||!adapter?.diagnostics)throw new OrchestrationError('ACCESS_DENIED');
+                  step='task_status:computer_trace';
                   const computerTrace=await adapter.diagnostics(task,a.computer_trace_offset);
                   if(this.scopes.get(token!)!==scope)deny('TICKET_INVALID_OR_REVOKED');
                   this.tasks.store.assertMember(context.conversationId,context.principalId);
@@ -290,6 +292,7 @@ export class TaskBridge {
                   const adapter=this.gatewayAdapters.get('browser');
                   if(task.ownerPrincipalId!==context.principalId || task.gatewayTarget?.adapter!=='browser' || !adapter?.evidence)throw new OrchestrationError('ACCESS_DENIED');
                   let snapshotUnavailable=false;
+                  step='task_status:browser_evidence';
                   const evidence=await adapter.evidence(task,a.browser_evidence!=='recorded',this.cancellations.get(token!)?.signal,fieldSnapshot||a.browser_evidence==='screenshot').catch(async error=>{
                     if(!fieldSnapshot)throw error;
                     snapshotUnavailable=true;
