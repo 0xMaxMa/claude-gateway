@@ -127,8 +127,10 @@ export class TaskBridge {
       let commandArgs: Record<string, unknown> = {};
       const startedAt = Date.now();
       let step = 'read_body';
-      const logCall = (message: string) => console.warn(JSON.stringify({ ts: new Date().toISOString(), level: 'warn', message,
-        data: { agentId: this.tasks.store.agentId, tool: toolName || undefined, step, elapsedMs: Date.now() - startedAt } }));
+      /** Set by calls that wait by design (subagent waits, shell, narration, cron, JEV); they are not logged as slow. */
+      let longRunning = false;
+      const logCall = (message: string) => { if (!longRunning) console.warn(JSON.stringify({ ts: new Date().toISOString(), level: 'warn', message,
+        data: { agentId: this.tasks.store.agentId, tool: toolName || undefined, step, elapsedMs: Date.now() - startedAt } })); };
       const pending = setTimeout(() => logCall('Task bridge call still pending'), this.slowCallWarnMs);
       pending.unref();
       response.once('close', () => {
@@ -172,6 +174,7 @@ export class TaskBridge {
           const disconnected = new AbortController();
           const onClose = () => { if (!response.writableFinished) disconnected.abort(); };
           response.once('close', onClose);
+          longRunning = true;
           try { result = await this.jevCall(scope, a, command.action_id, AbortSignal.any([cancelled.signal, disconnected.signal])); }
           finally { response.off('close', onClose); }
         } else if (scope.role === 'agent') {
@@ -230,6 +233,7 @@ export class TaskBridge {
                 if (a.model !== undefined) {
                   step = 'task_spawn:models';
                   const models = await this.models();
+                  step = 'dispatch';
                   try { model = (findModel(models, a.model) ?? resolveModelId(models, a.model)).id; }
                   catch (error) {
                     if (!(error instanceof ModelResolutionError)) throw error;
@@ -345,6 +349,7 @@ export class TaskBridge {
                 if (this.container || !this.computerEnabled?.() || !adapter?.shell) throw new OrchestrationError('COMPUTER_NOT_ALLOWED');
                 const cancelled = this.cancellations.get(token!);
                 if (!cancelled) deny('TICKET_INVALID_OR_REVOKED');
+                longRunning = true;
                 result = await this.cancelOnDisconnect(response, cancelled.signal, signal => adapter.shell!(context, a, signal));
                 if (this.scopes.get(token!) !== scope) deny('TICKET_INVALID_OR_REVOKED');
                 this.tasks.store.assertMember(context.conversationId, context.principalId); break;
@@ -378,12 +383,13 @@ export class TaskBridge {
             this.files.scope(scope.attemptId, scope.generation);
             const cancelled = this.cancellations.get(token!);
             if (!cancelled) throw new OrchestrationError('ACCESS_DENIED');
+            longRunning = true;
             result = await this.cancelOnDisconnect(response, cancelled.signal, signal => this.narrateCall!(scope.attemptId, scope.generation, command.action_id, a, signal));
           }
           else if (SUBAGENT_TOOLS.some(tool => tool.name === command.tool) && scope.subagents) {
             const cancelled = this.cancellations.get(token!);
             if (!cancelled) throw new OrchestrationError('ACCESS_DENIED');
-            const wait = (taskIds: unknown) => this.cancelOnDisconnect(response, cancelled.signal, async signal => {
+            const wait = (taskIds: unknown) => { longRunning = true; return this.cancelOnDisconnect(response, cancelled.signal, async signal => {
               for (;;) {
                 if (signal.aborted) throw new OrchestrationError('SUBAGENT_WAIT_CANCELLED');
                 const results = this.tasks.subagentResults(scope.attemptId, scope.generation, taskIds);
@@ -394,8 +400,8 @@ export class TaskBridge {
                   signal.addEventListener('abort', abort, { once: true });
                 });
               }
-            });
-            if (command.tool === 'subagent_wait') { step = 'subagent_wait:wait'; result = { results: await wait(a.task_ids) }; }
+            }); };
+            if (command.tool === 'subagent_wait') result = { results: await wait(a.task_ids) };
             else if (command.tool === 'subagent_cancel') result = { results: this.tasks.cancelSubagentTasks(scope.attemptId, scope.generation, a.task_ids) };
             else {
               inputDetails = subagentInputIssues(a);
@@ -405,7 +411,7 @@ export class TaskBridge {
               if (!keyword) {
                 // An alias resolves now, as task_spawn's does (a skill may pass `opus` as it would to Agent).
                 step = 'subagent_spawn:models';
-                try { const models = await this.models(); model = (findModel(models, a.model) ?? resolveModelId(models, a.model)).id; step = 'dispatch'; }
+                try { const models = await this.models(); step = 'dispatch'; model = (findModel(models, a.model) ?? resolveModelId(models, a.model)).id; }
                 catch (error) {
                   if (!(error instanceof ModelResolutionError)) throw error;
                   inputDetails = [{ field: 'model', reason: error.code === 'UNKNOWN_MODEL' ? 'unknown_model' : 'alias', correction: error.message }];
@@ -429,7 +435,6 @@ export class TaskBridge {
               if (a.run_in_background) result = receipt;
               else {
                 startedSubagent = task.taskId;
-                step = 'subagent_spawn:wait';
                 const [finished] = await wait([task.taskId]).catch(error => {
                   throw error instanceof OrchestrationError && error.code === 'SUBAGENT_WAIT_CANCELLED'
                     ? new OrchestrationError(error.code, `Stopped waiting for subagent ${task.taskId}; it is still running. Wait for it with subagent_wait or stop it with subagent_cancel. Do not spawn it again.`) : error;
@@ -443,6 +448,7 @@ export class TaskBridge {
             this.files.scope(scope.attemptId, scope.generation);
             const cancelled = this.cancellations.get(token!);
             if (!cancelled) throw new OrchestrationError('ACCESS_DENIED');
+            longRunning = true;
             result = await this.cancelOnDisconnect(response, cancelled.signal, signal => this.cronCall!(scope.attemptId, scope.generation, command.tool, a, signal));
           }
           else throw new OrchestrationError('TOOL_DENIED');

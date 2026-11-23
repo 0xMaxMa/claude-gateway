@@ -510,3 +510,22 @@ test('a subagent_spawn stuck on the model catalog logs the subagent_spawn:models
   for (const entry of logs) expect(entry.data.step).toBe('subagent_spawn:models');
   expect(store.get('SELECT COUNT(*) AS n FROM tasks')).toEqual({ n: 1 }); // only the root task; no subagent committed
 });
+
+test('a long subagent_wait, even one the caller abandons, is not logged as a stuck bridge call (#679)', async () => {
+  bridge.slowCallWarnMs = 50;
+  const { attempt } = rootWorker();
+  const child = (await spawn(attempt, {})).task_id;
+  const dir = join(root, `ticket-${++n}`);
+  bridge.issue({ role: 'worker', attemptId: attempt.attemptId, generation: attempt.generation, subagents: true }, dir, root);
+  const auth = JSON.parse(readFileSync(join(dir, 'ticket.json'), 'utf8'));
+  await new Promise<void>(resolve => {
+    const req = request(auth.url, { method: 'POST', headers: { Authorization: 'Bearer ' + auth.token } }, () => resolve());
+    req.on('error', () => resolve());
+    setTimeout(() => { req.destroy(); resolve(); }, 300);
+    req.end(JSON.stringify({ tool: 'subagent_wait', args: { task_ids: [child] }, action_id: `act-${n}` }));
+  });
+  await new Promise(resolve => setTimeout(resolve, 50));
+  const logs = (console.warn as jest.Mock).mock.calls.map(([line]) => { try { return JSON.parse(String(line)); } catch { return undefined; } })
+    .filter(entry => typeof entry?.message === 'string' && entry.message.startsWith('Task bridge call'));
+  expect(logs).toEqual([]);
+});

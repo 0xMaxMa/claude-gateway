@@ -7,13 +7,13 @@ import { OrchestrationStore } from '../../../src/orchestration/store';
 import { TaskService } from '../../../src/orchestration/tasks/service';
 import { DecisionService } from '../../../src/orchestration/decisions';
 
-async function fixture() {
+async function fixture(slowCallWarnMs = 50) {
   const root = mkdtempSync(join(tmpdir(), 'bridge-pending-')), workspace = join(root, 'workspace'); mkdirSync(workspace);
   const store = new OrchestrationStore(join(root, 'db'), 'operator'), tasks = new TaskService(store);
   const receipt = store.acceptInput({ scope: { agentId: 'operator', agentSessionId: 'chat', source: 'api', accountId: 'owner', chatId: 'chat', threadKey: '', principalId: 'owner' }, text: 'make images' });
   const context = { ...receipt, ...new DecisionService(store).begin(receipt.conversationId, 'owner', [receipt.inputId]), principalId: 'owner', execute: true, writeMemory: false };
   const bridge = new TaskBridge(tasks);
-  bridge.slowCallWarnMs = 50;
+  bridge.slowCallWarnMs = slowCallWarnMs;
   bridge.models = () => new Promise(() => {});
   await bridge.start();
   const directory = join(root, 'ticket'); bridge.issue({ role: 'agent', context } as Parameters<TaskBridge['issue']>[0], directory, workspace);
@@ -48,7 +48,7 @@ test('a task_spawn stuck before commit logs its tool and step while pending and 
 
 test('a call that answers promptly logs nothing', async () => {
   const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
-  const f = await fixture();
+  const f = await fixture(1000); // a loaded CI runner must not turn task_status into a 'slow' call
   try {
     expect(await f.call('task_status', {}, 2000)).not.toBe('gave up');
     await new Promise(resolve => setTimeout(resolve, 100));
