@@ -10,9 +10,11 @@ export const SESSIONS_PER_PAGE = 8
 const MAX_DATA_BYTES = 64
 
 const fits = (data: string) => Buffer.byteLength(data, 'utf8') <= MAX_DATA_BYTES
+// Cut on code points: a split surrogate pair is invalid UTF-8 and Telegram
+// rejects the whole message. An empty button label is rejected too.
 const clip = (value: string, max: number) => {
-  const flat = value.replace(/\s+/g, ' ').trim()
-  return flat.length > max ? flat.slice(0, max - 1) + '…' : flat
+  const chars = [...value.replace(/\s+/g, ' ').trim()]
+  return chars.length > max ? chars.slice(0, max - 1).join('') + '…' : chars.join('') || 'Untitled'
 }
 
 function age(now: number, lastActive: number): string {
@@ -25,6 +27,7 @@ function age(now: number, lastActive: number): string {
 export function sessionListMenu(sessions: SessionListEntry[], activeId: string, page: number, now = Date.now()): { text: string; reply_markup: InlineKeyboard; page: number; pages: number } {
   // A session whose callback would exceed 64 bytes cannot be switched to or
   // deleted from a button, so it is listed in the count but never sent as one.
+  // Each tap re-reads the list, so a session active between taps moves to page 1.
   const sorted = [...sessions].sort((a, b) => b.lastActive - a.lastActive || a.id.localeCompare(b.id))
   const pages = Math.max(1, Math.ceil(sorted.length / SESSIONS_PER_PAGE))
   const current = Math.min(Math.max(0, Number.isInteger(page) ? page : 0), pages - 1)
@@ -34,7 +37,7 @@ export function sessionListMenu(sessions: SessionListEntry[], activeId: string, 
   for (const s of shown) {
     const switchData = `session_switch:${s.id}`
     if (!fits(switchData)) continue
-    const label = clip(s.id === activeId ? `🟢 ${s.name}` : s.name, 40)
+    const label = s.id === activeId ? `🟢 ${clip(s.name, 38)}` : clip(s.name, 40)
     keyboard.text(label, switchData)
     if (sorted.length > 1 && fits(`session_delete_confirm:${s.id}`)) keyboard.text('🗑', `session_delete:${s.id}`)
     keyboard.row()

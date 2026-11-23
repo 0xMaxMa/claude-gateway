@@ -108,3 +108,14 @@ test('a failed list keeps the agent reason and HTTP status for the log', async (
   expect(failure).toMatchObject({ kind: 'failed', status: 500, message: 'callback HTTP 500: boom' });
   await expect(listSessionsRequest(undefined, '42')).rejects.toThrow('not_configured');
 });
+
+test('labels never split an emoji or come out empty', () => {
+  const list = [
+    { id: 'a', name: 'x'.repeat(39) + '\u{1F600}tail', messageCount: 1, lastActive: NOW },
+    { id: 'b', name: '   ', messageCount: 1, lastActive: NOW - 1 },
+  ];
+  const menu = sessionListMenu(list, 'a', 0, NOW);
+  const labels = buttons(menu).filter(b => b.callback_data.startsWith('session_switch:')).map(b => b.text);
+  for (const text of [...labels, menu.text]) expect(Buffer.from(text, 'utf8').toString('utf8')).toBe(text);
+  expect(labels[1]).toBe('Untitled');
+});

@@ -129,6 +129,7 @@ test('unconfigured callback, unauthorized open and Telegram errors are classifie
   // #686: the user is told Telegram rejected the reply, not a bare "Failed to get sessions."
   expect(callbackFailureReply(failure.kind, 'sessions', 'sessions', failure.telegramCode))
     .toBe('Telegram rejected the /sessions reply (error 400). Please try /sessions again; if it keeps failing, report it.');
+  expect(callbackFailureReply('failed', 'sessions', 'sessions', 429)).toBe('Telegram is rate-limiting this chat. Please wait a minute, then try /sessions again.');
   expect(classifyCallbackFailure(Object.assign(new Error('x'), { error_code: 429 })).kind).toBe('failed');
   // A Telegram network failure keeps its code for the log but is not an agent restart.
   const telegramNetwork = Object.assign(new Error('Network request failed'), { name: 'HttpError', error: { code: 'ECONNREFUSED' } });

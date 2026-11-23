@@ -2075,7 +2075,7 @@ bot.on('callback_query:data', async ctx => {
   // Handle /sessions paging: session_page:<n>
   const sessionPage = /^session_page:(\d{1,4})$/.exec(data)
   if (sessionPage) {
-    if (!isCallbackAuthorized(ctx)) {
+    if (ctx.callbackQuery.message?.chat.type !== 'private' || !isCallbackAuthorized(ctx)) {
       await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
       return
     }
