@@ -1822,3 +1822,34 @@ describe('#609 cron policy for isolated and app agents', () => {
     } finally { manager.stop(); }
   });
 });
+
+describe('CronManager cron validation (#652)', () => {
+  it.each(['0 17-9 * * *', '0 9 * * FRI-MON', '0 5- 9 * * *'])(
+    'rejects misread range "%s", which node-cron would silently run differently',
+    async (schedule) => {
+      const { manager, agentId } = makeManager();
+      await manager.start();
+      try {
+        await expect(
+          manager.create({ agentId, name: 'reversed', scheduleKind: 'cron', schedule, command: 'echo x' }),
+        ).rejects.toThrow(/Invalid cron expression/);
+      } finally {
+        manager.stop();
+      }
+    },
+  );
+
+  it('an update that does not change a saved reversed schedule still succeeds', async () => {
+    const { manager, agentId } = makeManager();
+    await manager.start();
+    try {
+      const job = await manager.create({ agentId, name: 'legacy', scheduleKind: 'cron', schedule: '0 9 * * *', command: 'echo x' });
+      // Simulate a job saved before reversed ranges were rejected.
+      (manager as unknown as { jobs: Map<string, { schedule: string }> }).jobs.get(job.id)!.schedule = '0 22-6 * * *';
+      await expect(manager.update(job.id, { timezone: 'Asia/Bangkok' })).resolves.toMatchObject({ timezone: 'Asia/Bangkok' });
+      await expect(manager.update(job.id, { schedule: '0 23-5 * * *' })).rejects.toThrow(/Invalid cron expression/);
+    } finally {
+      manager.stop();
+    }
+  });
+});

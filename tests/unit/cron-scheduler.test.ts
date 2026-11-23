@@ -351,3 +351,245 @@ describe('CronScheduler (unit)', () => {
     scheduler.stop();
   });
 });
+
+// ─── Issue #652 ───────────────────────────────────────────────────────────────
+
+describe('CronScheduler schedules (#652)', () => {
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  it('load() rejects a cron node-cron cannot schedule without throwing', () => {
+    const logger = makeLogger();
+    const scheduler = new CronScheduler(AGENT_ID, makeMockRunner('ok'), logger, makeAgentConfig());
+    const content = `tasks:
+  - name: bad-step
+    cron: "5/15 * * * *"
+    prompt: "Bad step base."
+`;
+    expect(() => scheduler.load(content)).not.toThrow();
+    expect(logger.error).toHaveBeenCalledWith(
+      'Failed to parse heartbeat content',
+      expect.objectContaining({ error: expect.stringContaining('bad-step') }),
+    );
+    scheduler.stop();
+  });
+
+  function intervalContent(interval: string): string {
+    return `tasks:
+  - name: every
+    interval: ${interval}
+    prompt: "Check in."
+`;
+  }
+
+  function recordFirings(scheduler: CronScheduler): number[] {
+    const firedAt: number[] = [];
+    jest.spyOn(scheduler, 'runTask').mockImplementation(async () => {
+      firedAt.push(Date.now());
+    });
+    return firedAt;
+  }
+
+  it.each([
+    ['45m', 45 * 60_000],
+    ['5h', 5 * 3_600_000],
+  ])('interval %s fires at an even gap and stops on stop()', (interval, gapMs) => {
+    jest.useFakeTimers({ now: new Date('2026-01-01T00:00:00Z') });
+    const scheduler = new CronScheduler(AGENT_ID, makeMockRunner('ok'), makeLogger(), makeAgentConfig());
+    const firedAt = recordFirings(scheduler);
+
+    scheduler.load(intervalContent(interval));
+    // Five firings cross midnight, where `0 */5 * * *` would have left a 4h gap.
+    jest.advanceTimersByTime(gapMs * 5);
+
+    expect(firedAt).toHaveLength(5);
+    expect(firedAt.slice(1).map((t, i) => t - firedAt[i])).toEqual([gapMs, gapMs, gapMs, gapMs]);
+
+    scheduler.stop();
+    jest.advanceTimersByTime(gapMs * 2);
+    expect(firedAt).toHaveLength(5);
+  });
+
+  it('reloading HEARTBEAT.md does not restart an interval count', () => {
+    // 00:00 UTC is a multiple of 45 minutes since the epoch.
+    jest.useFakeTimers({ now: new Date('2026-01-01T00:00:00Z') });
+    const scheduler = new CronScheduler(AGENT_ID, makeMockRunner('ok'), makeLogger(), makeAgentConfig());
+    const firedAt = recordFirings(scheduler);
+    const start = Date.now();
+
+    scheduler.load(intervalContent('45m'));
+    // Any workspace write reloads the file; here one lands every 30 minutes.
+    for (let i = 0; i < 6; i++) {
+      jest.advanceTimersByTime(30 * 60_000);
+      scheduler.load(intervalContent('45m'));
+    }
+
+    expect(firedAt).toEqual([1, 2, 3, 4].map((n) => start + n * 45 * 60_000));
+    scheduler.stop();
+  });
+
+  it('45m interval is not suppressed by the default 30-minute rate limit', async () => {
+    jest.useFakeTimers({ now: new Date('2026-01-01T00:00:00Z') });
+    const scheduler = new CronScheduler(AGENT_ID, makeMockRunner('news'), makeLogger(), makeAgentConfig());
+    const results: HeartbeatResult[] = [];
+    scheduler.on('heartbeat:result', (r: HeartbeatResult) => results.push(r));
+
+    scheduler.load(`tasks:
+  - name: every
+    interval: 45m
+    prompt: "Check in."
+`);
+    // Under `*/45 * * * *` the 01:00 run came 15 minutes after a delivered
+    // 00:45 run and was rate-limited.
+    for (let i = 0; i < 3; i++) {
+      await jest.advanceTimersByTimeAsync(45 * 60_000);
+    }
+    await jest.advanceTimersByTimeAsync(1_000);
+
+    expect(results).toHaveLength(3);
+    expect(results.map((r) => r.rateLimited)).toEqual([false, false, false]);
+    scheduler.stop();
+  });
+
+  it('a failing interval run is logged, not left as an unhandled rejection', async () => {
+    jest.useFakeTimers({ now: new Date('2026-01-01T00:00:00Z') });
+    const logger = makeLogger();
+    const scheduler = new CronScheduler(AGENT_ID, makeMockRunner('ok'), logger, makeAgentConfig());
+    jest.spyOn(scheduler, 'runTask').mockRejectedValue(new Error('history write failed'));
+    const unhandled = jest.fn();
+    process.on('unhandledRejection', unhandled);
+    try {
+      scheduler.load(intervalContent('45m'));
+      await jest.advanceTimersByTimeAsync(45 * 60_000);
+      // unhandledRejection is reported after the microtask queue drains.
+      jest.useRealTimers();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      expect(logger.error).toHaveBeenCalledWith('Heartbeat task "every" failed', {
+        error: 'history write failed',
+      });
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      process.off('unhandledRejection', unhandled);
+      scheduler.stop();
+    }
+  });
+
+  it('a clock moved back across a boundary does not run the interval twice', () => {
+    jest.useFakeTimers({ now: new Date('2026-01-01T00:00:00Z') });
+    const scheduler = new CronScheduler(AGENT_ID, makeMockRunner('ok'), makeLogger(), makeAgentConfig());
+    const firedAt = recordFirings(scheduler);
+
+    scheduler.load(intervalContent('45m'));
+    jest.advanceTimersByTime(45 * 60_000);
+    expect(firedAt).toHaveLength(1);
+
+    // NTP steps the wall clock back 5 seconds, just before the 00:45 boundary
+    // that already ran.
+    jest.setSystemTime(Date.now() - 5_000);
+    jest.advanceTimersByTime(10_000);
+    expect(firedAt).toHaveLength(1);
+
+    jest.advanceTimersByTime(45 * 60_000);
+    expect(firedAt).toHaveLength(2);
+    scheduler.stop();
+  });
+
+  it('a reload that lands just after a boundary, before its timer ran, keeps that run', () => {
+    jest.useFakeTimers({ now: new Date('2026-01-01T00:00:00Z') });
+    const scheduler = new CronScheduler(AGENT_ID, makeMockRunner('ok'), makeLogger(), makeAgentConfig());
+    const firedAt = recordFirings(scheduler);
+    const start = Date.now();
+
+    scheduler.load(intervalContent('45m'));
+    jest.advanceTimersByTime(45 * 60_000);
+    expect(firedAt).toEqual([start + 45 * 60_000]);
+
+    // The wall clock passes the 01:30 boundary, but a workspace reload runs
+    // before the pending timer callback does.
+    jest.setSystemTime(start + 90 * 60_000 + 3);
+    scheduler.load(intervalContent('45m'));
+    jest.advanceTimersByTime(0);
+
+    expect(firedAt).toEqual([start + 45 * 60_000, start + 90 * 60_000 + 3]);
+    // The run is not repeated, and the next boundary is unaffected.
+    jest.advanceTimersByTime(45 * 60_000);
+    expect(firedAt).toHaveLength(3);
+    scheduler.stop();
+  });
+
+  it('a first load does not run a boundary that passed before it', () => {
+    jest.useFakeTimers({ now: new Date('2026-01-01T00:45:00.003Z') });
+    const scheduler = new CronScheduler(AGENT_ID, makeMockRunner('ok'), makeLogger(), makeAgentConfig());
+    const firedAt = recordFirings(scheduler);
+
+    scheduler.load(intervalContent('45m'));
+    jest.advanceTimersByTime(1_000);
+    expect(firedAt).toEqual([]);
+    scheduler.stop();
+  });
+
+  it('a reload just after the first boundary of a new interval task keeps that run', () => {
+    jest.useFakeTimers({ now: new Date('2026-01-01T00:10:00Z') });
+    const scheduler = new CronScheduler(AGENT_ID, makeMockRunner('ok'), makeLogger(), makeAgentConfig());
+    const firedAt = recordFirings(scheduler);
+
+    scheduler.load(intervalContent('45m'));
+    // 00:45 passes, but a reload runs before the pending timer callback.
+    const boundary = new Date('2026-01-01T00:45:00Z').getTime();
+    jest.setSystemTime(boundary + 1);
+    scheduler.load(intervalContent('45m'));
+    jest.advanceTimersByTime(0);
+
+    expect(firedAt).toEqual([boundary + 1]);
+    scheduler.stop();
+  });
+
+  it('a clock moved back by days keeps the interval running instead of waiting it out', () => {
+    jest.useFakeTimers({ now: new Date('2026-01-01T00:00:00Z') });
+    const scheduler = new CronScheduler(AGENT_ID, makeMockRunner('ok'), makeLogger(), makeAgentConfig());
+    const firedAt = recordFirings(scheduler);
+
+    scheduler.load(intervalContent('45m'));
+    jest.advanceTimersByTime(45 * 60_000);
+    expect(firedAt).toHaveLength(1);
+
+    // The clock was 3 days ahead and NTP corrects it.
+    jest.setSystemTime(Date.now() - 3 * 24 * 3_600_000);
+    jest.advanceTimersByTime(2 * 45 * 60_000);
+    expect(firedAt).toHaveLength(2);
+    const gap = 45 * 60_000;
+    expect(firedAt[1] % gap).toBe(0);
+    scheduler.stop();
+  });
+
+  it('two tasks with the same name and interval each keep their run across a reload', () => {
+    jest.useFakeTimers({ now: new Date('2026-01-01T00:10:00Z') });
+    const scheduler = new CronScheduler(AGENT_ID, makeMockRunner('ok'), makeLogger(), makeAgentConfig());
+    const content = `tasks:
+  - name: every
+    interval: 45m
+    prompt: "First."
+  - name: every
+    interval: 45m
+    prompt: "Second."
+`;
+    const prompts: string[] = [];
+    jest.spyOn(scheduler, 'runTask').mockImplementation(async (_name, prompt) => {
+      prompts.push(prompt);
+      // The first run writes to the workspace, which reloads HEARTBEAT.md
+      // before the second task's 00:45 timer has run.
+      if (prompts.length === 1) scheduler.load(content);
+    });
+
+    scheduler.load(content);
+    // A zero-delay timer set during a fake-timer tick is due 1 ms later.
+    jest.advanceTimersByTime(35 * 60_000 + 1);
+
+    expect(prompts).toEqual(['First.', 'Second.']);
+    jest.advanceTimersByTime(45 * 60_000);
+    expect(prompts).toEqual(['First.', 'Second.', 'First.', 'Second.']);
+    scheduler.stop();
+  });
+});
