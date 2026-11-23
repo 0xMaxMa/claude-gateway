@@ -87,6 +87,8 @@ export class TaskBridge {
   computerEnabled?: () => boolean;
   /** Models task_spawn may name; the runtime supplies the live gateway.models. */
   models: () => Promise<ModelConfig[]> = () => selectableModels(undefined);
+  /** A call open this long is logged once with the step it is waiting on, and again when it closes (#679). */
+  slowCallWarnMs = 30_000;
   narrateCall?: (attemptId: string, generation: number, actionId: string, args: Record<string, unknown>, signal: AbortSignal) => Promise<unknown>;
   jevCall?: (scope: Scope, args: Record<string, unknown>, actionId: string, signal: AbortSignal) => Promise<unknown>;
   private readonly scopes = new Map<string, Scope>();
@@ -123,6 +125,21 @@ export class TaskBridge {
       let startedSubagent: string | undefined;
       let toolName = '';
       let commandArgs: Record<string, unknown> = {};
+      const startedAt = Date.now();
+      let step = 'read_body';
+      /** Set by calls that wait by design (subagent waits, shell, narration, cron, JEV); they are not logged as slow. */
+      let longRunning = false;
+      /** Only a call logged as pending gets a closing line, so a fast disconnect logs nothing and a pending line is always closed. */
+      let pendingLogged = false;
+      const logCall = (message: string) => console.warn(JSON.stringify({ ts: new Date().toISOString(), level: 'warn', message,
+        data: { agentId: this.tasks.store.agentId, tool: toolName || undefined, step, elapsedMs: Date.now() - startedAt } }));
+      const pending = setTimeout(() => { if (longRunning) return; pendingLogged = true; logCall('Task bridge call still pending'); }, this.slowCallWarnMs);
+      pending.unref();
+      response.once('close', () => {
+        clearTimeout(pending);
+        if (!pendingLogged) return;
+        logCall(response.writableFinished ? 'Task bridge call finished slowly' : 'Task bridge caller disconnected before the response');
+      });
       function deny(reason: string): never { denialReason = reason; throw new OrchestrationError('ACCESS_DENIED'); }
       try {
         if (request.method !== 'POST' || request.url !== '/call' || request.headers.origin) deny('INVALID_BRIDGE_REQUEST');
@@ -137,6 +154,7 @@ export class TaskBridge {
           if (bytes > 131072) throw new OrchestrationError('PAYLOAD_TOO_LARGE');
           chunks.push(buffer);
         }
+        step = 'dispatch';
         const command = JSON.parse(Buffer.concat(chunks).toString('utf8'));
         if (!command || typeof command.tool !== 'string' || !command.args || typeof command.args !== 'object' || Array.isArray(command.args) || typeof command.action_id !== 'string' || command.action_id.length > 256) throw new OrchestrationError('INVALID_INPUT');
         if(this.scopes.get(token!)!==scope)deny('TICKET_INVALID_OR_REVOKED');
@@ -158,6 +176,7 @@ export class TaskBridge {
           const disconnected = new AbortController();
           const onClose = () => { if (!response.writableFinished) disconnected.abort(); };
           response.once('close', onClose);
+          longRunning = true;
           try { result = await this.jevCall(scope, a, command.action_id, AbortSignal.any([cancelled.signal, disconnected.signal])); }
           finally { response.off('close', onClose); }
         } else if (scope.role === 'agent') {
@@ -166,7 +185,9 @@ export class TaskBridge {
           try {
             // Agent-supplied bound on every spawn path (host, container, with or without intake), before the gateway adds input IDs.
             if (command.tool === 'task_spawn') assertAgentContextRefs(a.context_refs);
+            step = 'before_mutation';
             if (mutation) await scope.beforeMutation?.(command.tool, a, context.actionId);
+            step = 'dispatch';
             if(this.scopes.get(token!)!==scope)deny('TICKET_INVALID_OR_REVOKED');
             switch (command.tool) {
               case 'capabilities_list': {
@@ -212,7 +233,9 @@ export class TaskBridge {
                 }
                 let model: string | undefined;
                 if (a.model !== undefined) {
+                  step = 'task_spawn:models';
                   const models = await this.models();
+                  step = 'dispatch';
                   try { model = (findModel(models, a.model) ?? resolveModelId(models, a.model)).id; }
                   catch (error) {
                     if (!(error instanceof ModelResolutionError)) throw error;
@@ -228,11 +251,15 @@ export class TaskBridge {
                 if (a.target_profile !== 'skill-worker' && (a.skill_name !== undefined || a.skill_args !== undefined)) throw new OrchestrationError('INVALID_INPUT');
                 const spoken = typeof a.spoken_acknowledgement === 'string' ? a.spoken_acknowledgement.trim() : '';
                 if (scope.onTaskQueued && (!stripAudioTags(spoken).trim() || spoken.length > 600 || spoken.includes('```'))) throw new OrchestrationError('VOICE_ACKNOWLEDGEMENT_REQUIRED');
+                step = 'task_spawn:cwd_pin';
                 const cwd = gatewayTarget ? undefined : await this.tasks.cwdPin(context, a.working_directory, a.continue_task_id);
+                step = 'task_spawn:validate_profile';
                 await this.tasks.validateSpawnProfile(context, a.target_profile);
                 // Profile resolution may yield while another input arrives. Recheck
                 // readiness immediately before the synchronous task transaction.
+                step = 'task_spawn:before_mutation_recheck';
                 await scope.beforeMutation?.(command.tool, a, context.actionId);
+                step = 'task_spawn:commit';
                 if(this.scopes.get(token!)!==scope)deny('TICKET_INVALID_OR_REVOKED');
                 const task = this.tasks.spawn(context, { cwd, title: a.title, instructions: a.instructions, computerInputs:a.computer_inputs, ...(a.run_as_goal !== undefined ? { runAsGoal: a.run_as_goal } : {}), targetProfile: a.target_profile, gatewayTarget, browserFields:a.browser_fields, workingDirectory: a.working_directory, contextRefs: a.context_refs, continueTaskId: a.continue_task_id, continuationPolicy: a.continuation_policy, ...(model ? { model, requestedModel: a.model } : {}), ...(a.effort ? { effort: a.effort } : {}), ...(skill ? { skill } : {}) });
                 scope.onTaskQueued?.(spoken);
@@ -246,6 +273,7 @@ export class TaskBridge {
                   if(!a.task_id||a.browser_evidence!==undefined||a.computer_trace_offset!==undefined||!['recorded','fresh','screenshot'].includes(a.computer_evidence))throw new OrchestrationError('INVALID_INPUT');
                   const task=this.tasks.status(context.conversationId,context.principalId,a.task_id)[0],adapter=this.gatewayAdapters.get('computer');
                   if(task.ownerPrincipalId!==context.principalId||task.gatewayTarget?.adapter!=='computer'||!adapter?.computerEvidence)throw new OrchestrationError('ACCESS_DENIED');
+                  step='task_status:computer_evidence';
                   const evidence=await adapter.computerEvidence(task,a.computer_evidence,this.cancellations.get(token!)?.signal);
                   if(this.scopes.get(token!)!==scope)deny('TICKET_INVALID_OR_REVOKED');this.tasks.store.assertMember(context.conversationId,context.principalId);
                   const {screenshot,...computerEvidence}=evidence;result={tasks:rows,computerEvidence,...(evidence.evidenceId&&(task.computerReport?.status==='needs_verification'||agentGoalRunParked(task))?{verification:{tool:'task_update',arguments:{task_id:task.taskId,expected_revision:task.revision,mode:'verify_computer',expected_request_id:evidence.requestId,evidence_id:evidence.evidenceId},instruction:agentGoalRunParked(task)?'If this fresh evidence shows the goal is done, call this verification first with the concrete visible facts in instruction, then answer the user; it completes the task and ends the device session. Otherwise follow the parked-run note.':'If this fresh evidence proves the complete goal, supply the concrete visible facts in instruction. Otherwise continue the SAME task with an updated plan; never ask the user to do the work themselves.'}}:{}),...(screenshot?{screenshot}:{})};
@@ -253,6 +281,7 @@ export class TaskBridge {
                   if(!a.task_id||a.browser_evidence!==undefined||!Number.isSafeInteger(a.computer_trace_offset)||a.computer_trace_offset<0)throw new OrchestrationError('INVALID_INPUT');
                   const task=this.tasks.status(context.conversationId,context.principalId,a.task_id)[0],adapter=this.gatewayAdapters.get('computer');
                   if(task.ownerPrincipalId!==context.principalId||task.gatewayTarget?.adapter!=='computer'||!adapter?.diagnostics)throw new OrchestrationError('ACCESS_DENIED');
+                  step='task_status:computer_trace';
                   const computerTrace=await adapter.diagnostics(task,a.computer_trace_offset);
                   if(this.scopes.get(token!)!==scope)deny('TICKET_INVALID_OR_REVOKED');
                   this.tasks.store.assertMember(context.conversationId,context.principalId);
@@ -263,6 +292,7 @@ export class TaskBridge {
                   const adapter=this.gatewayAdapters.get('browser');
                   if(task.ownerPrincipalId!==context.principalId || task.gatewayTarget?.adapter!=='browser' || !adapter?.evidence)throw new OrchestrationError('ACCESS_DENIED');
                   let snapshotUnavailable=false;
+                  step='task_status:browser_evidence';
                   const evidence=await adapter.evidence(task,a.browser_evidence!=='recorded',this.cancellations.get(token!)?.signal,fieldSnapshot||a.browser_evidence==='screenshot').catch(async error=>{
                     if(!fieldSnapshot)throw error;
                     snapshotUnavailable=true;
@@ -324,6 +354,7 @@ export class TaskBridge {
                 if (this.container || !this.computerEnabled?.() || !adapter?.shell) throw new OrchestrationError('COMPUTER_NOT_ALLOWED');
                 const cancelled = this.cancellations.get(token!);
                 if (!cancelled) deny('TICKET_INVALID_OR_REVOKED');
+                longRunning = true;
                 result = await this.cancelOnDisconnect(response, cancelled.signal, signal => adapter.shell!(context, a, signal));
                 if (this.scopes.get(token!) !== scope) deny('TICKET_INVALID_OR_REVOKED');
                 this.tasks.store.assertMember(context.conversationId, context.principalId); break;
@@ -357,12 +388,13 @@ export class TaskBridge {
             this.files.scope(scope.attemptId, scope.generation);
             const cancelled = this.cancellations.get(token!);
             if (!cancelled) throw new OrchestrationError('ACCESS_DENIED');
+            longRunning = true;
             result = await this.cancelOnDisconnect(response, cancelled.signal, signal => this.narrateCall!(scope.attemptId, scope.generation, command.action_id, a, signal));
           }
           else if (SUBAGENT_TOOLS.some(tool => tool.name === command.tool) && scope.subagents) {
             const cancelled = this.cancellations.get(token!);
             if (!cancelled) throw new OrchestrationError('ACCESS_DENIED');
-            const wait = (taskIds: unknown) => this.cancelOnDisconnect(response, cancelled.signal, async signal => {
+            const wait = (taskIds: unknown) => { longRunning = true; return this.cancelOnDisconnect(response, cancelled.signal, async signal => {
               for (;;) {
                 if (signal.aborted) throw new OrchestrationError('SUBAGENT_WAIT_CANCELLED');
                 const results = this.tasks.subagentResults(scope.attemptId, scope.generation, taskIds);
@@ -373,7 +405,7 @@ export class TaskBridge {
                   signal.addEventListener('abort', abort, { once: true });
                 });
               }
-            });
+            }); };
             if (command.tool === 'subagent_wait') result = { results: await wait(a.task_ids) };
             else if (command.tool === 'subagent_cancel') result = { results: this.tasks.cancelSubagentTasks(scope.attemptId, scope.generation, a.task_ids) };
             else {
@@ -383,7 +415,8 @@ export class TaskBridge {
               let model: string | undefined;
               if (!keyword) {
                 // An alias resolves now, as task_spawn's does (a skill may pass `opus` as it would to Agent).
-                try { const models = await this.models(); model = (findModel(models, a.model) ?? resolveModelId(models, a.model)).id; }
+                step = 'subagent_spawn:models';
+                try { const models = await this.models(); step = 'dispatch'; model = (findModel(models, a.model) ?? resolveModelId(models, a.model)).id; }
                 catch (error) {
                   if (!(error instanceof ModelResolutionError)) throw error;
                   inputDetails = [{ field: 'model', reason: error.code === 'UNKNOWN_MODEL' ? 'unknown_model' : 'alias', correction: error.message }];
@@ -420,6 +453,7 @@ export class TaskBridge {
             this.files.scope(scope.attemptId, scope.generation);
             const cancelled = this.cancellations.get(token!);
             if (!cancelled) throw new OrchestrationError('ACCESS_DENIED');
+            longRunning = true;
             result = await this.cancelOnDisconnect(response, cancelled.signal, signal => this.cronCall!(scope.attemptId, scope.generation, command.tool, a, signal));
           }
           else throw new OrchestrationError('TOOL_DENIED');
