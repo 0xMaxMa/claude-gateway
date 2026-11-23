@@ -475,4 +475,24 @@ describe('CronScheduler schedules (#652)', () => {
       scheduler.stop();
     }
   });
+
+  it('a clock moved back across a boundary does not run the interval twice', () => {
+    jest.useFakeTimers({ now: new Date('2026-01-01T00:00:00Z') });
+    const scheduler = new CronScheduler(AGENT_ID, makeMockRunner('ok'), makeLogger(), makeAgentConfig());
+    const firedAt = recordFirings(scheduler);
+
+    scheduler.load(intervalContent('45m'));
+    jest.advanceTimersByTime(45 * 60_000);
+    expect(firedAt).toHaveLength(1);
+
+    // NTP steps the wall clock back 5 seconds, just before the 00:45 boundary
+    // that already ran.
+    jest.setSystemTime(Date.now() - 5_000);
+    jest.advanceTimersByTime(10_000);
+    expect(firedAt).toHaveLength(1);
+
+    jest.advanceTimersByTime(45 * 60_000);
+    expect(firedAt).toHaveLength(2);
+    scheduler.stop();
+  });
 });

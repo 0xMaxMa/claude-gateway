@@ -36,20 +36,23 @@ function buildSessionId(agentId: string, taskName: string): string {
  * Run `run` every `intervalMs`, at multiples of `intervalMs` since the Unix
  * epoch. The fire times depend only on the clock, not on when load() ran, so
  * the frequent reloads triggered by any workspace write (MEMORY.md included)
- * do not restart the count. Each tick re-arms from the current time, so a late
- * timer does not drift the schedule.
+ * do not restart the count. Each boundary runs at most once: a tick that
+ * arrives before its boundary (clock moved back) waits again, and a late tick
+ * runs once and skips the boundaries it missed.
  */
 function scheduleEvery(intervalMs: number, run: () => Promise<void>): { stop(): void } {
+  let next = Math.floor(Date.now() / intervalMs) + 1;
   let timer: ReturnType<typeof setTimeout>;
   const arm = () => {
-    let delay = intervalMs - (Date.now() % intervalMs);
-    // A timer that fires a moment before the boundary (clock adjustment) must
-    // not run the task twice for one boundary.
-    if (delay < 1_000) delay += intervalMs;
-    timer = setTimeout(() => {
-      arm();
+    timer = setTimeout(tick, Math.max(0, next * intervalMs - Date.now()));
+  };
+  const tick = () => {
+    const now = Date.now();
+    if (now >= next * intervalMs) {
+      next = Math.floor(now / intervalMs) + 1;
       void run();
-    }, delay);
+    }
+    arm();
   };
   arm();
   return { stop: () => clearTimeout(timer) };
