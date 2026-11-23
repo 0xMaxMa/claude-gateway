@@ -129,14 +129,16 @@ export class TaskBridge {
       let step = 'read_body';
       /** Set by calls that wait by design (subagent waits, shell, narration, cron, JEV); they are not logged as slow. */
       let longRunning = false;
-      const logCall = (message: string) => { if (!longRunning) console.warn(JSON.stringify({ ts: new Date().toISOString(), level: 'warn', message,
-        data: { agentId: this.tasks.store.agentId, tool: toolName || undefined, step, elapsedMs: Date.now() - startedAt } })); };
-      const pending = setTimeout(() => logCall('Task bridge call still pending'), this.slowCallWarnMs);
+      /** Only a call logged as pending gets a closing line, so a fast disconnect logs nothing and a pending line is always closed. */
+      let pendingLogged = false;
+      const logCall = (message: string) => console.warn(JSON.stringify({ ts: new Date().toISOString(), level: 'warn', message,
+        data: { agentId: this.tasks.store.agentId, tool: toolName || undefined, step, elapsedMs: Date.now() - startedAt } }));
+      const pending = setTimeout(() => { if (longRunning) return; pendingLogged = true; logCall('Task bridge call still pending'); }, this.slowCallWarnMs);
       pending.unref();
       response.once('close', () => {
         clearTimeout(pending);
-        if (!response.writableFinished) logCall('Task bridge caller disconnected before the response');
-        else if (Date.now() - startedAt >= this.slowCallWarnMs) logCall('Task bridge call finished slowly');
+        if (!pendingLogged) return;
+        logCall(response.writableFinished ? 'Task bridge call finished slowly' : 'Task bridge caller disconnected before the response');
       });
       function deny(reason: string): never { denialReason = reason; throw new OrchestrationError('ACCESS_DENIED'); }
       try {

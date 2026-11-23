@@ -55,3 +55,13 @@ test('a call that answers promptly logs nothing', async () => {
     expect(bridgeLogs(warn)).toEqual([]);
   } finally { await f.close(); warn.mockRestore(); }
 });
+
+test('a caller that drops a call before the threshold logs nothing', async () => {
+  const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+  const f = await fixture(1000);
+  try {
+    expect(await f.call('task_spawn', { title: 'Images', instructions: 'Make images', target_profile: 'default-worker', model: 'claude-sonnet-5-5' }, 100)).toBe('gave up');
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(bridgeLogs(warn)).toEqual([]);
+  } finally { await f.close(); warn.mockRestore(); }
+});
