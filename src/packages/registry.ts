@@ -1,7 +1,8 @@
 import { execSync } from 'child_process';
-import { readdirSync, rmSync } from 'fs';
-import { join } from 'path';
+import { closeSync, openSync, readSync, readdirSync, realpathSync, renameSync, rmSync } from 'fs';
+import { join, sep } from 'path';
 import { compareSemver } from '../config/migrator';
+import { RecoveryResult, npmCopyPresent, updateWithStagingRecovery } from './npm-staging';
 
 /**
  * Version detection and self-update for the two packages the gateway manages:
@@ -39,8 +40,9 @@ export interface PackageConfig {
 /**
  * Package id (URL param / CLI noun) → config.
  * claude-gateway is a genuine npm global — keep npm detect/update.
- * claude-code ships via the native installer (no longer an npm global), so
- * detect from the `claude` binary and update via its native updater.
+ * claude-code is detected from the `claude` binary. It may be a native install
+ * (updated with `claude update`) or an npm global (updated with npm, with the
+ * staging-dir recovery); runNativeUpdate picks between them.
  */
 export const PACKAGES: Record<string, PackageConfig> = {
   'claude-gateway': { npm: '@0xmaxma/claude-gateway', channel: 'stable', detect: 'npm', update: 'npm' },
@@ -198,15 +200,35 @@ function cleanStaleNpmTempDirs(npmRoot: string, packageName: string): void {
   }
 }
 
-function removePackageDir(npmRoot: string, packageName: string): void {
+/**
+ * Move the package dir out of npm's way for the retry, keeping it so a failed
+ * retry can put it back: deleting it first would leave the package uninstalled
+ * whenever the retry fails too. Returns a function that undoes or finalises the
+ * move, or null when there was nothing to move.
+ */
+function movePackageDirAside(npmRoot: string, packageName: string): ((keepNew: boolean) => void) | null {
   const match = packageName.match(/^(@[^/]+)\/(.+)$/);
-  if (!match) return;
+  if (!match) return null;
   const [, scope, basename] = match;
+  const dir = join(npmRoot, scope, basename);
+  const aside = join(npmRoot, `.claude-gateway-retry-${process.pid}-${Date.now()}`);
   try {
-    rmSync(join(npmRoot, scope, basename), { recursive: true, force: true });
+    renameSync(dir, aside);
   } catch {
-    // best-effort
+    return null;
   }
+  return (keepNew) => {
+    try {
+      if (!keepNew) {
+        rmSync(dir, { recursive: true, force: true });
+        renameSync(aside, dir);
+      } else {
+        rmSync(aside, { recursive: true, force: true });
+      }
+    } catch {
+      // best-effort; the aside dir is left in place for manual recovery
+    }
+  };
 }
 
 function errorText(err: unknown, fallback: string): string {
@@ -218,19 +240,84 @@ function errorText(err: unknown, fallback: string): string {
 }
 
 /**
- * Run the package's own native updater (`<bin> update`).
- * Returns null on success, or the updater's error text.
+ * Whether the `claude` on PATH is a native-installer binary rather than the
+ * npm package: anything that resolves inside the npm root is npm's, and a
+ * `#!` script (such as a wrapper that picks among npm copies) is not proof of
+ * a native install either.
  */
-export function runNativeUpdate(config: PackageConfig): string | null {
+function pathBinIsNative(bin: string, npmRoot: string): boolean {
+  let found: string;
+  try {
+    found = execSync(`command -v ${bin}`, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 10_000 }).trim();
+    if (!found.startsWith('/')) return false;
+    found = realpathSync(found);
+  } catch {
+    return false;
+  }
+  if (found.startsWith(realpathSync(npmRoot) + sep)) return false;
+  const head = Buffer.alloc(2);
+  let fd: number | undefined;
+  try {
+    fd = openSync(found, 'r');
+    readSync(fd, head, 0, 2, 0);
+  } catch {
+    return false;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+  return head.toString('latin1') !== '#!';
+}
+
+/**
+ * Update a native-updater package (claude-code) to `target`. On success returns
+ * the version the installed binary now reports.
+ *
+ * claude-code can be a native install or an npm global; GetPod pods use npm.
+ * For an npm global, `claude update` only runs `npm install -g` itself, so a
+ * leftover npm staging dir makes it fail with ENOTEMPTY on every attempt
+ * (issue #675). That layout is installed with npm directly, wrapped in
+ * `updateWithStagingRecovery`, and checked by running the installed package's
+ * own binaries rather than whatever `claude` PATH finds. npm is run directly
+ * because the recovery may rename the package dir aside, which breaks the
+ * `claude` that npm linked onto PATH.
+ */
+export function runNativeUpdate(config: PackageConfig, target: string): RecoveryResult {
   // Guarded here as well as at the call sites: without a bin there is no
   // updater to run, and shelling out would execute `undefined update`.
-  if (!config.bin) return `no native updater configured for ${config.npm}`;
+  const bin = config.bin;
+  if (!bin) return { error: `no native updater configured for ${config.npm}` };
+
+  let npmRoot = '';
   try {
-    execSync(`${config.bin} update`, { stdio: ['pipe', 'pipe', 'pipe'], timeout: 300_000 });
-    return null;
-  } catch (err) {
-    return errorText(err, 'update failed');
+    npmRoot = getNpmGlobalRoot();
+  } catch {
+    // No npm: a pure native install.
   }
+  if (npmRoot && npmCopyPresent(npmRoot, config.npm) && !pathBinIsNative(bin, npmRoot)) {
+    if (!SEMVER_RE.test(target)) return { error: `refusing to install invalid version: ${target}` };
+    const update = (): string | null => {
+      try {
+        execSync(`npm install -g ${config.npm}@${target}`, { stdio: ['pipe', 'pipe', 'pipe'], timeout: 300_000 });
+        return null;
+      } catch (err) {
+        return errorText(err, 'install failed');
+      }
+    };
+    try {
+      return updateWithStagingRecovery({ npmRoot, packageName: config.npm, binName: bin, update });
+    } catch (err) {
+      return { error: `update recovery failed: ${errorText(err, 'unknown error')}` };
+    }
+  }
+
+  try {
+    execSync(`${bin} update`, { stdio: ['pipe', 'pipe', 'pipe'], timeout: 300_000 });
+  } catch (err) {
+    return { error: errorText(err, 'update failed') };
+  }
+  const version = resolveCurrent(config);
+  if (version === null) return { error: `update completed but \`${bin} --version\` reports no version` };
+  return { error: null, version };
 }
 
 /**
@@ -238,8 +325,9 @@ export function runNativeUpdate(config: PackageConfig): string | null {
  *
  * A previously interrupted install can leave `.<pkg>-<hash>` staging dirs in the
  * npm global root that make the next install fail with ENOTEMPTY/ENOTDIR, so
- * those are pre-cleaned and the install is retried once after removing the
- * half-written package directory. Returns null on success, or the error text.
+ * those are pre-cleaned and the install is retried once with the package
+ * directory moved aside (and restored if the retry fails too). Returns null on
+ * success, or the error text.
  */
 export function installNpmVersion(packageName: string, version: string): string | null {
   if (!SEMVER_RE.test(version)) return `refusing to install invalid version: ${version}`;
@@ -263,13 +351,15 @@ export function installNpmVersion(packageName: string, version: string): string 
     if (!npmRoot || !(stderr.includes('ENOTEMPTY') || stderr.includes('ENOTDIR'))) {
       return errorText(err, 'install failed');
     }
-    // Remove stale temp dirs and the partially-installed package dir, then retry once
+    // Remove stale temp dirs, move the package dir out of npm's way, retry once
     cleanStaleNpmTempDirs(npmRoot, packageName);
-    removePackageDir(npmRoot, packageName);
+    const finish = movePackageDirAside(npmRoot, packageName);
     try {
       execSync(`npm install -g ${spec}`, { stdio: ['pipe', 'pipe', 'pipe'], timeout: 300_000 });
+      finish?.(true);
       return null;
     } catch (retryErr) {
+      finish?.(false);
       return errorText(retryErr, 'install failed');
     }
   }

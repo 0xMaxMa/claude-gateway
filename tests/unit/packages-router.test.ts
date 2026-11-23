@@ -17,7 +17,8 @@
  * T14: POST /api/v1/packages/claude-code/update — native updater, warning: null
  * T15: POST /api/v1/packages/claude-gateway/update — 403 when non-admin key
  * T16: stale npm temp dir exists → pre-clean removes it, update succeeds
- * T17: ENOTEMPTY on first install → temp + package dirs removed, retry succeeds
+ * T17: ENOTEMPTY on first install → temp dir removed, package dir moved aside, retry succeeds
+ * T17b: ENOTEMPTY and the retry fails too → package dir moved back, not left deleted
  * T18: concurrent update request → 409 while first is in flight
  * T19: non-ENOTEMPTY install failure → 500, no retry
  *
@@ -40,20 +41,21 @@ import { ApiKey } from '../../src/types';
 
 // Must mock child_process and fs before importing the module under test
 jest.mock('child_process', () => ({ execSync: jest.fn() }));
-jest.mock('fs', () => ({ readdirSync: jest.fn(), rmSync: jest.fn() }));
+jest.mock('fs', () => ({ readdirSync: jest.fn(), rmSync: jest.fn(), renameSync: jest.fn(), existsSync: jest.fn() }));
 jest.mock('../../src/shutdown-signals', () => ({
   ...jest.requireActual('../../src/shutdown-signals'),
   requestExitCode: jest.fn(),
 }));
 
 import { execSync } from 'child_process';
-import { readdirSync, rmSync } from 'fs';
+import { readdirSync, renameSync, rmSync } from 'fs';
 import { createPackagesRouter, _resetCache, _resetLock, _setLock } from '../../src/api/packages';
 import { PACKAGES, getTargetVersion, installNpmVersion } from '../../src/packages/registry';
 import { EX_TEMPFAIL, requestExitCode } from '../../src/shutdown-signals';
 
 const mockReaddirSync = readdirSync as jest.MockedFunction<typeof readdirSync>;
 const mockRmSync = rmSync as jest.MockedFunction<typeof rmSync>;
+const mockRenameSync = renameSync as jest.MockedFunction<typeof renameSync>;
 const mockRequestExitCode = requestExitCode as jest.MockedFunction<typeof requestExitCode>;
 
 const mockExecSync = execSync as jest.MockedFunction<typeof execSync>;
@@ -474,7 +476,7 @@ describe('T16-T19: ENOTEMPTY recovery & concurrency lock', () => {
     expect(rmCalls.every((p) => !p.endsWith('/claude-gateway'))).toBe(true);
   });
 
-  it('T17: ENOTEMPTY on first install → temp + package dirs removed, retry succeeds', async () => {
+  function mockEnotemptyInstall(retrySucceeds: boolean): () => number {
     let installAttempt = 0;
     let listCount = 0;
     mockExecSync.mockImplementation((cmd: unknown) => {
@@ -487,23 +489,26 @@ describe('T16-T19: ENOTEMPTY recovery & concurrency lock', () => {
       }
       if (cmdStr.includes('npm install')) {
         installAttempt++;
-        if (installAttempt === 1) {
-          const err = Object.assign(new Error('ENOTEMPTY'), {
+        if (installAttempt === 1 || !retrySucceeds) {
+          throw Object.assign(new Error('ENOTEMPTY'), {
             stderr: Buffer.from(
               'npm error code ENOTEMPTY\nnpm error syscall rename\nnpm error path /fake/npm/root/@0xmaxma/claude-gateway',
             ),
           });
-          throw err;
         }
-        // Retry succeeds
         return '';
       }
       return '{}';
     });
     mockFetch({ '@0xmaxma/claude-gateway': '1.1.0' });
-
     mockReaddirSync.mockReturnValue(['.claude-gateway-O5kzWOwo'] as unknown as ReturnType<typeof readdirSync>);
     mockRmSync.mockImplementation(() => undefined);
+    mockRenameSync.mockImplementation(() => undefined);
+    return () => installAttempt;
+  }
+
+  it('T17: ENOTEMPTY on first install → temp dir removed, package dir moved aside, retry succeeds', async () => {
+    const attempts = mockEnotemptyInstall(true);
 
     const res = await request(makeApp())
       .post('/api/v1/packages/claude-gateway/update')
@@ -511,12 +516,31 @@ describe('T16-T19: ENOTEMPTY recovery & concurrency lock', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.updated).toBe(true);
-    expect(installAttempt).toBe(2);
+    expect(attempts()).toBe(2);
 
-    // Stale temp dir and package dir both removed before retry
     const rmCalls = mockRmSync.mock.calls.map((c) => c[0] as string);
     expect(rmCalls.some((p) => p.includes('.claude-gateway-O5kzWOwo'))).toBe(true);
-    expect(rmCalls.some((p) => p.endsWith('/claude-gateway'))).toBe(true);
+    // The package dir is moved aside for the retry, and only the aside copy is
+    // deleted once the retry has installed the new one.
+    expect(mockRenameSync).toHaveBeenCalledTimes(1);
+    const [from, aside] = mockRenameSync.mock.calls[0] as [string, string];
+    expect(from).toBe(`${NPM_ROOT}/@0xmaxma/claude-gateway`);
+    expect(rmCalls).toContain(aside);
+    expect(rmCalls).not.toContain(from);
+  });
+
+  it('T17b: ENOTEMPTY and the retry fails too → package dir moved back, not left deleted', async () => {
+    const attempts = mockEnotemptyInstall(false);
+
+    const res = await request(makeApp())
+      .post('/api/v1/packages/claude-gateway/update')
+      .set('X-Api-Key', ADMIN_KEY);
+
+    expect(res.status).toBe(500);
+    expect(attempts()).toBe(2);
+    expect(mockRenameSync).toHaveBeenCalledTimes(2);
+    const [from, aside] = mockRenameSync.mock.calls[0] as [string, string];
+    expect(mockRenameSync.mock.calls[1]).toEqual([aside, from]);
   });
 
   it('T18: concurrent update request → 409 while first is in flight', async () => {

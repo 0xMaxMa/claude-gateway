@@ -136,16 +136,25 @@ async function update(id: PackageId, flags: Record<string, string | boolean>): P
     return 1;
   }
 
-  // Native-installer packages (claude-code) must use their own updater: an
-  // `npm install -g` would write a second copy that isn't the binary on PATH.
-  const error =
-    config.update === 'native' && config.bin ? runNativeUpdate(config) : installNpmVersion(config.npm, target);
-  if (error !== null) {
-    process.stderr.write(`Update failed: ${error}\n`);
-    return 1;
+  // Native-updater packages (claude-code) go through runNativeUpdate, which
+  // picks the native updater or npm from how the package is installed.
+  let to: string | null;
+  if (config.update === 'native' && config.bin) {
+    const result = runNativeUpdate(config, target);
+    if (result.error !== null) {
+      process.stderr.write(`Update failed: ${result.error}\n`);
+      return 1;
+    }
+    to = result.version;
+  } else {
+    const error = installNpmVersion(config.npm, target);
+    if (error !== null) {
+      process.stderr.write(`Update failed: ${error}\n`);
+      return 1;
+    }
+    to = config.detect === 'binary' ? resolveCurrent(config) : getNpmListVersion(config.npm);
   }
 
-  const to = config.detect === 'binary' ? resolveCurrent(config) : getNpmListVersion(config.npm);
   printJson({ package: config.npm, from: current, to, updated: to !== current }, flags);
   if (to === current) {
     // A native updater can legitimately be a no-op on its own channel.
