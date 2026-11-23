@@ -32,16 +32,23 @@ function buildSessionId(agentId: string, taskName: string): string {
   return `heartbeat:${agentId}:${taskName}:${Date.now()}`;
 }
 
+/** Index of the last epoch boundary an interval task ran; kept across reloads. */
+interface IntervalState {
+  lastBoundary?: number;
+}
+
 /**
  * Run `run` every `intervalMs`, at multiples of `intervalMs` since the Unix
  * epoch. The fire times depend only on the clock, not on when load() ran, so
  * the frequent reloads triggered by any workspace write (MEMORY.md included)
  * do not restart the count. Each boundary runs at most once: a tick that
  * arrives before its boundary (clock moved back) waits again, and a late tick
- * runs once and skips the boundaries it missed.
+ * runs once and skips the boundaries it missed. `state` outlives a reload, so a
+ * reload that lands after a boundary but before its timer ran still runs it.
  */
-function scheduleEvery(intervalMs: number, run: () => Promise<void>): { stop(): void } {
-  let next = Math.floor(Date.now() / intervalMs) + 1;
+function scheduleEvery(intervalMs: number, state: IntervalState, run: () => Promise<void>): { stop(): void } {
+  const current = Math.floor(Date.now() / intervalMs);
+  let next = state.lastBoundary === current - 1 ? current : current + 1;
   let timer: ReturnType<typeof setTimeout>;
   const arm = () => {
     timer = setTimeout(tick, Math.max(0, next * intervalMs - Date.now()));
@@ -49,7 +56,8 @@ function scheduleEvery(intervalMs: number, run: () => Promise<void>): { stop(): 
   const tick = () => {
     const now = Date.now();
     if (now >= next * intervalMs) {
-      next = Math.floor(now / intervalMs) + 1;
+      state.lastBoundary = Math.floor(now / intervalMs);
+      next = state.lastBoundary + 1;
       void run();
     }
     arm();
@@ -66,6 +74,7 @@ export class CronScheduler extends EventEmitter {
   private readonly history: HeartbeatHistory;
   private tasks: Array<{ stop(): void }> = [];
   private lastProactiveMessageAt: Date | null = null;
+  private intervalStates = new Map<string, IntervalState>();
 
   /** Populated during load() to support triggerTask() in tests */
   private readonly taskDefs = new Map<string, { name: string; prompt: string }>();
@@ -114,6 +123,8 @@ export class CronScheduler extends EventEmitter {
       return;
     }
 
+    // Carry interval state over for tasks that survive the reload; drop the rest.
+    const intervalStates = new Map<string, IntervalState>();
     for (const task of heartbeatTasks) {
       // Store for triggerTask() support
       this.taskDefs.set(task.name, { name: task.name, prompt: task.prompt });
@@ -132,9 +143,14 @@ export class CronScheduler extends EventEmitter {
         this.tasks.push(nodeCron.schedule(task.cron, run));
       } else {
         this.logger.info(`Scheduling heartbeat task "${task.name}"`, { intervalMs: task.intervalMs });
-        this.tasks.push(scheduleEvery(task.intervalMs, run));
+        const key = `${task.name}\0${task.intervalMs}`;
+        const state = this.intervalStates.get(key) ?? {};
+        intervalStates.set(key, state);
+        this.tasks.push(scheduleEvery(task.intervalMs, state, run));
       }
     }
+
+    this.intervalStates = intervalStates;
 
     this.logger.info(`Loaded ${this.tasks.length} heartbeat task(s)`, { agentId: this.agentId });
   }

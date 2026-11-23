@@ -249,6 +249,7 @@ describe('heartbeat-parser cron validation matches node-cron (#652)', () => {
     '0 9 * * mon', // named day, lower case
     '0 8 * JAN *', // named month
     '0 9-17/2 * * *', // stepped range
+    '0 9 * * Monday-Friday', // full names
   ])('accepts valid cron "%s"', (cron) => {
     const tasks = parseHeartbeat(cronTask(cron));
     expect(tasks[0].cron).toBe(cron);
@@ -259,6 +260,10 @@ describe('heartbeat-parser cron validation matches node-cron (#652)', () => {
     '1-60 * * * *', // out-of-range range end
     '* * * * * *', // 6-field (seconds) cron is not a heartbeat schedule
     '0 8 ? * *',
+    '0 17-9 * * *', // node-cron would silently run this as 9-17
+    '0 9 * * FRI-MON', // node-cron would silently run this as MON-FRI
+    '0 9 * * 5-1',
+    '0 9 * DEC-JAN *',
   ])('rejects cron "%s" with InvalidCronError', (cron) => {
     expect(() => parseHeartbeat(cronTask(cron))).toThrow(InvalidCronError);
   });

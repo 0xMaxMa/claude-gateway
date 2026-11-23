@@ -1822,3 +1822,20 @@ describe('#609 cron policy for isolated and app agents', () => {
     } finally { manager.stop(); }
   });
 });
+
+describe('CronManager cron validation (#652)', () => {
+  it.each(['0 17-9 * * *', '0 9 * * FRI-MON'])(
+    'rejects reversed range "%s", which node-cron would silently swap',
+    async (schedule) => {
+      const { manager, agentId } = makeManager();
+      await manager.start();
+      try {
+        await expect(
+          manager.create({ agentId, name: 'reversed', scheduleKind: 'cron', schedule, command: 'echo x' }),
+        ).rejects.toThrow(/Invalid cron expression/);
+      } finally {
+        manager.stop();
+      }
+    },
+  );
+});

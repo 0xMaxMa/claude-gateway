@@ -1,6 +1,7 @@
 import * as yaml from 'js-yaml';
 import * as nodeCron from 'node-cron';
 import { HeartbeatTask } from '../types';
+import { hasReversedCronRange } from '../cron/validate';
 
 // ---------- Error classes ----------
 
@@ -53,9 +54,10 @@ export class MissingScheduleError extends Error {
  * schedules it, so the parser never accepts what `nodeCron.schedule()` rejects
  * or rejects what it supports (lists of ranges, MON-FRI, JAN, ...).
  * node-cron also accepts a leading seconds field; heartbeats stay at 5 fields.
+ * Reversed ranges are rejected because node-cron would silently swap them.
  */
 function validateCron(expr: string): boolean {
-  return expr.split(/\s+/).length === 5 && nodeCron.validate(expr);
+  return expr.split(/\s+/).length === 5 && nodeCron.validate(expr) && !hasReversedCronRange(expr);
 }
 
 // ---------- Interval conversion ----------

@@ -495,4 +495,38 @@ describe('CronScheduler schedules (#652)', () => {
     expect(firedAt).toHaveLength(2);
     scheduler.stop();
   });
+
+  it('a reload that lands just after a boundary, before its timer ran, keeps that run', () => {
+    jest.useFakeTimers({ now: new Date('2026-01-01T00:00:00Z') });
+    const scheduler = new CronScheduler(AGENT_ID, makeMockRunner('ok'), makeLogger(), makeAgentConfig());
+    const firedAt = recordFirings(scheduler);
+    const start = Date.now();
+
+    scheduler.load(intervalContent('45m'));
+    jest.advanceTimersByTime(45 * 60_000);
+    expect(firedAt).toEqual([start + 45 * 60_000]);
+
+    // The wall clock passes the 01:30 boundary, but a workspace reload runs
+    // before the pending timer callback does.
+    jest.setSystemTime(start + 90 * 60_000 + 3);
+    scheduler.load(intervalContent('45m'));
+    jest.advanceTimersByTime(0);
+
+    expect(firedAt).toEqual([start + 45 * 60_000, start + 90 * 60_000 + 3]);
+    // The run is not repeated, and the next boundary is unaffected.
+    jest.advanceTimersByTime(45 * 60_000);
+    expect(firedAt).toHaveLength(3);
+    scheduler.stop();
+  });
+
+  it('a first load does not run a boundary that passed before it', () => {
+    jest.useFakeTimers({ now: new Date('2026-01-01T00:45:00.003Z') });
+    const scheduler = new CronScheduler(AGENT_ID, makeMockRunner('ok'), makeLogger(), makeAgentConfig());
+    const firedAt = recordFirings(scheduler);
+
+    scheduler.load(intervalContent('45m'));
+    jest.advanceTimersByTime(1_000);
+    expect(firedAt).toEqual([]);
+    scheduler.stop();
+  });
 });

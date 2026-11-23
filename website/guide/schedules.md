@@ -22,7 +22,7 @@ tasks:
     prompt: "Check if there are any reminders to send."
 ```
 
-Cron expressions use five fields: minute, hour, day, month, weekday. They are validated with node-cron, so lists of ranges (`0 9-11,13-17 * * 1-5`) and names (`MON-FRI`, `JAN`) work. Supported interval examples include `30m`, `1h`, `6h`, `1d`, and `1w`. Heartbeats use the gateway process timezone; managed cron jobs have their own timezone and default to UTC. The default proactive rate limit is 30 minutes; a `HEARTBEAT_OK` reply suppresses the Telegram message.
+Cron expressions use five fields: minute, hour, day, month, weekday. They are validated with node-cron, so lists of ranges (`0 9-11,13-17 * * 1-5`) and names (`MON-FRI`, `JAN`) work. A reversed range such as `17-9` or `FRI-MON` is rejected. Supported interval examples include `30m`, `1h`, `6h`, `1d`, and `1w`. Heartbeats use the gateway process timezone; managed cron jobs have their own timezone and default to UTC. The default proactive rate limit is 30 minutes; a `HEARTBEAT_OK` reply suppresses the Telegram message.
 
 ## Inspect a managed job
 
@@ -57,7 +57,7 @@ The heartbeat parser requires a nonempty `name` and `prompt` and exactly one of 
 
 ## Interval schedules
 
-An interval that divides its cycle evenly converts to a wall-clock cron. Minute values must divide 60 and hour values must divide 24. These schedules are not elapsed time since the previous completion:
+Minute values that divide 60 and hour values that divide 24 convert to a wall-clock cron. These schedules are not elapsed time since the previous completion:
 
 | Shorthand | Cron equivalent | Meaning |
 | --- | --- | --- |

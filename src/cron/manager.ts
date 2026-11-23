@@ -6,6 +6,7 @@ import * as path from 'path';
 import { randomUUID } from 'crypto';
 import { exec } from 'child_process';
 import { CronExpressionParser } from 'cron-parser';
+import { hasReversedCronRange } from './validate';
 import {
   CronJob,
   CronJobCreate,
@@ -310,7 +311,7 @@ export class CronManager extends EventEmitter {
     const kind = input.scheduleKind ?? 'cron';
     if (kind === 'cron') {
       if (!input.schedule) throw new Error('schedule is required for scheduleKind=cron');
-      if (!nodeCron.validate(input.schedule)) {
+      if (!nodeCron.validate(input.schedule) || hasReversedCronRange(input.schedule)) {
         throw new Error(`Invalid cron expression: "${input.schedule}"`);
       }
       if (input.timezone !== undefined) this.validateTimezone(input.timezone);
