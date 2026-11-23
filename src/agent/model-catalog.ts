@@ -309,7 +309,15 @@ export async function fetchModelCatalog(
   const request: Promise<ModelConfig[] | null> = Promise.race([
     attempt,
     new Promise<ModelConfig[] | null>((resolve) => {
-      deadline = setTimeout(() => resolve(stale), CATALOG_DEADLINE_MS);
+      deadline = setTimeout(() => {
+        // The cause of a fetch outliving its own abort signal is still unknown (#679),
+        // so each occurrence is logged rather than silently papered over.
+        console.warn(
+          `[model-catalog] the catalog fetch did not settle within ${CATALOG_DEADLINE_MS} ms `
+          + `despite its ${CATALOG_TIMEOUT_MS} ms abort signal; using the ${stale ? 'stale' : 'static'} model list.`,
+        );
+        resolve(stale);
+      }, CATALOG_DEADLINE_MS);
     }),
   ]).finally(() => {
     clearTimeout(deadline);

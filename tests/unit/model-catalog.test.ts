@@ -377,6 +377,7 @@ describe('model catalog — fetch policy', () => {
 
   it('releases callers and the shared request when a fetch never settles', async () => {
     jest.useFakeTimers();
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       process.env.ANTHROPIC_BASE_URL = 'https://proxy.example.com';
       // Ignores its abort signal and never settles: the request that pinned every
@@ -384,14 +385,21 @@ describe('model catalog — fetch policy', () => {
       fetchMock.mockImplementationOnce(() => new Promise(() => {}));
 
       const hung = [fetchModelCatalog(STATIC), fetchModelCatalog(STATIC)];
-      await jest.advanceTimersByTimeAsync(10_000);
+      await jest.advanceTimersByTimeAsync(9_999);
+      expect(warn).not.toHaveBeenCalled();
+      await jest.advanceTimersByTimeAsync(1);
       await expect(Promise.all(hung)).resolves.toEqual([null, null]);
+      // One shared request, one warning; the base URL (which may carry credentials) is not logged.
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(String(warn.mock.calls[0][0])).toContain('did not settle');
+      expect(String(warn.mock.calls[0][0])).not.toContain('proxy.example.com');
 
       fetchMock.mockResolvedValueOnce(ok({ data: [{ id: 'live' }] }));
       const next = await fetchModelCatalog(STATIC);
       expect(fetchMock).toHaveBeenCalledTimes(2);
       expect(next!.map((m) => m.id)).toContain('live');
     } finally {
+      warn.mockRestore();
       jest.useRealTimers();
     }
   });
