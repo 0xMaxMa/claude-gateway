@@ -395,7 +395,7 @@ export class TaskBridge {
                 });
               }
             });
-            if (command.tool === 'subagent_wait') result = { results: await wait(a.task_ids) };
+            if (command.tool === 'subagent_wait') { step = 'subagent_wait:wait'; result = { results: await wait(a.task_ids) }; }
             else if (command.tool === 'subagent_cancel') result = { results: this.tasks.cancelSubagentTasks(scope.attemptId, scope.generation, a.task_ids) };
             else {
               inputDetails = subagentInputIssues(a);
@@ -404,7 +404,8 @@ export class TaskBridge {
               let model: string | undefined;
               if (!keyword) {
                 // An alias resolves now, as task_spawn's does (a skill may pass `opus` as it would to Agent).
-                try { const models = await this.models(); model = (findModel(models, a.model) ?? resolveModelId(models, a.model)).id; }
+                step = 'subagent_spawn:models';
+                try { const models = await this.models(); model = (findModel(models, a.model) ?? resolveModelId(models, a.model)).id; step = 'dispatch'; }
                 catch (error) {
                   if (!(error instanceof ModelResolutionError)) throw error;
                   inputDetails = [{ field: 'model', reason: error.code === 'UNKNOWN_MODEL' ? 'unknown_model' : 'alias', correction: error.message }];
@@ -428,6 +429,7 @@ export class TaskBridge {
               if (a.run_in_background) result = receipt;
               else {
                 startedSubagent = task.taskId;
+                step = 'subagent_spawn:wait';
                 const [finished] = await wait([task.taskId]).catch(error => {
                   throw error instanceof OrchestrationError && error.code === 'SUBAGENT_WAIT_CANCELLED'
                     ? new OrchestrationError(error.code, `Stopped waiting for subagent ${task.taskId}; it is still running. Wait for it with subagent_wait or stop it with subagent_cancel. Do not spawn it again.`) : error;
