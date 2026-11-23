@@ -92,7 +92,7 @@ afterEach(async () => {
 test('/sessions against a stubbed agent with 68 sessions renders a page Telegram accepts', async () => {
   const seen: unknown[] = [];
   const list = sessions(68);
-  const base = await agent(200, JSON.stringify({ sessions: [...list, { id: 1 }, null], activeSessionId: list[3].id }), seen);
+  const base = await agent(200, JSON.stringify({ sessions: [...list, { id: 1 }, null, { id: 'nan', name: 'x', messageCount: 1, lastActive: null }], activeSessionId: list[3].id }), seen);
   const { sessions: got, activeId } = await listSessionsRequest(base, '42');
   expect(seen).toEqual([{ command: 'list_sessions', chat_id: '42' }]);
   expect(got).toHaveLength(68); // malformed rows are dropped

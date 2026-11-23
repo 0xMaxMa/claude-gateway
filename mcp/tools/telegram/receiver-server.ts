@@ -31,7 +31,7 @@ import { Bot, GrammyError, InlineKeyboard, InputFile, type Context } from 'gramm
 import type { ReactionTypeEmoji } from 'grammy/types'
 import { randomBytes } from 'crypto'
 import { confirmSelection, voiceModeConfirmation } from './selection-confirmation'
-import { LiveTaskBrowser, type TaskBrowserMessage } from './task-browser'
+import { LiveTaskBrowser, unchanged, type TaskBrowserMessage } from './task-browser'
 import { PSTACK_MENU_COMMAND, pstackMenuMarkup } from './pstack-menu'
 import { ReceiverSpool } from '../receiver-spool'
 const orchestrationSpool = process.env.GATEWAY_ORCHESTRATION_INGRESS_DIR && process.env.CLAUDE_CHANNEL_CALLBACK
@@ -2086,7 +2086,7 @@ bot.on('callback_query:data', async ctx => {
       await ctx.answerCallbackQuery().catch(() => {})
     } catch (err) {
       // Tapping the page already shown leaves the text unchanged; nothing failed.
-      if (/message is not modified/i.test(String((err as { description?: unknown })?.description ?? ''))) {
+      if (unchanged(err)) {
         await ctx.answerCallbackQuery().catch(() => {})
         return
       }

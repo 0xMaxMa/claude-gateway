@@ -66,6 +66,6 @@ export async function listSessionsRequest(base: string | undefined, chatId: stri
   // A successful list_sessions reply carries `sessions` and no `success` flag.
   if (result?.success === false || !Array.isArray(result?.sessions)) throw callbackRejection(result)
   const sessions = (result.sessions as Array<Partial<SessionListEntry> | null>).filter((s): s is SessionListEntry =>
-    typeof s?.id === 'string' && typeof s.name === 'string' && typeof s.messageCount === 'number' && typeof s.lastActive === 'number')
+    typeof s?.id === 'string' && typeof s.name === 'string' && Number.isFinite(s.messageCount) && Number.isFinite(s.lastActive))
   return { sessions, activeId: typeof result.activeSessionId === 'string' ? result.activeSessionId : '' }
 }

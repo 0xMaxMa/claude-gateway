@@ -26,7 +26,8 @@ interface Dependencies {
 }
 const description = (e: any) => String(e?.description ?? e?.message ?? '');
 const absent = (e: any) => /message to (?:edit|delete) not found|message_id_invalid/i.test(description(e));
-const unchanged = (e: any) => /message is not modified/i.test(description(e));
+/** Telegram refused an edit because the message already shows this content. */
+export const unchanged = (e: any) => /message is not modified/i.test(description(e));
 export class LiveTaskBrowser {
   private entries = new Map<string, Entry>();
   private locks = new Map<string, Promise<unknown>>();
