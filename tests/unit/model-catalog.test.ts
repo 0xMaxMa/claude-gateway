@@ -394,8 +394,10 @@ describe('model catalog — fetch policy', () => {
       expect(String(warn.mock.calls[0][0])).toContain('did not settle');
       expect(String(warn.mock.calls[0][0])).not.toContain('proxy.example.com');
 
-      // Backs off instead of making every later spawn wait the deadline again.
+      // Backs off instead of making every later spawn wait the deadline again, for any
+      // caller of the same endpoint (another agent's configured list is another key).
       await expect(fetchModelCatalog(STATIC)).resolves.toBeNull();
+      await expect(fetchModelCatalog(STATIC.slice(0, 1))).resolves.toBeNull();
       expect(fetchMock).toHaveBeenCalledTimes(1);
 
       await jest.advanceTimersByTimeAsync(60_000);

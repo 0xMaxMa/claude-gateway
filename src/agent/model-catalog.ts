@@ -63,11 +63,12 @@ let inFlight: Promise<ModelConfig[] | null> | null = null;
 let inFlightKey: string | null = null;
 let warnedInsecureUrl = false;
 /**
- * Key whose last request hit {@link CATALOG_DEADLINE_MS}, and until when it is
- * skipped. Without this every later caller would wait the full deadline again and
- * leave another fetch that never settles.
+ * Base URL whose last request hit {@link CATALOG_DEADLINE_MS}, and until when it
+ * is skipped. Without this every later caller would wait the full deadline again
+ * and leave another fetch that never settles. Keyed on the endpoint, not the
+ * fallback list, because whether it hangs does not depend on which agent asked.
  */
-let hungKey: string | null = null;
+let hungBase: string | null = null;
 let hungUntil = 0;
 
 /** Reset module state. Tests only — each case needs a clean cache. */
@@ -76,7 +77,7 @@ export function resetModelCatalogCache(): void {
   inFlight = null;
   inFlightKey = null;
   warnedInsecureUrl = false;
-  hungKey = null;
+  hungBase = null;
   hungUntil = 0;
 }
 
@@ -277,7 +278,7 @@ export async function fetchModelCatalog(
   const stale = cache && cache.key === key && now - cache.fetchedAt < CATALOG_STALE_MS ? cache.models : null;
 
   if (!base) return null; // standalone deployment — static list is the catalog
-  if (hungKey === key && Date.now() < hungUntil) return stale; // backing off after a hung request
+  if (hungBase === base && now < hungUntil) return stale; // backing off after a hung request
 
   if (!baseUrlIsSecure(base)) {
     if (!warnedInsecureUrl) {
@@ -329,8 +330,8 @@ export async function fetchModelCatalog(
           + `despite its ${CATALOG_TIMEOUT_MS} ms abort signal; using the ${stale ? 'stale' : 'static'} model list.`,
         );
         abandoned = true;
-        hungKey = key;
-        hungUntil = Date.now() + CATALOG_TTL_MS;
+        hungBase = base;
+        hungUntil = now + CATALOG_DEADLINE_MS + CATALOG_TTL_MS; // `now` is when this request started
         resolve(stale);
       }, CATALOG_DEADLINE_MS);
       deadline.unref?.();
