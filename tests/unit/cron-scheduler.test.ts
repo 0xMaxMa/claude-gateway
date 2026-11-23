@@ -351,3 +351,128 @@ describe('CronScheduler (unit)', () => {
     scheduler.stop();
   });
 });
+
+// ─── Issue #652 ───────────────────────────────────────────────────────────────
+
+describe('CronScheduler schedules (#652)', () => {
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  it('load() rejects a cron node-cron cannot schedule without throwing', () => {
+    const logger = makeLogger();
+    const scheduler = new CronScheduler(AGENT_ID, makeMockRunner('ok'), logger, makeAgentConfig());
+    const content = `tasks:
+  - name: bad-step
+    cron: "5/15 * * * *"
+    prompt: "Bad step base."
+`;
+    expect(() => scheduler.load(content)).not.toThrow();
+    expect(logger.error).toHaveBeenCalledWith(
+      'Failed to parse heartbeat content',
+      expect.objectContaining({ error: expect.stringContaining('bad-step') }),
+    );
+    scheduler.stop();
+  });
+
+  function intervalContent(interval: string): string {
+    return `tasks:
+  - name: every
+    interval: ${interval}
+    prompt: "Check in."
+`;
+  }
+
+  function recordFirings(scheduler: CronScheduler): number[] {
+    const firedAt: number[] = [];
+    jest.spyOn(scheduler, 'runTask').mockImplementation(async () => {
+      firedAt.push(Date.now());
+    });
+    return firedAt;
+  }
+
+  it.each([
+    ['45m', 45 * 60_000],
+    ['5h', 5 * 3_600_000],
+  ])('interval %s fires at an even gap and stops on stop()', (interval, gapMs) => {
+    jest.useFakeTimers({ now: new Date('2026-01-01T00:00:00Z') });
+    const scheduler = new CronScheduler(AGENT_ID, makeMockRunner('ok'), makeLogger(), makeAgentConfig());
+    const firedAt = recordFirings(scheduler);
+
+    scheduler.load(intervalContent(interval));
+    // Five firings cross midnight, where `0 */5 * * *` would have left a 4h gap.
+    jest.advanceTimersByTime(gapMs * 5);
+
+    expect(firedAt).toHaveLength(5);
+    expect(firedAt.slice(1).map((t, i) => t - firedAt[i])).toEqual([gapMs, gapMs, gapMs, gapMs]);
+
+    scheduler.stop();
+    jest.advanceTimersByTime(gapMs * 2);
+    expect(firedAt).toHaveLength(5);
+  });
+
+  it('reloading HEARTBEAT.md does not restart an interval count', () => {
+    // 00:00 UTC is a multiple of 45 minutes since the epoch.
+    jest.useFakeTimers({ now: new Date('2026-01-01T00:00:00Z') });
+    const scheduler = new CronScheduler(AGENT_ID, makeMockRunner('ok'), makeLogger(), makeAgentConfig());
+    const firedAt = recordFirings(scheduler);
+    const start = Date.now();
+
+    scheduler.load(intervalContent('45m'));
+    // Any workspace write reloads the file; here one lands every 30 minutes.
+    for (let i = 0; i < 6; i++) {
+      jest.advanceTimersByTime(30 * 60_000);
+      scheduler.load(intervalContent('45m'));
+    }
+
+    expect(firedAt).toEqual([1, 2, 3, 4].map((n) => start + n * 45 * 60_000));
+    scheduler.stop();
+  });
+
+  it('45m interval is not suppressed by the default 30-minute rate limit', async () => {
+    jest.useFakeTimers({ now: new Date('2026-01-01T00:00:00Z') });
+    const scheduler = new CronScheduler(AGENT_ID, makeMockRunner('news'), makeLogger(), makeAgentConfig());
+    const results: HeartbeatResult[] = [];
+    scheduler.on('heartbeat:result', (r: HeartbeatResult) => results.push(r));
+
+    scheduler.load(`tasks:
+  - name: every
+    interval: 45m
+    prompt: "Check in."
+`);
+    // Under `*/45 * * * *` the 01:00 run came 15 minutes after a delivered
+    // 00:45 run and was rate-limited.
+    for (let i = 0; i < 3; i++) {
+      await jest.advanceTimersByTimeAsync(45 * 60_000);
+    }
+    await jest.advanceTimersByTimeAsync(1_000);
+
+    expect(results).toHaveLength(3);
+    expect(results.map((r) => r.rateLimited)).toEqual([false, false, false]);
+    scheduler.stop();
+  });
+
+  it('a failing interval run is logged, not left as an unhandled rejection', async () => {
+    jest.useFakeTimers({ now: new Date('2026-01-01T00:00:00Z') });
+    const logger = makeLogger();
+    const scheduler = new CronScheduler(AGENT_ID, makeMockRunner('ok'), logger, makeAgentConfig());
+    jest.spyOn(scheduler, 'runTask').mockRejectedValue(new Error('history write failed'));
+    const unhandled = jest.fn();
+    process.on('unhandledRejection', unhandled);
+    try {
+      scheduler.load(intervalContent('45m'));
+      await jest.advanceTimersByTimeAsync(45 * 60_000);
+      // unhandledRejection is reported after the microtask queue drains.
+      jest.useRealTimers();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      expect(logger.error).toHaveBeenCalledWith('Heartbeat task "every" failed', {
+        error: 'history write failed',
+      });
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      process.off('unhandledRejection', unhandled);
+      scheduler.stop();
+    }
+  });
+});

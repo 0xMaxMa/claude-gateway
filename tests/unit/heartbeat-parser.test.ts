@@ -2,7 +2,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import {
   parseHeartbeat,
-  intervalToCron,
+  parseInterval,
   InvalidCronError,
   InvalidIntervalError,
   MissingPromptError,
@@ -157,29 +157,29 @@ Just regular markdown content.
   // U-HP-12: Interval conversion 30m
   // -------------------------------------------------------------------------
   it('U-HP-12: converts 30m interval to */30 * * * *', () => {
-    expect(intervalToCron('30m')).toBe('*/30 * * * *');
+    expect(parseInterval('30m')).toEqual({ cron: '*/30 * * * *' });
   });
 
   // -------------------------------------------------------------------------
   // U-HP-13: Interval conversion 1d
   // -------------------------------------------------------------------------
   it('U-HP-13: converts 1d interval to 0 0 * * *', () => {
-    expect(intervalToCron('1d')).toBe('0 0 * * *');
+    expect(parseInterval('1d')).toEqual({ cron: '0 0 * * *' });
   });
 
   // Additional interval conversions
   it('converts 1w to 0 0 * * 0', () => {
-    expect(intervalToCron('1w')).toBe('0 0 * * 0');
+    expect(parseInterval('1w')).toEqual({ cron: '0 0 * * 0' });
   });
 
   it('converts 1h to 0 */1 * * *', () => {
-    expect(intervalToCron('1h')).toBe('0 */1 * * *');
+    expect(parseInterval('1h')).toEqual({ cron: '0 */1 * * *' });
   });
 
-  it('returns empty string for invalid interval format', () => {
-    expect(intervalToCron('2hours')).toBe('');
-    expect(intervalToCron('abc')).toBe('');
-    expect(intervalToCron('')).toBe('');
+  it('returns null for invalid interval format', () => {
+    expect(parseInterval('2hours')).toBeNull();
+    expect(parseInterval('abc')).toBeNull();
+    expect(parseInterval('')).toBeNull();
   });
 
   // Valid cron expressions test
@@ -229,4 +229,83 @@ Just regular markdown content.
     const content = fs.readFileSync(path.join(FIXTURES, 'invalid-cron.md'), 'utf-8');
     expect(() => parseHeartbeat(content)).toThrow(InvalidCronError);
   });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #652: cron validation must match node-cron, the runtime scheduler
+// ---------------------------------------------------------------------------
+describe('heartbeat-parser cron validation matches node-cron (#652)', () => {
+  function cronTask(cron: string): string {
+    return `tasks:
+  - name: test-task
+    cron: "${cron}"
+    prompt: "Test prompt."
+`;
+  }
+
+  it.each([
+    '0 9-11,13-17 * * 1-5', // list of ranges
+    '0 9 * * MON-FRI', // named day range
+    '0 9 * * mon', // named day, lower case
+    '0 8 * JAN *', // named month
+    '0 9-17/2 * * *', // stepped range
+  ])('accepts valid cron "%s"', (cron) => {
+    const tasks = parseHeartbeat(cronTask(cron));
+    expect(tasks[0].cron).toBe(cron);
+  });
+
+  it.each([
+    '5/15 * * * *', // node-cron rejects a bare N/step base; schedule() would throw
+    '1-60 * * * *', // out-of-range range end
+    '* * * * * *', // 6-field (seconds) cron is not a heartbeat schedule
+    '0 8 ? * *',
+  ])('rejects cron "%s" with InvalidCronError', (cron) => {
+    expect(() => parseHeartbeat(cronTask(cron))).toThrow(InvalidCronError);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #652: intervals that do not divide their cycle must keep a fixed gap
+// ---------------------------------------------------------------------------
+describe('heartbeat-parser interval schedules (#652)', () => {
+  function intervalTask(interval: string): string {
+    return `tasks:
+  - name: every
+    interval: ${interval}
+    prompt: "Check in."
+`;
+  }
+
+  it.each([
+    ['45m', 45 * 60_000],
+    ['7m', 7 * 60_000],
+    ['5h', 5 * 3_600_000],
+    ['23h', 23 * 3_600_000],
+  ])('"%s" becomes a fixed %i ms interval instead of an uneven cron', (interval, ms) => {
+    const [task] = parseHeartbeat(intervalTask(interval));
+    expect(task.cron).toBeUndefined();
+    expect(task.intervalMs).toBe(ms);
+  });
+
+  it.each([
+    ['1m', '*/1 * * * *'],
+    ['15m', '*/15 * * * *'],
+    ['30m', '*/30 * * * *'],
+    ['1h', '0 */1 * * *'],
+    ['6h', '0 */6 * * *'],
+    ['12h', '0 */12 * * *'],
+    ['1d', '0 0 * * *'],
+    ['1w', '0 0 * * 0'],
+  ])('"%s" still maps to wall-clock cron "%s"', (interval, cron) => {
+    const [task] = parseHeartbeat(intervalTask(interval));
+    expect(task.cron).toBe(cron);
+    expect(task.intervalMs).toBeUndefined();
+  });
+
+  it.each(['0m', '60m', '0h', '24h', '2d', '2w', '2hours'])(
+    'still rejects interval "%s"',
+    (interval) => {
+      expect(() => parseHeartbeat(intervalTask(interval))).toThrow(InvalidIntervalError);
+    },
+  );
 });

@@ -22,7 +22,7 @@ tasks:
     prompt: "Check if there are any reminders to send."
 ```
 
-Cron expressions use five fields: minute, hour, day, month, weekday. Supported interval examples include `30m`, `1h`, `6h`, `1d`, and `1w`. Heartbeats use the gateway process timezone; managed cron jobs have their own timezone and default to UTC. The default proactive rate limit is 30 minutes; a `HEARTBEAT_OK` reply suppresses the Telegram message.
+Cron expressions use five fields: minute, hour, day, month, weekday. They are validated with node-cron, so lists of ranges (`0 9-11,13-17 * * 1-5`) and names (`MON-FRI`, `JAN`) work. Supported interval examples include `30m`, `1h`, `6h`, `1d`, and `1w`. Heartbeats use the gateway process timezone; managed cron jobs have their own timezone and default to UTC. The default proactive rate limit is 30 minutes; a `HEARTBEAT_OK` reply suppresses the Telegram message.
 
 ## Inspect a managed job
 
@@ -55,9 +55,9 @@ Schedules trigger work; the [orchestration engine](./orchestration.md) manages d
 
 The heartbeat parser requires a nonempty `name` and `prompt` and exactly one of `cron` or `interval`. Place `tasks:` at the root of the YAML; the parser stops collecting at an unindented Markdown heading. Invalid YAML can yield no tasks, while invalid task fields produce a parse error in the scheduler log. Always verify the reported loaded-task count after editing.
 
-## Intervals are wall-clock schedules
+## Interval schedules
 
-Heartbeat shorthand converts to cron; it is not elapsed time since the previous completion:
+An interval that divides its cycle evenly converts to a wall-clock cron. Minute values must divide 60 and hour values must divide 24. These schedules are not elapsed time since the previous completion:
 
 | Shorthand | Cron equivalent | Meaning |
 | --- | --- | --- |
@@ -65,6 +65,8 @@ Heartbeat shorthand converts to cron; it is not elapsed time since the previous 
 | `6h` | `0 */6 * * *` | At 00:00, 06:00, 12:00, 18:00 |
 | `1d` | `0 0 * * *` | At midnight |
 | `1w` | `0 0 * * 0` | At midnight on Sunday |
+
+Any other value has no even cron equivalent. For example, `*/45` fires at :00 and :45, so the gaps alternate between 45 and 15 minutes. These values, such as `45m` or `5h`, run at a fixed gap instead. They fire at multiples of the interval since the Unix epoch (UTC), so the times do not depend on when `HEARTBEAT.md` was loaded, reloaded or the gateway restarted. A `5h` task therefore does not start at local midnight.
 
 Minute values are 1–59, hour values 1–23, and day/week support only `1d`/`1w`. For example, `2d` and `24h` are not supported shorthand. The 30-minute proactive rate limit is shared across the agent's heartbeat tasks, so a recently sent proactive message can suppress another task. Inspect the `suppressed` and `rateLimited` result fields when delivery is absent. Heartbeat response collection defaults to a 60-second timeout.
 

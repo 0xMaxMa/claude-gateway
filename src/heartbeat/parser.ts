@@ -1,4 +1,5 @@
 import * as yaml from 'js-yaml';
+import * as nodeCron from 'node-cron';
 import { HeartbeatTask } from '../types';
 
 // ---------- Error classes ----------
@@ -48,106 +49,48 @@ export class MissingScheduleError extends Error {
 // ---------- Cron validation ----------
 
 /**
- * Validate a 5-field cron expression.
- * Fields: minute hour day-of-month month day-of-week
+ * Validate a 5-field cron expression with node-cron, the library that
+ * schedules it, so the parser never accepts what `nodeCron.schedule()` rejects
+ * or rejects what it supports (lists of ranges, MON-FRI, JAN, ...).
+ * node-cron also accepts a leading seconds field; heartbeats stay at 5 fields.
  */
 function validateCron(expr: string): boolean {
-  // Allow common step/range/wildcard patterns but reject obviously invalid values
-  const fields = expr.trim().split(/\s+/);
-  if (fields.length !== 5) return false;
-
-  // Ranges for each field: [min, max]
-  const ranges: [number, number][] = [
-    [0, 59], // minute
-    [0, 23], // hour
-    [1, 31], // day-of-month
-    [1, 12], // month
-    [0, 7],  // day-of-week (0 and 7 both = Sunday)
-  ];
-
-  for (let i = 0; i < 5; i++) {
-    const field = fields[i];
-    const [min, max] = ranges[i];
-    if (!validateCronField(field, min, max)) {
-      return false;
-    }
-  }
-  return true;
-}
-
-function validateCronField(field: string, min: number, max: number): boolean {
-  if (field === '*') return true;
-
-  // Step: */N or N/N
-  if (field.includes('/')) {
-    const parts = field.split('/');
-    if (parts.length !== 2) return false;
-    const [base, step] = parts;
-    const stepNum = parseInt(step, 10);
-    if (isNaN(stepNum) || stepNum < 1) return false;
-    if (base !== '*') {
-      const baseNum = parseInt(base, 10);
-      if (isNaN(baseNum) || baseNum < min || baseNum > max) return false;
-    }
-    return true;
-  }
-
-  // Range: N-M
-  if (field.includes('-')) {
-    const parts = field.split('-');
-    if (parts.length !== 2) return false;
-    const lo = parseInt(parts[0], 10);
-    const hi = parseInt(parts[1], 10);
-    if (isNaN(lo) || isNaN(hi)) return false;
-    if (lo < min || hi > max || lo > hi) return false;
-    return true;
-  }
-
-  // List: N,M,...
-  if (field.includes(',')) {
-    const parts = field.split(',');
-    for (const p of parts) {
-      const num = parseInt(p, 10);
-      if (isNaN(num) || num < min || num > max) return false;
-    }
-    return true;
-  }
-
-  // Plain number
-  const num = parseInt(field, 10);
-  if (isNaN(num) || num < min || num > max) return false;
-  return true;
+  return expr.split(/\s+/).length === 5 && nodeCron.validate(expr);
 }
 
 // ---------- Interval conversion ----------
 
-/**
- * Convert an interval string to a 5-field cron expression.
- * Supported: 30m, 2h, 1d, 1w
- */
-export function intervalToCron(interval: string): string {
-  const match = interval.match(/^(\d+)([mhdw])$/);
-  if (!match) {
-    return ''; // signal invalid
-  }
-  const value = parseInt(match[1], 10);
-  const unit = match[2];
+const MINUTE_MS = 60_000;
+const HOUR_MS = 60 * MINUTE_MS;
 
-  switch (unit) {
+export type IntervalSchedule = { cron: string } | { intervalMs: number };
+
+/**
+ * Convert an interval string (30m, 2h, 1d, 1w) to a schedule.
+ *
+ * An interval that divides its cycle (60 minutes, 24 hours) maps to a
+ * wall-clock cron, so 30m fires at :00 and :30. Any other value has no even
+ * cron equivalent (a 45-minute step fires at :00 and :45, 15 minutes apart),
+ * so it becomes a fixed gap in milliseconds. Returns null for an invalid value.
+ */
+export function parseInterval(interval: string): IntervalSchedule | null {
+  const match = interval.match(/^(\d+)([mhdw])$/);
+  if (!match) return null;
+  const value = parseInt(match[1], 10);
+
+  switch (match[2]) {
     case 'm':
-      if (value < 1 || value > 59) return '';
-      return `*/${value} * * * *`;
+      if (value < 1 || value > 59) return null;
+      return 60 % value === 0 ? { cron: `*/${value} * * * *` } : { intervalMs: value * MINUTE_MS };
     case 'h':
-      if (value < 1 || value > 23) return '';
-      return `0 */${value} * * *`;
+      if (value < 1 || value > 23) return null;
+      return 24 % value === 0 ? { cron: `0 */${value} * * *` } : { intervalMs: value * HOUR_MS };
     case 'd':
-      if (value !== 1) return '';
-      return `0 0 * * *`;
+      return value === 1 ? { cron: '0 0 * * *' } : null;
     case 'w':
-      if (value !== 1) return '';
-      return `0 0 * * 0`;
+      return value === 1 ? { cron: '0 0 * * 0' } : null;
     default:
-      return '';
+      return null;
   }
 }
 
@@ -242,22 +185,20 @@ export function parseHeartbeat(content: string): HeartbeatTask[] {
       throw new MissingScheduleError(name);
     }
 
-    let cronExpr: string;
-
     if (hasCron) {
-      cronExpr = String(raw.cron).trim();
-      if (!validateCron(cronExpr)) {
-        throw new InvalidCronError(name, cronExpr);
+      const cron = String(raw.cron).trim();
+      if (!validateCron(cron)) {
+        throw new InvalidCronError(name, cron);
       }
+      tasks.push({ name, prompt, cron });
     } else {
       const intervalStr = String(raw.interval).trim();
-      cronExpr = intervalToCron(intervalStr);
-      if (!cronExpr) {
+      const schedule = parseInterval(intervalStr);
+      if (!schedule) {
         throw new InvalidIntervalError(name, intervalStr);
       }
+      tasks.push({ name, prompt, ...schedule });
     }
-
-    tasks.push({ name, cron: cronExpr, prompt });
   }
 
   return tasks;

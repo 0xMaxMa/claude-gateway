@@ -784,11 +784,14 @@ export interface WorkspaceFiles {
 
 }
 
-export interface HeartbeatTask {
-  name: string;
-  cron: string; // always stored as 5-field cron after parsing interval
-  prompt: string;
-}
+/**
+ * A parsed HEARTBEAT.md task. It runs on a 5-field cron, or every `intervalMs`
+ * when its `interval:` does not divide 60 minutes or 24 hours evenly.
+ */
+export type HeartbeatTask = { name: string; prompt: string } & (
+  | { cron: string; intervalMs?: undefined }
+  | { intervalMs: number; cron?: undefined }
+);
 
 export interface HeartbeatResult {
   taskName: string;

@@ -32,13 +32,36 @@ function buildSessionId(agentId: string, taskName: string): string {
   return `heartbeat:${agentId}:${taskName}:${Date.now()}`;
 }
 
+/**
+ * Run `run` every `intervalMs`, at multiples of `intervalMs` since the Unix
+ * epoch. The fire times depend only on the clock, not on when load() ran, so
+ * the frequent reloads triggered by any workspace write (MEMORY.md included)
+ * do not restart the count. Each tick re-arms from the current time, so a late
+ * timer does not drift the schedule.
+ */
+function scheduleEvery(intervalMs: number, run: () => Promise<void>): { stop(): void } {
+  let timer: ReturnType<typeof setTimeout>;
+  const arm = () => {
+    let delay = intervalMs - (Date.now() % intervalMs);
+    // A timer that fires a moment before the boundary (clock adjustment) must
+    // not run the task twice for one boundary.
+    if (delay < 1_000) delay += intervalMs;
+    timer = setTimeout(() => {
+      arm();
+      void run();
+    }, delay);
+  };
+  arm();
+  return { stop: () => clearTimeout(timer) };
+}
+
 export class CronScheduler extends EventEmitter {
   private readonly agentId: string;
   private readonly runner: AgentRunner;
   private readonly agentConfig: AgentConfig;
   private readonly logger: Logger;
   private readonly history: HeartbeatHistory;
-  private tasks: nodeCron.ScheduledTask[] = [];
+  private tasks: Array<{ stop(): void }> = [];
   private lastProactiveMessageAt: Date | null = null;
 
   /** Populated during load() to support triggerTask() in tests */
@@ -89,16 +112,25 @@ export class CronScheduler extends EventEmitter {
     }
 
     for (const task of heartbeatTasks) {
-      this.logger.info(`Scheduling heartbeat task "${task.name}"`, { cron: task.cron });
-
       // Store for triggerTask() support
       this.taskDefs.set(task.name, { name: task.name, prompt: task.prompt });
+      // node-cron swallows a rejected callback; the interval timer would leave
+      // it unhandled. Log it on both paths instead.
+      const run = async () => {
+        try {
+          await this.runTask(task.name, task.prompt);
+        } catch (err) {
+          this.logger.error(`Heartbeat task "${task.name}" failed`, { error: (err as Error).message });
+        }
+      };
 
-      const scheduled = nodeCron.schedule(task.cron, async () => {
-        await this.runTask(task.name, task.prompt);
-      });
-
-      this.tasks.push(scheduled);
+      if (task.cron !== undefined) {
+        this.logger.info(`Scheduling heartbeat task "${task.name}"`, { cron: task.cron });
+        this.tasks.push(nodeCron.schedule(task.cron, run));
+      } else {
+        this.logger.info(`Scheduling heartbeat task "${task.name}"`, { intervalMs: task.intervalMs });
+        this.tasks.push(scheduleEvery(task.intervalMs, run));
+      }
     }
 
     this.logger.info(`Loaded ${this.tasks.length} heartbeat task(s)`, { agentId: this.agentId });
