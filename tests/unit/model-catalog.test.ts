@@ -394,10 +394,42 @@ describe('model catalog — fetch policy', () => {
       expect(String(warn.mock.calls[0][0])).toContain('did not settle');
       expect(String(warn.mock.calls[0][0])).not.toContain('proxy.example.com');
 
+      // Backs off instead of making every later spawn wait the deadline again.
+      await expect(fetchModelCatalog(STATIC)).resolves.toBeNull();
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      await jest.advanceTimersByTimeAsync(60_000);
       fetchMock.mockResolvedValueOnce(ok({ data: [{ id: 'live' }] }));
       const next = await fetchModelCatalog(STATIC);
       expect(fetchMock).toHaveBeenCalledTimes(2);
       expect(next!.map((m) => m.id)).toContain('live');
+    } finally {
+      warn.mockRestore();
+      jest.useRealTimers();
+    }
+  });
+
+  it('does not let a request abandoned at the deadline overwrite a newer cache entry', async () => {
+    jest.useFakeTimers();
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      process.env.ANTHROPIC_BASE_URL = 'https://proxy.example.com';
+      let settleLate!: (value: unknown) => void;
+      fetchMock.mockImplementationOnce(() => new Promise((resolve) => { settleLate = resolve; }));
+      const abandoned = fetchModelCatalog(STATIC);
+      await jest.advanceTimersByTimeAsync(10_000);
+      await expect(abandoned).resolves.toBeNull();
+
+      await jest.advanceTimersByTimeAsync(60_000);
+      fetchMock.mockResolvedValueOnce(ok({ data: [{ id: 'fresh' }] }));
+      expect((await fetchModelCatalog(STATIC))!.map((m) => m.id)).toContain('fresh');
+
+      settleLate(ok({ data: [{ id: 'old' }] }));
+      await jest.advanceTimersByTimeAsync(0);
+      const cached = await fetchModelCatalog(STATIC);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(cached!.map((m) => m.id)).toContain('fresh');
+      expect(cached!.map((m) => m.id)).not.toContain('old');
     } finally {
       warn.mockRestore();
       jest.useRealTimers();

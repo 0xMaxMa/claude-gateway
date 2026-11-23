@@ -62,6 +62,13 @@ let cache: CatalogCache | null = null;
 let inFlight: Promise<ModelConfig[] | null> | null = null;
 let inFlightKey: string | null = null;
 let warnedInsecureUrl = false;
+/**
+ * Key whose last request hit {@link CATALOG_DEADLINE_MS}, and until when it is
+ * skipped. Without this every later caller would wait the full deadline again and
+ * leave another fetch that never settles.
+ */
+let hungKey: string | null = null;
+let hungUntil = 0;
 
 /** Reset module state. Tests only — each case needs a clean cache. */
 export function resetModelCatalogCache(): void {
@@ -69,6 +76,8 @@ export function resetModelCatalogCache(): void {
   inFlight = null;
   inFlightKey = null;
   warnedInsecureUrl = false;
+  hungKey = null;
+  hungUntil = 0;
 }
 
 // Parsed `env` block of the Claude Code CLI config. The CLI applies that block
@@ -268,6 +277,7 @@ export async function fetchModelCatalog(
   const stale = cache && cache.key === key && now - cache.fetchedAt < CATALOG_STALE_MS ? cache.models : null;
 
   if (!base) return null; // standalone deployment — static list is the catalog
+  if (hungKey === key && Date.now() < hungUntil) return stale; // backing off after a hung request
 
   if (!baseUrlIsSecure(base)) {
     if (!warnedInsecureUrl) {
@@ -281,6 +291,7 @@ export async function fetchModelCatalog(
   }
 
   inFlightKey = key;
+  let abandoned = false;
   const attempt = (async (): Promise<ModelConfig[] | null> => {
     try {
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
@@ -296,7 +307,8 @@ export async function fetchModelCatalog(
       // Only a usable catalog is cached, and the cache stamp uses the same
       // clock the TTL check above read. Caching a failure would pin the
       // fallback for a full TTL after one blip.
-      if (parsed) cache = { models: parsed, fetchedAt: now, key };
+      // An abandoned request settling late must not overwrite what a newer one cached.
+      if (parsed && !abandoned) cache = { models: parsed, fetchedAt: now, key };
       return parsed ?? stale;
     } catch {
       return stale; // unreachable, timed out, or unparseable
@@ -304,7 +316,7 @@ export async function fetchModelCatalog(
   })();
   // Every task_spawn/subagent_spawn that names a model awaits this shared promise, so
   // it must settle even when the fetch ignores its abort signal (2026-11-20: one hung
-  // fetch blocked every spawn for hours). The abandoned fetch may still fill the cache.
+  // fetch blocked every spawn for hours). The key is then skipped for a TTL.
   let deadline: NodeJS.Timeout | undefined;
   const request: Promise<ModelConfig[] | null> = Promise.race([
     attempt,
@@ -316,8 +328,12 @@ export async function fetchModelCatalog(
           `[model-catalog] the catalog fetch did not settle within ${CATALOG_DEADLINE_MS} ms `
           + `despite its ${CATALOG_TIMEOUT_MS} ms abort signal; using the ${stale ? 'stale' : 'static'} model list.`,
         );
+        abandoned = true;
+        hungKey = key;
+        hungUntil = Date.now() + CATALOG_TTL_MS;
         resolve(stale);
       }, CATALOG_DEADLINE_MS);
+      deadline.unref?.();
     }),
   ]).finally(() => {
     clearTimeout(deadline);
