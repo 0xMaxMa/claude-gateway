@@ -1432,7 +1432,7 @@ bot.command('voices',async ctx=>{
 type TaskView = TaskDetail & {taskId:string;title:string;state:string;progress?:string;question?:string;updatedAt:number;startedAt?:number;finishedAt?:number;canStop:boolean}
 type TaskBrowser = {sessionId:string;task?:TaskView;tasks?:TaskView[];page?:number;pages?:number;total?:number}
 // Log why a callback-backed command failed, then tell the user whether the
-// agent is busy, restarting, or failed. The reply itself may fail too.
+// agent timed out, is restarting, or failed. The reply itself may fail too.
 // `failedReply` replaces the generic text when the agent answered with an error.
 async function replyCallbackFailure(ctx:Context,err:unknown,command:string,what:string,failedReply?:string) {
   const failure=classifyCallbackFailure(err)

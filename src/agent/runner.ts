@@ -113,7 +113,7 @@ const TOO_LARGE_HISTORY_LADDER: readonly number[] = [MAX_HISTORY_MESSAGES, 40, 3
 export const MAX_IMAGE_SIZE_BYTES = 10 * 1024 * 1024;
 
 export { DEFAULT_MODELS } from './model-registry';
-import { DEFAULT_MODELS, availableModels, selectableModels, findModel } from './model-registry';
+import { DEFAULT_MODELS, availableModels, availableModelsNow, selectableModels, findModel } from './model-registry';
 import { PSTACK_INSTALL_HINT, PSTACK_OFF_SETTINGS, PSTACK_PLUGIN_ID, pstackModels, pstackPluginInfo } from '../pstack/plugin-info';
 import { PstackConfigError, applySheetLines } from '../pstack/config';
 import { pstackPanelDefault, renderPstackSheet } from '../pstack/sheet';
@@ -1671,23 +1671,17 @@ export class AgentRunner extends EventEmitter {
 
     if (command === 'get_models') {
       // Live catalog first, static list as the fallback (issue #409). The
-      // picker is a UI action, so a slow or unreachable catalog must not hang
-      // it — fetchModelCatalog is bounded and never rejects.
-      void this.availableModels()
-        .then((availableModels) => {
-          const configuredIds = new Set((this.gatewayConfig.gateway.models ?? DEFAULT_MODELS).map(m => m.id));
-          const configured = availableModels.filter(m => configuredIds.has(m.id));
-          const live = availableModels.filter(m => !configuredIds.has(m.id));
-          respond({
-            models: availableModels.map(m => ({ id: m.id, label: m.label })),
-            configuredModels: configured.map(m => ({ id: m.id, label: m.label })),
-            liveModels: live.map(m => ({ id: m.id, label: m.label })),
-          });
-        })
-        // Without this the request would hang and the picker with it: the
-        // receiver is blocked on this response. Every other async branch in
-        // this handler answers on rejection too.
-        .catch((err) => respond({ success: false, error: String(err) }, 500));
+      // picker is a UI action, so it reads the cached catalog and never waits
+      // on the fetch: the receiver gives this callback 10 s.
+      const availableModels = this.availableModelsNow();
+      const configuredIds = new Set((this.gatewayConfig.gateway.models ?? DEFAULT_MODELS).map(m => m.id));
+      const configured = availableModels.filter(m => configuredIds.has(m.id));
+      const live = availableModels.filter(m => !configuredIds.has(m.id));
+      respond({
+        models: availableModels.map(m => ({ id: m.id, label: m.label })),
+        configuredModels: configured.map(m => ({ id: m.id, label: m.label })),
+        liveModels: live.map(m => ({ id: m.id, label: m.label })),
+      });
       return;
     }
 
@@ -3287,12 +3281,12 @@ export class AgentRunner extends EventEmitter {
       this.writeAutoForward(chatId, 'Use /models in a direct message with the bot to view available models.');
       return;
     }
-    this.writeAutoForward(chatId, (await this.modelList('Switch with /model <id or alias>')).text);
+    this.writeAutoForward(chatId, this.modelList('Switch with /model <id or alias>').text);
   }
 
   /** The /models list: configured models, then live-only ones, each marked when current. */
-  private async modelList(switchHint: string): Promise<{ text: string; models: Array<{ id: string; label: string; current: boolean }> }> {
-    const models = await this.availableModels();
+  private modelList(switchHint: string): { text: string; models: Array<{ id: string; label: string; current: boolean }> } {
+    const models = this.availableModelsNow();
     const configuredIds = new Set((this.gatewayConfig.gateway.models ?? DEFAULT_MODELS).map(m => m.id));
     const configured = models.filter(m => configuredIds.has(m.id));
     const live = models.filter(m => !configuredIds.has(m.id));
@@ -3338,7 +3332,7 @@ export class AgentRunner extends EventEmitter {
 
   private async pstackMenuState(): Promise<PstackMenuState> {
     const plugin = pstackPluginInfo();
-    return { block: this.agentConfig.pstack, plugin: plugin.installPath ? pstackModels(plugin.installPath) : undefined, models: await this.availableModels(), installHint: PSTACK_INSTALL_HINT };
+    return { block: this.agentConfig.pstack, plugin: plugin.installPath ? pstackModels(plugin.installPath) : undefined, models: this.availableModelsNow(), installHint: PSTACK_INSTALL_HINT };
   }
 
   /** Change the saved pstack block (`undefined` removes it) through the same path as the API. */
@@ -3475,7 +3469,7 @@ export class AgentRunner extends EventEmitter {
       context = { used: meta.lastInputTokens!, total: null, model: meta.model ?? this.agentConfig.claude.model };
     }
     if (!context) return {contextUsedPct:null,contextTokens:null,contextWindow:null,contextModel:null,text:'—'};
-    const total = context.model ? await this.dashboardContextWindow(context.model) : null;
+    const total = context.model ? this.dashboardContextWindow(context.model) : null;
     const pct = total && total > 0 ? Math.round(context.used / total * 100) : null;
     const format = (n:number) => n >= 1000000 ? `${Number((n/1000000).toFixed(2))}M` : n >= 1000 ? `${Number((n/1000).toFixed(2))}K` : String(n);
     return {contextUsedPct:pct,contextTokens:context.used,contextWindow:total,contextModel:context.model,
@@ -4190,6 +4184,9 @@ export class AgentRunner extends EventEmitter {
     await this.sweepStaleSessionDirs();
     await this.sessionOwners();
     await this.startCallbackServer();
+    // Status and listing commands read the cached catalog without waiting on
+    // it, so fetch it now rather than on the first /models after a restart.
+    this.availableModelsNow();
     if (this.agentConfig.telegram?.botToken) {
       this.receiver = new TelegramReceiver(
         this.agentConfig,
@@ -4848,8 +4845,9 @@ export class AgentRunner extends EventEmitter {
       idleTtlMs: this.agentConfig.orchestration?.tasks?.workerIdleTtlMs ?? ORCHESTRATION_DEFAULTS.tasks.workerIdleTtlMs };
   }
 
-  async dashboardContextWindow(model: string): Promise<number | null> {
-    const models = await this.availableModels();
+  /** Never waits on the catalog fetch: `/session` and the dashboard only display this. */
+  dashboardContextWindow(model: string): number | null {
+    const models = this.availableModelsNow();
     return models.find(m => m.id === model)?.contextWindow
       ?? (this.gatewayConfig.gateway.models ?? DEFAULT_MODELS).find(m => m.id === model)?.contextWindow
       ?? null;
@@ -5939,7 +5937,7 @@ export class AgentRunner extends EventEmitter {
         else if (chosen === 'cancel') { result = { cancelled: true }; responseText = 'Cancelled.'; }
         else ({ result, responseText } = await contextCommand(chosen));
       } else if (cmd === '/models') {
-        const list = await this.modelList('Change the model with the model picker or PUT /api/v1/agents/:agentId/model.');
+        const list = this.modelList('Change the model with the model picker or PUT /api/v1/agents/:agentId/model.');
         result = { model: this.agentConfig.claude.model, models: list.models };
         responseText = list.text;
       } else if (cmd === '/new' && opts?.implicitSession) {
@@ -6142,6 +6140,11 @@ export class AgentRunner extends EventEmitter {
     return availableModels(this.gatewayConfig.gateway.models);
   }
 
+  /** The cached catalog or the configured list, for paths that must not wait on the fetch. */
+  private availableModelsNow(): ModelConfig[] {
+    return availableModelsNow(this.gatewayConfig.gateway.models);
+  }
+
   /**
    * Context window for a model id. Resolving this through the live catalog is
    * what keeps `/session`'s "context used" percentage and `/compact`'s window
@@ -6149,6 +6152,10 @@ export class AgentRunner extends EventEmitter {
    * through to the 200k default no matter how large its real window.
    */
   private async contextWindowFor(modelId: string, requireKnown = false): Promise<number> {
+    // Waits on the catalog only for a model the cache and the configured list
+    // do not describe; a configured model must not hold /compact behind a hung fetch.
+    const cached = this.availableModelsNow().find((m) => m.id === modelId)?.contextWindow;
+    if (cached !== undefined) return cached;
     const models = await this.availableModels();
     // Configured list second, not just as the catalog's fallback: the catalog
     // *replaces* the list rather than merging with it, so a configured model

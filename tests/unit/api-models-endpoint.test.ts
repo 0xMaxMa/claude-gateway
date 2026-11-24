@@ -12,6 +12,7 @@ import request from 'supertest';
 import { createApiRouter } from '../../src/api/router';
 import { resetModelCatalogCache, resetSettingsEnvCache } from '../../src/agent/model-catalog';
 import { DEFAULT_MODELS } from '../../src/agent/runner';
+import { waitForCondition } from '../helpers/wait-for';
 import type { AgentConfig, ApiKey, ModelConfig } from '../../src/types';
 
 const AGENT_ID = 'alfred';
@@ -88,11 +89,20 @@ describe('GET /api/v1/models', () => {
       json: async () => ({ data: [{ id: 'byok/some-model', display_name: 'Some BYOK Model' }] }),
     });
 
-    const res = await request(buildApp(STATIC_MODELS)).get('/api/v1/models').set(AUTH);
+    const app = buildApp(STATIC_MODELS);
+    // The first request never waits on the fetch: it answers from the
+    // configured list and refreshes the catalog in the background.
+    const first = await request(app).get('/api/v1/models').set(AUTH);
+    expect(first.body.models.map((m: { id: string }) => m.id)).toEqual(['claude-sonnet-4-6']);
+    await waitForCondition(() => fetchMock.mock.results.length > 0);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const res = await request(app).get('/api/v1/models').set(AUTH);
 
     expect(res.status).toBe(200);
     expect(res.body.models.map((m: { id: string }) => m.id)).toEqual(['claude-sonnet-4-6', 'byok/some-model']);
     expect(res.body.models[1].name).toBe('Some BYOK Model');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it('falls back to the configured list when the catalog is unreachable', async () => {
@@ -133,8 +143,13 @@ describe('GET /api/v1/models', () => {
       json: async () => ({ data: [{ id: oneMillion.id, display_name: oneMillion.label }] }),
     });
 
-    const res = await request(buildApp()).get('/api/v1/models').set(AUTH);
+    const app = buildApp();
+    await request(app).get('/api/v1/models').set(AUTH); // starts the background refresh
+    await waitForCondition(() => fetchMock.mock.results.length > 0);
+    await new Promise((resolve) => setImmediate(resolve));
+    const res = await request(app).get('/api/v1/models').set(AUTH); // reads what it cached
 
+    expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(res.body.models[0]).toEqual({
       id: oneMillion.id,
       name: oneMillion.label,

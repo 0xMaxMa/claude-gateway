@@ -99,10 +99,10 @@ describe('retired GPT defaults in config migration', () => {
     const runner = {
       gatewayConfig: { gateway: { models } },
       agentConfig: { claude: { model: migrated.agents[0].claude.model } },
-      availableModels: async () => models,
+      availableModelsNow: () => models,
     } as unknown as AgentRunner;
-    const listed = await (AgentRunner.prototype as unknown as {
-      modelList: (this: AgentRunner, hint: string) => Promise<{ text: string; models: Array<{ id: string }> }>;
+    const listed = (AgentRunner.prototype as unknown as {
+      modelList: (this: AgentRunner, hint: string) => { text: string; models: Array<{ id: string }> };
     }).modelList.call(runner, 'Switch with /model <id or alias>');
     for (const id of ids) expect(listed.text).toContain('`' + id + '`');
     for (const { id } of listed.models) {

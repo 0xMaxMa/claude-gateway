@@ -1,6 +1,8 @@
 /** Classifies a failed agent callback (or the Telegram call after it) so a
  * command handler can log why it failed and tell the user what to expect. */
-export type CallbackFailureKind = 'busy' | 'unavailable' | 'failed';
+/** `timeout` means only that no answer came in time. The agent callback has no
+ * busy signal, so the reply must not say why. */
+export type CallbackFailureKind = 'timeout' | 'unavailable' | 'failed';
 
 /** A non-OK HTTP response from the agent callback server. */
 export class CallbackHttpError extends Error {
@@ -65,7 +67,7 @@ export function classifyCallbackFailure(error: unknown): CallbackFailure {
   // Never log a callback URL; the message is bounded so a large body cannot flood the log.
   const message = raw.replace(/https?:\/\/\S+/g, '[url]').replace(/\s+/g, ' ').slice(0, 160);
   // /command answers only 200/400/500, so status never means busy or restarting.
-  const kind: CallbackFailureKind = timeout ? 'busy'
+  const kind: CallbackFailureKind = timeout ? 'timeout'
     : callbackCode !== undefined && UNREACHABLE.has(callbackCode) ? 'unavailable'
     : 'failed';
   return { kind, name, timeout, ...(status !== undefined ? { status } : {}), ...(telegramCode !== undefined ? { telegramCode } : {}), ...(code ? { code } : {}), message };
@@ -81,7 +83,7 @@ export function formatCallbackFailure(command: string, f: CallbackFailure): stri
 export function callbackFailureReply(kind: CallbackFailureKind, what: string, command: string, telegramCode?: number): string {
   if (telegramCode === 429) return `Telegram is rate-limiting this chat. Please wait a minute, then try /${command} again.`;
   if (telegramCode !== undefined) return `Telegram rejected the /${command} reply (error ${telegramCode}). Please try /${command} again; if it keeps failing, report it.`;
-  if (kind === 'busy') return `The agent is busy and did not answer in time. Please try /${command} again in a moment.`;
+  if (kind === 'timeout') return `The agent did not answer in time. Please try /${command} again in a moment.`;
   if (kind === 'unavailable') return `The agent is restarting or unavailable. Please try /${command} again shortly.`;
   return `Could not load ${what}. Please try /${command} again.`;
 }

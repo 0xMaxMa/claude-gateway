@@ -22,8 +22,13 @@ import type { ModelConfig } from '../types';
 /** A stale catalog beats a hung picker — the fetch sits in front of a UI action. */
 const CATALOG_TIMEOUT_MS = 5_000;
 
-/** Hard bound on one shared catalog request, for a fetch whose abort signal never fires. */
-const CATALOG_DEADLINE_MS = 2 * CATALOG_TIMEOUT_MS;
+/**
+ * Hard bound on one shared catalog request, for a fetch whose abort signal never
+ * fires. Kept under the 10 s the channel receivers give a command callback, so
+ * a caller that does await the catalog (`/model <name>`, `task_spawn` with a
+ * model) still answers before its receiver gives up on it.
+ */
+const CATALOG_DEADLINE_MS = CATALOG_TIMEOUT_MS + 1_000;
 
 /**
  * How long a successful fetch is reused. The picker calls this on every press
@@ -256,6 +261,27 @@ export function parseModelCatalog(body: unknown, fallback: ModelConfig[]): Model
 
 // ── fetch ───────────────────────────────────────────────────────────────────
 
+/** One cache entry per endpoint and configured list: the list supplies alias/contextWindow. */
+function catalogKey(base: string, fallback: ModelConfig[]): string {
+  return `${base}\0${JSON.stringify(fallback)}`;
+}
+
+/**
+ * The catalog as last fetched, without waiting on the network, or null when no
+ * usable one is cached. Starts a background refresh when the cached copy is
+ * missing or past its TTL.
+ *
+ * For readers that only display models (`/session`, `/models`, the picker,
+ * `GET /api/v1/models`): their receivers time out after 10 s, and a hung
+ * catalog fetch used to hold every one of them for that long.
+ */
+export function cachedModelCatalog(fallback: ModelConfig[], now: number = Date.now()): ModelConfig[] | null {
+  const key = catalogKey(catalogBaseUrl(now), fallback);
+  const current = cache && cache.key === key ? cache : null;
+  if (!current || now - current.fetchedAt >= CATALOG_TTL_MS) void fetchModelCatalog(fallback, now);
+  return current && now - current.fetchedAt < CATALOG_STALE_MS ? current.models : null;
+}
+
 /**
  * Fetch the live catalog, or return null to mean "use the static list".
  *
@@ -269,7 +295,7 @@ export async function fetchModelCatalog(
   now: number = Date.now(),
 ): Promise<ModelConfig[] | null> {
   const base = catalogBaseUrl(now);
-  const key = `${base} ${JSON.stringify(fallback)}`;
+  const key = catalogKey(base, fallback);
   if (cache && cache.key === key && now - cache.fetchedAt < CATALOG_TTL_MS) return cache.models;
   if (inFlight && inFlightKey === key) return inFlight;
 

@@ -28,7 +28,7 @@ import { readTelegramAccess as readTelegramAccessFile, telegramStateDir, type Te
 import { wizardStore } from './wizard-state';
 import { getPendingSenders, clearPendingSender } from './pending-senders';
 import { buildGenerationPrompt, parseGeneratedFiles, buildRewriteDescriptionPrompt } from '../agent/create-agent-prompts';
-import { availableModels } from '../agent/model-registry';
+import { availableModelsNow } from '../agent/model-registry';
 import {
   DEFAULT_WHATSAPP_ACCOUNT_ID,
   WHATSAPP_ACCOUNT_ID_RE,
@@ -1030,17 +1030,19 @@ export function createApiRouter(
   /**
    * GET /api/v1/models
    *
-   * List the models this gateway offers. Fetches the live catalog when a base
-   * URL is configured and falls back to the gateway's configured/static list —
-   * without the fetch this endpoint could only ever report what was written
-   * into config.json at provisioning time (issue #409).
+   * List the models this gateway offers: the cached live catalog when a base
+   * URL is configured, else the gateway's configured/static list — without the
+   * catalog this endpoint could only ever report what was written into
+   * config.json at provisioning time (issue #409). A stale or missing catalog
+   * is refreshed in the background, so a hung catalog fetch never holds the
+   * response.
    */
-  router.get('/v1/models', auth, async (_req: Request, res: Response) => {
-    // availableModels() falls back to DEFAULT_MODELS, never `[]`: the
+  router.get('/v1/models', auth, (_req: Request, res: Response) => {
+    // availableModelsNow() falls back to DEFAULT_MODELS, never `[]`: the
     // catalog cache inherits alias/contextWindow/multiplier from whichever
     // caller's list populated it first, so this route must pass the same list
     // the runner does or one request here degrades the picker for 60 seconds.
-    const available = await availableModels(typeof models==='function'?models():models);
+    const available = availableModelsNow(typeof models==='function'?models():models);
     res.json({ models: available.map((m) => ({ id: m.id, name: m.label, alias: m.alias, contextWindow: m.contextWindow, multiplier: m.multiplier ?? 1 })) });
   });
 

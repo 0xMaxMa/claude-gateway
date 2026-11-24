@@ -5,7 +5,7 @@ import { AgentRunner } from '../../src/agent/runner';
 const report = { sessionId: 'session', coverage: 'recorded-turns-only', totals: { agentTokens: 0, workerTokens: 0, totalTokens: 0 }, turns: [] };
 function setup(keyless = false, bind = '127.0.0.1') {
   const getTokenReport = jest.fn().mockResolvedValue(report);
-  const dashboardContextWindow=jest.fn().mockResolvedValue(32768);
+  const dashboardContextWindow=jest.fn().mockReturnValue(32768);
   const isSessionCompacting=jest.fn().mockReturnValue(false);
   const router = new GatewayRouter(new Map([['agent', { getTokenReport, dashboardContextWindow, isSessionCompacting } as unknown as AgentRunner]]), new Map(), undefined, {
     gateway: { bind, logDir: '/tmp', timezone: 'UTC', api: { keys: keyless ? [] : [{ key: 'admin-secret', admin: true, agents: '*' }, { key: 'scoped-secret', agents: ['agent'] }] } }, agents: [],
@@ -79,11 +79,11 @@ test.each(['/dashboard/token-report','/dashboard/token-report/'])('proxy-injecte
   expect(getTokenReport).not.toHaveBeenCalled();
 });
 
-test('dashboard context capacity resolves catalog first, configured models second, unknown as missing', async()=>{
- const context:any={availableModels:async()=>[{id:'catalog-model',contextWindow:32768}],gatewayConfig:{gateway:{models:[{id:'configured-model',contextWindow:64000}]}}};
- expect(await AgentRunner.prototype.dashboardContextWindow.call(context,'catalog-model')).toBe(32768);
- expect(await AgentRunner.prototype.dashboardContextWindow.call(context,'configured-model')).toBe(64000);
- expect(await AgentRunner.prototype.dashboardContextWindow.call(context,'unknown-model')).toBeNull();
+test('dashboard context capacity resolves catalog first, configured models second, unknown as missing', ()=>{
+ const context:any={availableModelsNow:()=>[{id:'catalog-model',contextWindow:32768}],gatewayConfig:{gateway:{models:[{id:'configured-model',contextWindow:64000}]}}};
+ expect(AgentRunner.prototype.dashboardContextWindow.call(context,'catalog-model')).toBe(32768);
+ expect(AgentRunner.prototype.dashboardContextWindow.call(context,'configured-model')).toBe(64000);
+ expect(AgentRunner.prototype.dashboardContextWindow.call(context,'unknown-model')).toBeNull();
 });
 
 test('JSON report uses resolved capacity instead of guessing from the model ID',async()=>{

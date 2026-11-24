@@ -15,6 +15,7 @@ import path from 'path';
 import {
   parseModelCatalog,
   fetchModelCatalog,
+  cachedModelCatalog,
   catalogBaseUrl,
   baseUrlIsSecure,
   resetModelCatalogCache,
@@ -187,6 +188,33 @@ describe('model catalog — fetch policy', () => {
   });
 
   const ok = (body: unknown) => ({ ok: true, json: async () => body });
+
+  it('reads the cache without waiting, refreshing it in the background', async () => {
+    process.env.ANTHROPIC_BASE_URL = 'https://proxy.example.com';
+    let release!: (v: unknown) => void;
+    fetchMock.mockImplementationOnce(() => new Promise((r) => { release = r; }));
+    const t0 = Date.now();
+
+    // Nothing cached: answers null at once and starts one shared request.
+    expect(cachedModelCatalog(STATIC, t0)).toBeNull();
+    expect(cachedModelCatalog(STATIC, t0)).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    release(ok({ data: [{ id: 'live' }] }));
+    await expect(fetchModelCatalog(STATIC, t0)).resolves.toEqual(expect.arrayContaining([expect.objectContaining({ id: 'live' })]));
+    expect(cachedModelCatalog(STATIC, t0 + 1)!.map((m) => m.id)).toContain('live');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // Past the TTL: still answers with the stale copy while a refresh runs.
+    let releaseRefresh!: (v: unknown) => void;
+    fetchMock.mockImplementationOnce(() => new Promise((r) => { releaseRefresh = r; }));
+    expect(cachedModelCatalog(STATIC, t0 + 61_000)!.map((m) => m.id)).toContain('live');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    // Past the stale bound the configured list takes over (null).
+    expect(cachedModelCatalog(STATIC, t0 + 61 * 60_000)).toBeNull();
+    releaseRefresh({ ok: false });
+    await fetchModelCatalog(STATIC, t0 + 61_000); // settles the shared refresh and its deadline timer
+  });
 
   it('does not fetch at all when no base URL is configured', async () => {
     expect(catalogBaseUrl()).toBe('');
@@ -385,7 +413,8 @@ describe('model catalog — fetch policy', () => {
       fetchMock.mockImplementationOnce(() => new Promise(() => {}));
 
       const hung = [fetchModelCatalog(STATIC), fetchModelCatalog(STATIC)];
-      await jest.advanceTimersByTimeAsync(9_999);
+      // The 5 s abort signal plus 1 s of grace: under the 10 s receiver callback timeout.
+      await jest.advanceTimersByTimeAsync(5_999);
       expect(warn).not.toHaveBeenCalled();
       await jest.advanceTimersByTimeAsync(1);
       await expect(Promise.all(hung)).resolves.toEqual([null, null]);
