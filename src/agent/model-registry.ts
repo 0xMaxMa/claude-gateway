@@ -92,6 +92,11 @@ export function availableModelsNow(configured: ModelConfig[] | undefined): Model
   return cachedModelCatalog(staticModels) ?? staticModels;
 }
 
+/** Start fetching the catalog without waiting for it, so the first status read after a start has it. */
+export function prefetchModelCatalog(configured: ModelConfig[] | undefined): void {
+  void fetchModelCatalog(configured ?? DEFAULT_MODELS);
+}
+
 /**
  * Models a name may resolve to: what the catalog offers, plus the configured
  * list.

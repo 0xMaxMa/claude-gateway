@@ -216,6 +216,18 @@ describe('model catalog — fetch policy', () => {
     await fetchModelCatalog(STATIC, t0 + 61_000); // settles the shared refresh and its deadline timer
   });
 
+  it('keeps a cached catalog per configured list, so two callers do not evict each other', async () => {
+    process.env.ANTHROPIC_BASE_URL = 'https://proxy.example.com';
+    fetchMock.mockResolvedValue(ok({ data: [{ id: 'live' }] }));
+    const other = STATIC.slice(0, 1);
+    await fetchModelCatalog(STATIC);
+    await fetchModelCatalog(other);
+
+    expect(cachedModelCatalog(STATIC)!.map((m) => m.id)).toContain('live');
+    expect(cachedModelCatalog(other)!.map((m) => m.id)).toContain('live');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it('does not fetch at all when no base URL is configured', async () => {
     expect(catalogBaseUrl()).toBe('');
     await expect(fetchModelCatalog(STATIC)).resolves.toBeNull();
@@ -413,8 +425,8 @@ describe('model catalog — fetch policy', () => {
       fetchMock.mockImplementationOnce(() => new Promise(() => {}));
 
       const hung = [fetchModelCatalog(STATIC), fetchModelCatalog(STATIC)];
-      // The 5 s abort signal plus 1 s of grace: under the 10 s receiver callback timeout.
-      await jest.advanceTimersByTimeAsync(5_999);
+      // The 5 s abort signal plus 2 s of grace: under the 10 s receiver callback timeout.
+      await jest.advanceTimersByTimeAsync(6_999);
       expect(warn).not.toHaveBeenCalled();
       await jest.advanceTimersByTimeAsync(1);
       await expect(Promise.all(hung)).resolves.toEqual([null, null]);

@@ -113,7 +113,7 @@ const TOO_LARGE_HISTORY_LADDER: readonly number[] = [MAX_HISTORY_MESSAGES, 40, 3
 export const MAX_IMAGE_SIZE_BYTES = 10 * 1024 * 1024;
 
 export { DEFAULT_MODELS } from './model-registry';
-import { DEFAULT_MODELS, availableModels, availableModelsNow, selectableModels, findModel } from './model-registry';
+import { DEFAULT_MODELS, availableModels, availableModelsNow, prefetchModelCatalog, selectableModels, findModel } from './model-registry';
 import { PSTACK_INSTALL_HINT, PSTACK_OFF_SETTINGS, PSTACK_PLUGIN_ID, pstackModels, pstackPluginInfo } from '../pstack/plugin-info';
 import { PstackConfigError, applySheetLines } from '../pstack/config';
 import { pstackPanelDefault, renderPstackSheet } from '../pstack/sheet';
@@ -3330,9 +3330,11 @@ export class AgentRunner extends EventEmitter {
     return pstackMenuText(await this.pstackMenuState(), PSTACK_SETUP_USAGE);
   }
 
+  // Awaits the catalog: the menu validates taps against this list, and its
+  // receiver allows 20 s, well over the catalog deadline.
   private async pstackMenuState(): Promise<PstackMenuState> {
     const plugin = pstackPluginInfo();
-    return { block: this.agentConfig.pstack, plugin: plugin.installPath ? pstackModels(plugin.installPath) : undefined, models: this.availableModelsNow(), installHint: PSTACK_INSTALL_HINT };
+    return { block: this.agentConfig.pstack, plugin: plugin.installPath ? pstackModels(plugin.installPath) : undefined, models: await this.availableModels(), installHint: PSTACK_INSTALL_HINT };
   }
 
   /** Change the saved pstack block (`undefined` removes it) through the same path as the API. */
@@ -4186,7 +4188,7 @@ export class AgentRunner extends EventEmitter {
     await this.startCallbackServer();
     // Status and listing commands read the cached catalog without waiting on
     // it, so fetch it now rather than on the first /models after a restart.
-    this.availableModelsNow();
+    prefetchModelCatalog(this.gatewayConfig.gateway.models);
     if (this.agentConfig.telegram?.botToken) {
       this.receiver = new TelegramReceiver(
         this.agentConfig,
