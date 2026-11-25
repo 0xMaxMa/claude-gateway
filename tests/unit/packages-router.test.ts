@@ -16,8 +16,8 @@
  * T13: POST /api/v1/packages/claude-gateway/update — registry unavailable → 503
  * T14: POST /api/v1/packages/claude-code/update — native updater, warning: null
  * T15: POST /api/v1/packages/claude-gateway/update — 403 when non-admin key
- * T16: stale npm temp dir exists → pre-clean removes it, update succeeds
- * T17: ENOTEMPTY on first install → temp + package dirs removed, retry succeeds
+ * T16: the npm install runs inside the staging-dir recovery (covered for real in
+ *      npm-staging-recovery.test.ts) and its error reaches the response
  * T18: concurrent update request → 409 while first is in flight
  * T19: non-ENOTEMPTY install failure → 500, no retry
  *
@@ -38,22 +38,47 @@ import express from 'express';
 import request from 'supertest';
 import { ApiKey } from '../../src/types';
 
-// Must mock child_process and fs before importing the module under test
-jest.mock('child_process', () => ({ execSync: jest.fn() }));
-jest.mock('fs', () => ({ readdirSync: jest.fn(), rmSync: jest.fn() }));
+// Must mock child_process and fs before importing the module under test.
+// `execFile` (the async npm install / `claude update`) is routed through the
+// `execSync` mock below, so no test can run a real package command.
+jest.mock('child_process', () => {
+  const execSync = jest.fn();
+  return {
+    execSync,
+    execFile: jest.fn(
+      (file: string, args: string[], _opts: unknown, cb: (err: unknown, stdout: string, stderr: string) => void) => {
+        try {
+          cb(null, String(execSync([file, ...args].join(' '), {}) ?? ''), '');
+        } catch (err) {
+          cb(err, '', '');
+        }
+      },
+    ),
+  };
+});
+jest.mock('fs', () => ({ readdirSync: jest.fn(), rmSync: jest.fn(), renameSync: jest.fn(), existsSync: jest.fn() }));
+// The staging-dir recovery itself runs against real npm in a temp prefix in
+// npm-staging-recovery.test.ts; here it just runs the update it is given.
+jest.mock('../../src/packages/npm-staging', () => ({
+  npmCopyPresent: jest.fn(() => false),
+  updateWithStagingRecovery: jest.fn(async ({ update }: { update: () => Promise<string | null> }) => {
+    const error = await update();
+    return error === null ? { error: null, version: '0.0.0' } : { error };
+  }),
+}));
 jest.mock('../../src/shutdown-signals', () => ({
   ...jest.requireActual('../../src/shutdown-signals'),
   requestExitCode: jest.fn(),
 }));
 
 import { execSync } from 'child_process';
-import { readdirSync, rmSync } from 'fs';
+import { readdirSync } from 'fs';
 import { createPackagesRouter, _resetCache, _resetLock, _setLock } from '../../src/api/packages';
 import { PACKAGES, getTargetVersion, installNpmVersion } from '../../src/packages/registry';
+import { updateWithStagingRecovery } from '../../src/packages/npm-staging';
 import { EX_TEMPFAIL, requestExitCode } from '../../src/shutdown-signals';
 
 const mockReaddirSync = readdirSync as jest.MockedFunction<typeof readdirSync>;
-const mockRmSync = rmSync as jest.MockedFunction<typeof rmSync>;
 const mockRequestExitCode = requestExitCode as jest.MockedFunction<typeof requestExitCode>;
 
 const mockExecSync = execSync as jest.MockedFunction<typeof execSync>;
@@ -438,85 +463,29 @@ describe('T7-T15: POST /api/v1/packages/:name/update', () => {
 const NPM_ROOT = '/fake/npm/root';
 
 describe('T16-T19: ENOTEMPTY recovery & concurrency lock', () => {
-  it('T16: stale npm temp dir exists → pre-clean removes it, update succeeds', async () => {
-    delete process.env.INVOCATION_ID;
-    delete process.env.PM2_HOME;
-    delete process.env.pm_id;
-
-    let listCount = 0;
+  it('T16: the install runs inside the staging-dir recovery and an ENOTEMPTY it cannot fix reaches the response', async () => {
     mockExecSync.mockImplementation((cmd: unknown) => {
       const cmdStr = cmd as string;
       if (cmdStr.includes('npm root -g')) return `${NPM_ROOT}\n`;
       if (cmdStr.includes('npm list')) {
-        listCount++;
-        const version = listCount === 1 ? '1.0.5' : '1.1.0';
-        return JSON.stringify({ dependencies: { '@0xmaxma/claude-gateway': { version } } });
-      }
-      // npm install — succeed
-      return '';
-    });
-    mockFetch({ '@0xmaxma/claude-gateway': '1.1.0' });
-
-    // Simulate stale temp dir alongside the real package dir
-    mockReaddirSync.mockReturnValue(['claude-gateway', '.claude-gateway-O5kzWOwo'] as unknown as ReturnType<typeof readdirSync>);
-    mockRmSync.mockImplementation(() => undefined);
-
-    const res = await request(makeApp())
-      .post('/api/v1/packages/claude-gateway/update')
-      .set('X-Api-Key', ADMIN_KEY);
-
-    expect(res.status).toBe(200);
-    expect(res.body.updated).toBe(true);
-
-    // rmSync called for the stale temp entry only (not the real package dir in pre-clean)
-    const rmCalls = mockRmSync.mock.calls.map((c) => c[0] as string);
-    expect(rmCalls.some((p) => p.includes('.claude-gateway-O5kzWOwo'))).toBe(true);
-    expect(rmCalls.every((p) => !p.endsWith('/claude-gateway'))).toBe(true);
-  });
-
-  it('T17: ENOTEMPTY on first install → temp + package dirs removed, retry succeeds', async () => {
-    let installAttempt = 0;
-    let listCount = 0;
-    mockExecSync.mockImplementation((cmd: unknown) => {
-      const cmdStr = cmd as string;
-      if (cmdStr.includes('npm root -g')) return `${NPM_ROOT}\n`;
-      if (cmdStr.includes('npm list')) {
-        listCount++;
-        const version = listCount === 1 ? '1.0.5' : '1.1.0';
-        return JSON.stringify({ dependencies: { '@0xmaxma/claude-gateway': { version } } });
+        return JSON.stringify({ dependencies: { '@0xmaxma/claude-gateway': { version: '1.0.5' } } });
       }
       if (cmdStr.includes('npm install')) {
-        installAttempt++;
-        if (installAttempt === 1) {
-          const err = Object.assign(new Error('ENOTEMPTY'), {
-            stderr: Buffer.from(
-              'npm error code ENOTEMPTY\nnpm error syscall rename\nnpm error path /fake/npm/root/@0xmaxma/claude-gateway',
-            ),
-          });
-          throw err;
-        }
-        // Retry succeeds
-        return '';
+        throw Object.assign(new Error('ENOTEMPTY'), { stderr: Buffer.from('npm error code ENOTEMPTY') });
       }
       return '{}';
     });
     mockFetch({ '@0xmaxma/claude-gateway': '1.1.0' });
 
-    mockReaddirSync.mockReturnValue(['.claude-gateway-O5kzWOwo'] as unknown as ReturnType<typeof readdirSync>);
-    mockRmSync.mockImplementation(() => undefined);
-
     const res = await request(makeApp())
       .post('/api/v1/packages/claude-gateway/update')
       .set('X-Api-Key', ADMIN_KEY);
 
-    expect(res.status).toBe(200);
-    expect(res.body.updated).toBe(true);
-    expect(installAttempt).toBe(2);
-
-    // Stale temp dir and package dir both removed before retry
-    const rmCalls = mockRmSync.mock.calls.map((c) => c[0] as string);
-    expect(rmCalls.some((p) => p.includes('.claude-gateway-O5kzWOwo'))).toBe(true);
-    expect(rmCalls.some((p) => p.endsWith('/claude-gateway'))).toBe(true);
+    expect(res.status).toBe(500);
+    expect(res.body.error).toContain('ENOTEMPTY');
+    expect(updateWithStagingRecovery).toHaveBeenCalledWith(
+      expect.objectContaining({ npmRoot: NPM_ROOT, packageName: '@0xmaxma/claude-gateway', binName: 'claude-gateway' }),
+    );
   });
 
   it('T18: concurrent update request → 409 while first is in flight', async () => {
@@ -908,8 +877,8 @@ describe('getTargetVersion / installNpmVersion', () => {
     await expect(getTargetVersion(PACKAGES['claude-code'])).resolves.toEqual({ version: '2.2.0', channel: 'latest' });
   });
 
-  it('refuses to shell out with an invalid version', () => {
-    expect(installNpmVersion('@0xmaxma/claude-gateway', '1.0.0; rm -rf ~')).toMatch(/invalid version/);
+  it('refuses to shell out with an invalid version', async () => {
+    await expect(installNpmVersion('@0xmaxma/claude-gateway', '1.0.0; rm -rf ~')).resolves.toMatch(/invalid version/);
     expect(mockExecSync).not.toHaveBeenCalledWith(expect.stringContaining('npm install'), expect.anything());
   });
 });

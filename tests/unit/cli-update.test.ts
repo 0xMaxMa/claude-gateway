@@ -47,8 +47,8 @@ function setTty(value: boolean): void {
 
 beforeEach(() => {
   jest.clearAllMocks();
-  mockInstall.mockReturnValue(null);
-  mockNative.mockReturnValue(null);
+  mockInstall.mockResolvedValue(null);
+  mockNative.mockResolvedValue({ error: null, version: '2.1.207' });
   stdout = [];
   stderr = [];
   outSpy = jest.spyOn(process.stdout, 'write').mockImplementation((chunk: string | Uint8Array) => {
@@ -196,7 +196,7 @@ describe('update — install path', () => {
   it('surfaces an install failure instead of reporting success', async () => {
     mockResolveCurrent.mockReturnValue('1.7.9');
     mockGetTarget.mockResolvedValue({ version: '1.8.0', channel: 'stable' });
-    mockInstall.mockReturnValue('npm ERR! EACCES');
+    mockInstall.mockResolvedValue('npm ERR! EACCES');
 
     const code = await runUpdate('claude-gateway', [], { yes: true });
 
@@ -219,7 +219,8 @@ describe('claude — the Claude Code binary', () => {
   });
 
   it('`claude update` uses the native updater, never npm install -g', async () => {
-    mockResolveCurrent.mockReturnValueOnce('2.1.207').mockReturnValueOnce('2.2.0');
+    mockResolveCurrent.mockReturnValue('2.1.207');
+    mockNative.mockResolvedValue({ error: null, version: '2.2.0' });
     mockGetTarget.mockResolvedValue({ version: '2.2.0', channel: 'stable' });
 
     const code = await runClaude(['update'], { yes: true });
@@ -228,6 +229,27 @@ describe('claude — the Claude Code binary', () => {
     expect(mockNative).toHaveBeenCalled();
     expect(mockInstall).not.toHaveBeenCalled();
     expect(JSON.parse(stdout.join('')).to).toBe('2.2.0');
+  });
+
+  it('reports the version the updater verified, not what PATH `claude` says (#675)', async () => {
+    // PATH `claude` can be a wrapper running a leftover staging copy.
+    mockResolveCurrent.mockReturnValue('2.1.207');
+    mockNative.mockResolvedValue({ error: null, version: '2.2.0' });
+    mockGetTarget.mockResolvedValue({ version: '2.2.0', channel: 'stable' });
+
+    expect(await runClaude(['update'], { yes: true })).toBe(0);
+    expect(JSON.parse(stdout.join(''))).toMatchObject({ from: '2.1.207', to: '2.2.0', updated: true });
+    expect(mockResolveCurrent).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails (exit 1) with the recovery error when the update cannot be verified (#675)', async () => {
+    mockResolveCurrent.mockReturnValue('2.1.207');
+    mockNative.mockResolvedValue({ error: 'update completed but /x/@anthropic-ai/claude-code is not runnable' });
+    mockGetTarget.mockResolvedValue({ version: '2.2.0', channel: 'stable' });
+
+    expect(await runClaude(['update'], { yes: true })).toBe(1);
+    expect(stderr.join('')).toContain('Update failed: update completed but /x/@anthropic-ai/claude-code is not runnable');
+    expect(stdout.join('')).toBe('');
   });
 
   it('reports honestly when the native updater is a no-op', async () => {
@@ -268,9 +290,9 @@ describe('claude — the Claude Code binary', () => {
 });
 
 describe('registry runNativeUpdate guard', () => {
-  it('refuses a package with no native updater instead of shelling out', () => {
+  it('refuses a package with no native updater instead of shelling out', async () => {
     const actual = jest.requireActual('../../src/packages/registry') as typeof import('../../src/packages/registry');
-    const err = actual.runNativeUpdate({ npm: '@scope/pkg', channel: 'latest', detect: 'npm', update: 'native' });
-    expect(err).toMatch(/no native updater/);
+    const result = await actual.runNativeUpdate({ npm: '@scope/pkg', channel: 'latest', detect: 'npm', update: 'native' }, '1.0.0');
+    expect(result.error).toMatch(/no native updater/);
   });
 });

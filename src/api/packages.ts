@@ -127,27 +127,28 @@ export function createPackagesRouter(apiKeys?: ApiKey[]): Router {
 
     isUpdating = true;
     try {
-      // Native-installer packages (e.g. claude-code) update the binary on PATH
-      // via their own updater. npm install -g would write a separate npm copy
-      // that isn't the running binary, so it must not be used here.
+      // Native-updater packages (e.g. claude-code): runNativeUpdate uses the
+      // package's own updater for a native install and npm (with the stale
+      // staging-dir recovery) for an npm-global one, so an `npm install -g`
+      // never writes a second copy beside a native install.
       if (config.update === 'native' && config.bin) {
-        const updateErr = runNativeUpdate(config);
-        if (updateErr !== null) {
-          res.status(500).json({ error: updateErr });
+        const result = await runNativeUpdate(config, target);
+        if (result.error !== null) {
+          res.status(500).json({ error: result.error });
           return;
         }
 
-        // Invalidate version cache and re-read the actual binary version.
-        // The native updater may legitimately be a no-op (already newest on its
-        // own channel), so report `updated` from whether the version changed.
+        // `result.version` comes from running the installed binary after the
+        // update. The native updater may legitimately be a no-op (already newest
+        // on its own channel), so report `updated` from whether the version changed.
         versionCache = null;
-        const to = resolveCurrent(config);
+        const to = result.version;
         res.json({ package: packageName, from, to, updated: to !== from, warning: null });
         return;
       }
 
       // npm-global packages (e.g. claude-gateway) update via npm install -g.
-      const installErr = installNpmVersion(packageName, target);
+      const installErr = await installNpmVersion(packageName, target);
       if (installErr !== null) {
         res.status(500).json({ error: installErr });
         return;
