@@ -199,6 +199,10 @@ export interface TaskAttempt {
   sessionId: string;
   state: 'starting' | 'running' | 'ended' | 'unknown';
   processIdentity?: { pid: number; startedAt: number; instanceId: string; bootId?: string; startTicks?: string };
+  /** Persisted before the worker process is spawned (#666). `not_requested` proves no process ever
+   * existed for this attempt; `requested` without a processIdentity means one may be running unrecorded.
+   * Absent on attempts claimed before this was tracked, which prove nothing. */
+  processSpawn?: 'not_requested' | 'requested';
   result?: TaskResult;
   failure?: TaskFailure;
 }

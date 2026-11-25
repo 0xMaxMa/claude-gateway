@@ -77,6 +77,8 @@ export class ClaudeWorkerDriver implements WorkerDriver {
     private readonly bridge: TaskBridge, private readonly workspaces: TaskWorkspaces, private readonly privateRoot: string, private readonly onManagedTurn?: (sessionId: string, text: string, metrics: import('../process-turn').ManagedTurnMetrics, skills?: string[]) => void,
     private readonly revalidateProvider?: (task: TaskSnapshot, permit: ProviderPermit, harness: 'claude' | 'codex', model?: string, resolvedIdentity?: ResolvedCodexProviderIdentity) => void) {}
   async cleanup(attempt: TaskAttempt): Promise<boolean> {
+    // No worker was ever spawned for this attempt, so there is nothing to stop (#666).
+    if (attempt.processSpawn === 'not_requested') return true;
     // Stopping a docker client does not prove its container execution stopped.
     if (this.agent.type === 'app-agent') return false;
     return cleanupPersistedProcess(attempt.processIdentity);
@@ -291,6 +293,7 @@ export class ClaudeWorkerDriver implements WorkerDriver {
       if (process instanceof SessionProcess) process.modelOverride = workerConfig.claude.model;
       if (providerPermit) this.revalidateProvider?.(task, providerPermit, harness.harness, task.model ?? workerConfig.claude.model,
         harness.harness === 'codex' && resolvedCredentials ? { fingerprint: resolvedCredentials.fingerprint, model: harness.config.model, contextWindow: harness.config.contextWindow } : undefined);
+      this.tasks.recordSpawn(attempt);
       const turn = startProcessTurn(process, prompt, limits.tasks.maxDurationMs || undefined, undefined,
         metrics => {
           recordTokenTurn(this.tasks.store, { id: attempt.attemptId, sessionId: task.agentSessionId, role: 'worker', category: 'worker', taskId: task.taskId, taskRevision: revision.revision, ...metrics, harness: attempt.harness });
