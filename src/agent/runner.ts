@@ -113,7 +113,7 @@ const TOO_LARGE_HISTORY_LADDER: readonly number[] = [MAX_HISTORY_MESSAGES, 40, 3
 export const MAX_IMAGE_SIZE_BYTES = 10 * 1024 * 1024;
 
 export { DEFAULT_MODELS } from './model-registry';
-import { DEFAULT_MODELS, availableModels, availableModelsNow, prefetchModelCatalog, selectableModels, findModel } from './model-registry';
+import { DEFAULT_MODELS, availableModels, availableModelsNow, prefetchModelCatalog, selectableModels, findModel, contextModelId } from './model-registry';
 import { PSTACK_INSTALL_HINT, PSTACK_OFF_SETTINGS, PSTACK_PLUGIN_ID, pstackModels, pstackPluginInfo } from '../pstack/plugin-info';
 import { PstackConfigError, applySheetLines } from '../pstack/config';
 import { pstackPanelDefault, renderPstackSheet } from '../pstack/sheet';
@@ -3471,10 +3471,11 @@ export class AgentRunner extends EventEmitter {
       context = { used: meta.lastInputTokens!, total: null, model: meta.model ?? this.agentConfig.claude.model };
     }
     if (!context) return {contextUsedPct:null,contextTokens:null,contextWindow:null,contextModel:null,text:'—'};
-    const total = context.model ? this.dashboardContextWindow(context.model) : null;
+    const model = context.model ? contextModelId(context.model, this.agentConfig.claude.model) : null;
+    const total = model ? this.dashboardContextWindow(model) : null;
     const pct = total && total > 0 ? Math.round(context.used / total * 100) : null;
     const format = (n:number) => n >= 1000000 ? `${Number((n/1000000).toFixed(2))}M` : n >= 1000 ? `${Number((n/1000).toFixed(2))}K` : String(n);
-    return {contextUsedPct:pct,contextTokens:context.used,contextWindow:total,contextModel:context.model,
+    return {contextUsedPct:pct,contextTokens:context.used,contextWindow:total,contextModel:model,
       text:`${format(context.used)} / ${total == null ? '—' : format(total)}${pct == null ? '' : ` · ${pct}%`}`};
   }
 
@@ -4848,11 +4849,17 @@ export class AgentRunner extends EventEmitter {
   }
 
   /** Never waits on the catalog fetch: `/session` and the dashboard only display this. */
-  dashboardContextWindow(model: string): number | null {
-    const models = this.availableModelsNow();
-    return models.find(m => m.id === model)?.contextWindow
-      ?? (this.gatewayConfig.gateway.models ?? DEFAULT_MODELS).find(m => m.id === model)?.contextWindow
-      ?? null;
+  dashboardContextWindow(measured: string): number | null {
+    const lists = [this.availableModelsNow(), this.gatewayConfig.gateway.models ?? DEFAULT_MODELS];
+    // The configured `[1m]` row first, then the measured id itself: a configured
+    // suffix no list describes (`[200k]`) must still find the base model's window.
+    for (const id of new Set([contextModelId(measured, this.agentConfig.claude.model), measured])) {
+      for (const list of lists) {
+        const window = list.find(m => m.id === id)?.contextWindow;
+        if (window !== undefined) return window;
+      }
+    }
+    return null;
   }
 
   getTokenReport(sessionId: string) {

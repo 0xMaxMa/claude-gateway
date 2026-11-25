@@ -80,10 +80,24 @@ test.each(['/dashboard/token-report','/dashboard/token-report/'])('proxy-injecte
 });
 
 test('dashboard context capacity resolves catalog first, configured models second, unknown as missing', ()=>{
- const context:any={availableModelsNow:()=>[{id:'catalog-model',contextWindow:32768}],gatewayConfig:{gateway:{models:[{id:'configured-model',contextWindow:64000}]}}};
+ const context:any={availableModelsNow:()=>[{id:'catalog-model',contextWindow:32768}],gatewayConfig:{gateway:{models:[{id:'configured-model',contextWindow:64000}]}},agentConfig:{claude:{model:'configured-model'}}};
  expect(AgentRunner.prototype.dashboardContextWindow.call(context,'catalog-model')).toBe(32768);
  expect(AgentRunner.prototype.dashboardContextWindow.call(context,'configured-model')).toBe(64000);
  expect(AgentRunner.prototype.dashboardContextWindow.call(context,'unknown-model')).toBeNull();
+});
+
+// #687: Claude Code reports a [1m] run under its base id, which has its own 200K row.
+test('dashboard context capacity of a measured base id uses the configured suffixed model window', ()=>{
+ const context:any={availableModelsNow:()=>[],gatewayConfig:{gateway:{}},agentConfig:{claude:{model:'claude-sonnet-5-5[1m]'}}};
+ const window=(id:string)=>AgentRunner.prototype.dashboardContextWindow.call(context,id);
+ expect(window('claude-sonnet-5-5')).toBe(1000000);
+ expect(window('claude-sonnet-5-5[1m]')).toBe(1000000);
+ expect(window('claude-opus-5-5')).toBe(200000);
+ // A suffix no model list describes falls back to the measured base row.
+ context.agentConfig.claude.model='claude-sonnet-5-5[200k]';
+ expect(window('claude-sonnet-5-5')).toBe(200000);
+ context.agentConfig.claude.model='claude-sonnet-5-5';
+ expect(window('claude-sonnet-5-5')).toBe(200000);
 });
 
 test('JSON report uses resolved capacity instead of guessing from the model ID',async()=>{

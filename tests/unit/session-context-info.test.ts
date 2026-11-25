@@ -3,6 +3,7 @@ import {AgentOrchestrationRuntime} from '../../src/orchestration/runtime';
 import {OrchestrationStore} from '../../src/orchestration/store';
 import {DecisionService} from '../../src/orchestration/decisions';
 import {recordTokenTurn,tokenReport} from '../../src/orchestration/token-ledger';
+import {formatSessionStatus} from '../../src/agent/session-status';
 
 test('session command uses the dashboard measurement and observed model, then expires after one hour',async()=>{
  const store=new OrchestrationStore(':memory:','agent');
@@ -25,7 +26,7 @@ test('session command uses the dashboard measurement and observed model, then ex
 });
 
 test('missing measurements and unknown model capacity never become zero percent',async()=>{
- const runner=Object.assign(Object.create(AgentRunner.prototype),{orchestration:{sessionContextWindow:()=>null},dashboardContextWindow:()=>null});
+ const runner=Object.assign(Object.create(AgentRunner.prototype),{orchestration:{sessionContextWindow:()=>null},dashboardContextWindow:()=>null,agentConfig:{claude:{model:'selected-model'}}});
  expect(await runner.sessionContextInfo('session')).toMatchObject({text:'—',contextUsedPct:null});
  runner.orchestration.sessionContextWindow=()=>({used:1200,model:'unknown'});
  expect(await runner.sessionContextInfo('session')).toMatchObject({text:'1.2K / —',contextUsedPct:null});
@@ -83,4 +84,30 @@ test('session displays the selected next-turn model without replacing the observ
  expect(send.mock.calls[0][1]).toContain('Model: claude-sonnet-5[1m]');
  expect(send.mock.calls[0][1]).toContain('180K / 200K · 90%');
  expect(await runner.getApiSessionInfo('c','s')).toMatchObject({model:'claude-sonnet-5[1m]',contextModel:'old-observed-model'});
+});
+
+// #687: a [1m] session measured under the base id showed "517.69K / 200K · 259%".
+test('a [1m] session measured under its base model id reports against the 1M window',async()=>{
+ const store=new OrchestrationStore(':memory:','agent');
+ try{
+  const input=store.acceptInput({scope:{agentId:'agent',agentSessionId:'session',source:'api',accountId:'a',chatId:'c',threadKey:'',principalId:'p'},text:'Hello'});
+  const decisions=new DecisionService(store),decision=decisions.begin(input.conversationId,'p',[input.inputId]);
+  decisions.finish(decision,'Hello');
+  const record=(model:string)=>recordTokenTurn(store,{id:decision.decisionId,sessionId:'session',role:'agent',category:'input',toolIds:[],inputTokens:0,totalTokens:0,startedAt:Date.now(),model,
+   requests:[{id:'latest',usage:{inputTokens:516690,cacheCreationTokens:0,cacheReadTokens:0,outputTokens:1000,totalTokens:517690}}]});
+  record('claude-sonnet-5-5');
+  const runtime=Object.assign(Object.create(AgentOrchestrationRuntime.prototype),{store});
+  const configured='claude-sonnet-5-5[1m]';
+  const runner=Object.assign(Object.create(AgentRunner.prototype),{orchestration:runtime,availableModelsNow:()=>[],gatewayConfig:{gateway:{}},agentConfig:{claude:{model:configured}}});
+  const context=await runner.sessionContextInfo('session');
+  expect(context).toMatchObject({text:'517.69K / 1M · 52%',contextUsedPct:52,contextWindow:1000000,contextModel:configured});
+  const status=formatSessionStatus('session','N',configured,context);
+  expect(status).not.toContain('Context measured on');
+  expect(status).not.toContain('Near limit');
+  // A genuinely different measured model keeps its own window and label.
+  record('claude-opus-5-5');
+  const other=await runner.sessionContextInfo('session');
+  expect(other).toMatchObject({text:'517.69K / 200K · 259%',contextModel:'claude-opus-5-5'});
+  expect(formatSessionStatus('session','N',configured,other)).toContain('Context measured on: claude-opus-5-5');
+ }finally{store.close();}
 });

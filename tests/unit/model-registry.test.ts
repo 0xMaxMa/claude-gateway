@@ -1,5 +1,5 @@
 import {
-  DEFAULT_MODELS, EFFORT_LEVELS, ModelResolutionError, availableModels, findModel, isEffort, resolveModelId, selectableModels,
+  DEFAULT_MODELS, EFFORT_LEVELS, ModelResolutionError, availableModels, contextModelId, findModel, isEffort, resolveModelId, selectableModels,
 } from '../../src/agent/model-registry';
 import { resetModelCatalogCache, resetSettingsEnvCache } from '../../src/agent/model-catalog';
 import type { ModelConfig } from '../../src/types';
@@ -74,6 +74,22 @@ describe('resolveModelId — full model IDs only', () => {
 
   it('does not accept a suffix on an unknown base', () => {
     expect(codeOf(() => resolveModelId(MODELS, 'gpt-7[1m]'))).toBe('UNKNOWN_MODEL');
+  });
+});
+
+describe('contextModelId — a measured base id stands for the configured suffixed model (#687)', () => {
+  test('the base id of a configured [1m] or [200k] model resolves to the configured id', () => {
+    expect(contextModelId('claude-sonnet-5-5', 'claude-sonnet-5-5[1m]')).toBe('claude-sonnet-5-5[1m]');
+    expect(contextModelId('Claude-Sonnet-5-5', 'claude-sonnet-5-5[1M]')).toBe('claude-sonnet-5-5[1M]');
+    expect(contextModelId('claude-opus-5-5', 'claude-opus-5-5[200k]')).toBe('claude-opus-5-5[200k]');
+  });
+  test('the same id, a different model and an unsuffixed configured model stay as measured', () => {
+    expect(contextModelId('claude-sonnet-5-5[1m]', 'claude-sonnet-5-5[1m]')).toBe('claude-sonnet-5-5[1m]');
+    expect(contextModelId('claude-opus-5-5', 'claude-sonnet-5-5[1m]')).toBe('claude-opus-5-5');
+    expect(contextModelId('claude-sonnet-5', 'claude-sonnet-5-5[1m]')).toBe('claude-sonnet-5');
+    expect(contextModelId('claude-sonnet-5-5', 'claude-sonnet-5-5')).toBe('claude-sonnet-5-5');
+    expect(contextModelId('claude-sonnet-5-5[1m]', 'claude-sonnet-5-5')).toBe('claude-sonnet-5-5[1m]');
+    expect(contextModelId('claude-sonnet-5-5', undefined)).toBe('claude-sonnet-5-5');
   });
 });
 
