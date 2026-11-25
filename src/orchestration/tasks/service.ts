@@ -921,7 +921,7 @@ export class TaskService {
       delete task.failure;
       delete task.execution; // A new attempt must not look active on old telemetry.
       const generation = Number(this.store.get('SELECT COALESCE(MAX(generation),0)+1 AS n FROM task_attempts WHERE task_id=?', taskId)!.n);
-      const attempt: TaskAttempt = { attemptId: randomUUID(), taskId, generation, revision: task.revision, ...worker, state: 'starting', ...(task.gatewayTarget ? {executionType:'gateway-managed' as const,createdAt:Date.now()} : {}) };
+      const attempt: TaskAttempt = { attemptId: randomUUID(), taskId, generation, revision: task.revision, ...worker, state: 'starting', ...(task.gatewayTarget ? {executionType:'gateway-managed' as const,createdAt:Date.now()} : {processSpawn:'not_requested' as const}) };
       this.store.run('INSERT INTO task_attempts VALUES(?,?,?,?,?,?)', attempt.attemptId, taskId, generation, attempt.revision, attempt.state, JSON.stringify(attempt));
       task.state = 'starting'; task.activeAttemptId = attempt.attemptId;
       this.store.saveTask(task, task.stateVersion);
@@ -947,6 +947,8 @@ export class TaskService {
       const { task, attempt } = this.active(attemptId, generation);
       if (task.state !== 'starting') throw new OrchestrationError('STATE_CONFLICT');
       attempt.state = 'running'; attempt.startedAt = Date.now(); attempt.processIdentity = identity;
+      // A started worker has spawned, whichever driver ran it.
+      if (attempt.processSpawn) attempt.processSpawn = 'requested';
       task.state = 'running'; task.appliedRevision = attempt.revision;
       if (task.restartResume) task.restartResume.pending = false;
       if(task.executionControl?.revision===attempt.revision)task.executionControl.phase='applied';
@@ -1461,10 +1463,13 @@ export class TaskService {
         this.notify(task);
         return;
       }
-      attempt.state = 'ended'; attempt.failure = task.failure = shutdownFailure();
-      task.activeAttemptId = undefined;
+      attempt.state = 'ended'; task.activeAttemptId = undefined;
       this.pool.release(task.taskId, false);
-      const resumed = this.resumeAfterRestart(task, attempt, hint);
+      // An attempt that never spawned interrupted nothing: it starts again without spending a resume (#666).
+      const unspawned = attempt.processSpawn === 'not_requested';
+      if (unspawned) { task.state = 'queued'; delete task.failure; }
+      else attempt.failure = task.failure = shutdownFailure();
+      const resumed = unspawned || this.resumeAfterRestart(task, attempt, hint);
       this.store.saveAttempt(attempt); this.store.saveTask(task, task.stateVersion);
       this.store.appendEvent(task.conversationId, 'task.restart_recovered', { stopped, state: task.state }, task.taskId);
       if (resumed) this.store.enqueue('schedule', `schedule:${task.taskId}:${task.stateVersion}`, { taskId: task.taskId });
@@ -1493,6 +1498,16 @@ export class TaskService {
       if (state === 'queued') this.store.enqueue('schedule', `schedule:${task.taskId}:${task.stateVersion}`, { taskId });
       else this.notify(task);
       return task;
+    });
+  }
+  /** Driver-only, immediately before spawning the worker: records that a process may exist from now on,
+   * and refuses the spawn when the attempt is no longer the one starting. */
+  recordSpawn(attempt: TaskAttempt): void {
+    this.store.transaction(() => {
+      const task = this.store.task(attempt.taskId), current = this.store.attempt(attempt.attemptId);
+      if (task?.state !== 'starting' || task.activeAttemptId !== attempt.attemptId || current?.state !== 'starting' || current.generation !== attempt.generation) throw new OrchestrationError('ATTEMPT_CANCELLED_BEFORE_START');
+      current.processSpawn = attempt.processSpawn = 'requested';
+      this.store.saveAttempt(current);
     });
   }
   deferUnstarted(attemptId: string, generation: number, reason: 'workspace' | 'provider' = 'workspace'): void {

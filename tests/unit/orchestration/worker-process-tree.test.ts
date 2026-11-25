@@ -58,6 +58,18 @@ test('a supervised worker completes only after its process tree is proven stoppe
   });
 }, 60000);
 
+// #666: the spawn is persisted before the process exists, so a gateway that dies
+// before the identity is recorded leaves an attempt that is never presumed stopped.
+test('a real worker start records its spawn on the persisted attempt', async () => {
+  await fixture('complete', async ({ start, store, taskId }) => {
+    const attemptId = store.task(taskId)!.activeAttemptId!;
+    expect(store.attempt(attemptId)!.processSpawn).toBe('not_requested');
+    const handle = await start();
+    expect(store.attempt(attemptId)!.processSpawn).toBe('requested');
+    await handle.result;
+  });
+}, 60000);
+
 // Windows caps a whole command line at 32767 chars and Linux caps ONE argument at
 // 128 KiB (MAX_ARG_STRLEN), so a prompt passed inline failed every spawn with
 // ENAMETOOLONG/E2BIG (#559). Every OS now reads it from a private file instead.
