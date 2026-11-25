@@ -28,12 +28,15 @@ export interface TokenTurn extends ManagedTurnMetrics {
   queuedMs?: number;
   /** A pstack subagent's place in its task tree, read from the task record. */
   subagent?: TurnSubagent;
+  /** The model the turn was started with. Claude Code reports a `[1m]` run under
+   *  its base id in `model`, so this keeps the suffix that sizes the window (#687). */
+  configuredModel?: string;
 }
 export interface TurnSubagent { parentTaskId: string; depth?: number; type?: string; effort?: string; readonly?: boolean; }
 const initialized = new WeakSet<OrchestrationStore>();
 /** Latest observed request in the most recent agent turn, including its output.
  * A peak earlier in the turn may predate compaction and is not current context. */
-export function latestAgentContextWindow(store: Pick<OrchestrationStore, 'get'>, sessionId: string): { used: number; total: number | null; model: string | null } | null {
+export function latestAgentContextWindow(store: Pick<OrchestrationStore, 'get'>, sessionId: string): { used: number; total: number | null; model: string | null; configuredModel?: string } | null {
   const row = store.get(`SELECT payload_json FROM token_turns WHERE session_id=? AND role='agent' AND EXISTS (SELECT 1 FROM json_each(token_turns.payload_json,'$.requests') r WHERE json_type(r.value,'$.usage')='object') ORDER BY started_at DESC,id DESC LIMIT 1`, sessionId);
   if (!row) return null;
   let turn: TokenTurn;
@@ -47,7 +50,8 @@ export function latestAgentContextWindow(store: Pick<OrchestrationStore, 'get'>,
     best = { context, total: Number(usage.totalTokens ?? 0) };
   }
   if (!best) return null;
-  return { used: best.total, total: null, model: typeof turn.model === 'string' ? turn.model : null };
+  return { used: best.total, total: null, model: typeof turn.model === 'string' ? turn.model : null,
+    ...(typeof turn.configuredModel === 'string' ? { configuredModel: turn.configuredModel } : {}) };
 }
 /** The latest agent context size for a session, or 0 before its first measured turn. */
 export function latestAgentContextTokens(store: OrchestrationStore, sessionId: string): number {

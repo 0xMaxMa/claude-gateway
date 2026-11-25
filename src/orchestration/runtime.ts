@@ -1706,10 +1706,10 @@ export class AgentOrchestrationRuntime {
       const turn = startProcessTurn(agentSession, turnPrompt, Math.min(options.timeoutMs, this.config.conversation.maxDecisionDurationMs), text => {
         displayChunk(text);
       }, metrics => {
-        recordTokenTurn(this.store, { id: decision.decisionId, sessionId, role: 'agent', category: active.notification ? 'report' : 'input', ...metrics });
+        recordTokenTurn(this.store, { id: decision.decisionId, sessionId, role: 'agent', category: active.notification ? 'report' : 'input', ...metrics, configuredModel: options.model });
         this.host.onManagedTurn?.(sessionId, input.text, metrics);
       }, visualInput.images, {
-        onUsage: metrics => recordTokenTurn(this.store, {id: decision.decisionId, sessionId, role: 'agent', category: active.notification ? 'report' : 'input', ...metrics}),
+        onUsage: metrics => recordTokenTurn(this.store, {id: decision.decisionId, sessionId, role: 'agent', category: active.notification ? 'report' : 'input', ...metrics, configuredModel: options.model}),
         startupTimeoutMs: this.config.conversation.startupTimeoutMs,
         firstResponseTimeoutMs: timeouts.firstResponseTimeoutMs, compactionTimeoutMs: this.config.conversation.compactionTimeoutMs,
         idleTimeoutMs: timeouts.idleTimeoutMs,

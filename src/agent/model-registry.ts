@@ -127,6 +127,17 @@ export class ModelResolutionError extends Error {
 const CONTEXT_SUFFIX = /\[(?:1m|200k)\]$/i;
 
 /**
+ * The id whose context window a measured model id stands for. Claude Code
+ * reports a `[1m]` run under its base id (#687), so a measured id equal to the
+ * configured id minus its context suffix means the configured model. Any other
+ * id is a different model and is returned unchanged.
+ */
+export function contextModelId(measured: string, configured: string | undefined): string {
+  const suffix = configured ? CONTEXT_SUFFIX.exec(configured)?.[0] : undefined;
+  return suffix && measured.toLowerCase() === configured!.slice(0, -suffix.length).toLowerCase() ? configured! : measured;
+}
+
+/**
  * Resolve a full model ID, rejecting aliases. Used where a config must name
  * one model that never changes when an alias moves (pstack roles,
  * `subagent_spawn`). Matching is exact and case-insensitive. A context suffix
