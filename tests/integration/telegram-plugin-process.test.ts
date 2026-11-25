@@ -21,6 +21,7 @@ import * as path from 'path'
 import * as os from 'os'
 import * as net from 'net'
 
+const MODELS_TIMEOUT_REPLY = 'The agent did not answer in time. Please try /models again in a moment.'
 const RECEIVER_PATH = path.resolve(__dirname, '../../mcp/tools/telegram/receiver-server.ts')
 const BOT_TOKEN = 'test_token_e2e'
 const USER_ID = '111222333'
@@ -233,7 +234,8 @@ function makeMcpReader(proc: ChildProcess) {
 function startMockCallbackServer(port: number) {
   const commands: Array<Record<string, unknown>> = []
   const voice = new Map<string, string>()
-  let stallGetModels = false
+  // Commands that never get an answer, to exercise the receiver's timeouts.
+  const stalled = new Set<string>()
   // Command -> canned failure reply, to exercise the receiver's error paths.
   const failures = new Map<string, { status: number; body: string }>()
   const server = http.createServer((req, res) => {
@@ -243,7 +245,7 @@ function startMockCallbackServer(port: number) {
       let body: Record<string, unknown> = {}
       try { body = raw ? JSON.parse(raw) : {} } catch {}
       commands.push(body)
-      if (stallGetModels && body['command'] === 'get_models') return
+      if (stalled.has(String(body['command']))) return
       const failure = failures.get(String(body['command']))
       if (failure) { res.writeHead(failure.status, { 'Content-Type': 'application/json' }); res.end(failure.body); return }
       res.writeHead(200, { 'Content-Type': 'application/json' })
@@ -285,7 +287,7 @@ function startMockCallbackServer(port: number) {
   return {
     commands,
     failures,
-    setStallGetModels(value: boolean) { stallGetModels = value },
+    setStalled(command: string, value: boolean) { if (value) stalled.add(command); else stalled.delete(command) },
     close: () => new Promise<void>(r => server.close(() => r())),
   }
 }
@@ -815,7 +817,7 @@ describe.each([{orchestration:true,interactive:false},{orchestration:false,inter
     const chat = { id: Number(USER_ID), type: 'private' }
     const at = Date.now()
     const callbackStart = mockCb.commands.length
-    mockCb.setStallGetModels(true)
+    mockCb.setStalled('get_models', true)
     try {
       mock.queueUpdate({ message: {
         message_id: 990, from, chat, date: Math.floor(at / 1000), text: '/models',
@@ -831,16 +833,56 @@ describe.each([{orchestration:true,interactive:false},{orchestration:false,inter
       const replyDeadline = Date.now() + 15_000
       while (Date.now() < replyDeadline) {
         const replies = mock.calls.filter(c => c.method === 'sendMessage' && c.ts >= at).map(c => String(c.body.text))
-        if (replies.some(text => text === 'Failed to get model info.') && replies.some(text => text.includes('/models'))) break
+        if (replies.some(text => text === MODELS_TIMEOUT_REPLY) && replies.some(text => text.includes('/models') && text !== MODELS_TIMEOUT_REPLY)) break
         await sleep(25)
       }
       const replies = mock.calls.filter(c => c.method === 'sendMessage' && c.ts >= at).map(c => String(c.body.text))
-      expect(replies).toContain('Failed to get model info.')
-      expect(replies.some(text => text.includes('/models'))).toBe(true)
+      // A callback that never answers is reported as a timeout, like every other command.
+      expect(replies).toContain(MODELS_TIMEOUT_REPLY)
+      expect(replies.some(text => text.includes('/models') && text !== MODELS_TIMEOUT_REPLY)).toBe(true)
     } finally {
-      mockCb.setStallGetModels(false)
+      mockCb.setStalled('get_models', false)
     }
   }, 25_000)
+
+  test('/model reports a failed or stalled get_model callback instead of a generic error', async () => {
+    if (!orchestration) return
+    const from = { id: Number(USER_ID), is_bot: false, first_name: 'Tester' }
+    const chat = { id: Number(USER_ID), type: 'private' }
+    const send = (message_id: number) => mock.queueUpdate({ message: {
+      message_id, from, chat, date: Math.floor(Date.now() / 1000), text: '/model',
+      entities: [{ type: 'bot_command', offset: 0, length: 6 }],
+    } })
+    const replyAfter = async (at: number, timeoutMs: number) => {
+      const deadline = Date.now() + timeoutMs
+      while (Date.now() < deadline) {
+        const found = mock.calls.find(c => c.method === 'sendMessage' && c.ts >= at)
+        if (found) return String(found.body.text)
+        await sleep(25)
+      }
+      return undefined
+    }
+
+    // An HTTP error from the agent is a failure, not "Current model: unknown".
+    mockCb.failures.set('get_model', { status: 500, body: JSON.stringify({ error: 'boom' }) })
+    try {
+      const at = Date.now()
+      send(995)
+      expect(await replyAfter(at, 5000)).toBe('Could not load model info. Please try /model again.')
+    } finally {
+      mockCb.failures.delete('get_model')
+    }
+
+    // No answer at all is bounded and reported as a timeout.
+    mockCb.setStalled('get_model', true)
+    try {
+      const at = Date.now()
+      send(996)
+      expect(await replyAfter(at, 15_000)).toBe('The agent did not answer in time. Please try /model again in a moment.')
+    } finally {
+      mockCb.setStalled('get_model', false)
+    }
+  }, 30_000)
 
   test('stalled /models send aborts in the receiver and does not send a second message', async () => {
     if (!orchestration) return
@@ -864,7 +906,7 @@ describe.each([{orchestration:true,interactive:false},{orchestration:false,inter
       const calls = mock.calls.filter(c => c.method === 'sendMessage' && c.ts >= at)
       expect(mock.stalledCalls - stalledBefore).toBe(1)
       expect(mock.abortedStalledCalls - abortedBefore).toBe(1)
-      expect(calls.filter(c => String(c.body.text) === 'Failed to get model info.')).toHaveLength(0)
+      expect(calls.filter(c => String(c.body.text) === MODELS_TIMEOUT_REPLY || String(c.body.text).startsWith('Could not load model info'))).toHaveLength(0)
       expect(calls.some(c => String(c.body.text).includes('/models'))).toBe(true)
     } finally {
       mock.setStalledMethod(null)

@@ -1,3 +1,5 @@
+import { CallbackHttpError } from './callback-failure'
+
 export async function fetchModelMenuResponses(
   callbackUrl: string,
   chatId: string,
@@ -19,7 +21,8 @@ export async function fetchModelMenuResponses(
       signal,
     }),
   ])
-  if (!modelRes.ok || !modelsRes.ok) throw new Error('model request failed')
+  if (!modelRes.ok) throw new CallbackHttpError(modelRes.status)
+  if (!modelsRes.ok) throw new CallbackHttpError(modelsRes.status)
   return {
     modelData: await modelRes.json() as { model?: string },
     modelsData: await modelsRes.json() as { models?: unknown; configuredModels?: unknown; liveModels?: unknown },

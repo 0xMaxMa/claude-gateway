@@ -1252,13 +1252,15 @@ bot.command('model', async ctx => {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ command: 'get_model', chat_id: String(ctx.chat.id) }),
+      signal: AbortSignal.timeout(10_000),
     })
+    if (!res.ok) throw new CallbackHttpError(res.status)
     const data = (await res.json()) as { model?: string }
     await ctx.reply(groupAccess && groupInput
       ? telegramGroupModelReply(groupAccess, groupInput, data.model ?? 'unknown') ?? 'Current model: unknown'
       : `Current model: ${data.model ?? 'unknown'}`)
   } catch (err) {
-    await ctx.reply('Failed to get model info.')
+    await replyCallbackFailure(ctx, err, 'model', 'model info')
   }
 })
 
@@ -1317,17 +1319,11 @@ bot.command('models', async ctx => {
       reply_markup: keyboard,
     }, signal as Parameters<Context['reply']>[2]))
   } catch (err) {
-    const errorName = err instanceof Error ? err.name : 'UnknownError'
-    process.stderr.write(`telegram channel: /models ${stage} failed (${errorName})\n`)
     // A failed send may already have reached Telegram. Only a callback failure
     // is known to have occurred before any menu message was sent.
-    if (stage !== 'callback') return
-    try {
-      await sendModelMenuReply(signal => ctx.reply('Failed to get model info.', {}, signal as Parameters<Context['reply']>[2]))
-    } catch (replyErr) {
-      const replyErrorName = replyErr instanceof Error ? replyErr.name : 'UnknownError'
-      process.stderr.write(`telegram channel: /models fallback send failed (${replyErrorName})\n`)
-    }
+    if (stage !== 'callback') { logCallbackFailure('models send', err); return }
+    await replyCallbackFailure(ctx, err, 'models', 'model info', undefined,
+      text => sendModelMenuReply(signal => ctx.reply(text, {}, signal as Parameters<Context['reply']>[2])))
   }
 })
 
@@ -1434,10 +1430,11 @@ type TaskBrowser = {sessionId:string;task?:TaskView;tasks?:TaskView[];page?:numb
 // Log why a callback-backed command failed, then tell the user whether the
 // agent timed out, is restarting, or failed. The reply itself may fail too.
 // `failedReply` replaces the generic text when the agent answered with an error.
-async function replyCallbackFailure(ctx:Context,err:unknown,command:string,what:string,failedReply?:string) {
+// `send` replaces ctx.reply, e.g. to bound a send that Telegram may stall.
+async function replyCallbackFailure(ctx:Context,err:unknown,command:string,what:string,failedReply?:string,send:(text:string)=>Promise<unknown>=text=>ctx.reply(text)) {
   const failure=classifyCallbackFailure(err)
   process.stderr.write(formatCallbackFailure(command,failure)+'\n')
-  try{await ctx.reply(failure.kind==='failed'&&failedReply&&failure.telegramCode===undefined?failedReply:callbackFailureReply(failure.kind,what,command,failure.telegramCode))}
+  try{await send(failure.kind==='failed'&&failedReply&&failure.telegramCode===undefined?failedReply:callbackFailureReply(failure.kind,what,command,failure.telegramCode))}
   catch(replyErr){process.stderr.write(formatCallbackFailure(`${command} reply`,classifyCallbackFailure(replyErr))+'\n')}
 }
 async function taskBrowserRequest(chatId:string,userId:string,payload:Record<string,unknown>={}) {
