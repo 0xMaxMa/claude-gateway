@@ -22,8 +22,13 @@ import type { ModelConfig } from '../types';
 /** A stale catalog beats a hung picker — the fetch sits in front of a UI action. */
 const CATALOG_TIMEOUT_MS = 5_000;
 
-/** Hard bound on one shared catalog request, for a fetch whose abort signal never fires. */
-const CATALOG_DEADLINE_MS = 2 * CATALOG_TIMEOUT_MS;
+/**
+ * Hard bound on one shared catalog request, for a fetch whose abort signal never
+ * fires. Kept under the 10 s the channel receivers give a command callback, so
+ * a caller that does await the catalog (`/model <name>`, `task_spawn` with a
+ * model) still answers before its receiver gives up on it.
+ */
+const CATALOG_DEADLINE_MS = CATALOG_TIMEOUT_MS + 2_000;
 
 /**
  * How long a successful fetch is reused. The picker calls this on every press
@@ -54,13 +59,17 @@ export const DEFAULT_CONTEXT_WINDOW = 200_000;
 interface CatalogCache {
   models: ModelConfig[];
   fetchedAt: number;
-  key: string;
 }
 
-let cache: CatalogCache | null = null;
-/** In-flight fetch, so N concurrent callers make one request, not N. */
-let inFlight: Promise<ModelConfig[] | null> | null = null;
-let inFlightKey: string | null = null;
+/**
+ * One entry per catalog key. A single slot made two callers with different
+ * configured lists (a runner and the API router after a config reload) evict
+ * each other on every read, so the non-waiting reader never saw a catalog.
+ */
+const cache = new Map<string, CatalogCache>();
+const MAX_CACHE_ENTRIES = 8;
+/** In-flight fetch per catalog key, so N concurrent callers make one request, not N. */
+const inFlight = new Map<string, Promise<ModelConfig[] | null>>();
 let warnedInsecureUrl = false;
 /**
  * Base URL whose last request hit {@link CATALOG_DEADLINE_MS}, and until when it
@@ -73,9 +82,8 @@ let hungUntil = 0;
 
 /** Reset module state. Tests only — each case needs a clean cache. */
 export function resetModelCatalogCache(): void {
-  cache = null;
-  inFlight = null;
-  inFlightKey = null;
+  cache.clear();
+  inFlight.clear();
   warnedInsecureUrl = false;
   hungBase = null;
   hungUntil = 0;
@@ -256,6 +264,27 @@ export function parseModelCatalog(body: unknown, fallback: ModelConfig[]): Model
 
 // ── fetch ───────────────────────────────────────────────────────────────────
 
+/** One cache entry per endpoint and configured list: the list supplies alias/contextWindow. */
+function catalogKey(base: string, fallback: ModelConfig[]): string {
+  return `${base}\0${JSON.stringify(fallback)}`;
+}
+
+/**
+ * The catalog as last fetched, without waiting on the network, or null when no
+ * usable one is cached. Starts a background refresh when the cached copy is
+ * missing or past its TTL.
+ *
+ * For readers that only display models (`/session`, `/models`, the picker,
+ * `GET /api/v1/models`): their receivers time out after 10 s, and a hung
+ * catalog fetch used to hold every one of them for that long.
+ */
+export function cachedModelCatalog(fallback: ModelConfig[], now: number = Date.now()): ModelConfig[] | null {
+  const key = catalogKey(catalogBaseUrl(now), fallback);
+  const current = cache.get(key);
+  if (!current || now - current.fetchedAt >= CATALOG_TTL_MS) void fetchModelCatalog(fallback, now);
+  return current && now - current.fetchedAt < CATALOG_STALE_MS ? current.models : null;
+}
+
 /**
  * Fetch the live catalog, or return null to mean "use the static list".
  *
@@ -269,13 +298,15 @@ export async function fetchModelCatalog(
   now: number = Date.now(),
 ): Promise<ModelConfig[] | null> {
   const base = catalogBaseUrl(now);
-  const key = `${base} ${JSON.stringify(fallback)}`;
-  if (cache && cache.key === key && now - cache.fetchedAt < CATALOG_TTL_MS) return cache.models;
-  if (inFlight && inFlightKey === key) return inFlight;
+  const key = catalogKey(base, fallback);
+  const cached = cache.get(key);
+  if (cached && now - cached.fetchedAt < CATALOG_TTL_MS) return cached.models;
+  const pending = inFlight.get(key);
+  if (pending) return pending;
 
   // A catalog that is merely stale is still better than the static list, but
   // only while a fetch is actually failing — a successful one below replaces it.
-  const stale = cache && cache.key === key && now - cache.fetchedAt < CATALOG_STALE_MS ? cache.models : null;
+  const stale = cached && now - cached.fetchedAt < CATALOG_STALE_MS ? cached.models : null;
 
   if (!base) return null; // standalone deployment — static list is the catalog
   if (hungBase === base && now < hungUntil) return stale; // backing off after a hung request
@@ -291,7 +322,6 @@ export async function fetchModelCatalog(
     return null;
   }
 
-  inFlightKey = key;
   let abandoned = false;
   const attempt = (async (): Promise<ModelConfig[] | null> => {
     try {
@@ -309,7 +339,11 @@ export async function fetchModelCatalog(
       // clock the TTL check above read. Caching a failure would pin the
       // fallback for a full TTL after one blip.
       // An abandoned request settling late must not overwrite what a newer one cached.
-      if (parsed && !abandoned) cache = { models: parsed, fetchedAt: now, key };
+      if (parsed && !abandoned) {
+        cache.delete(key);
+        cache.set(key, { models: parsed, fetchedAt: now });
+        if (cache.size > MAX_CACHE_ENTRIES) cache.delete(cache.keys().next().value!);
+      }
       return parsed ?? stale;
     } catch {
       return stale; // unreachable, timed out, or unparseable
@@ -338,11 +372,8 @@ export async function fetchModelCatalog(
     }),
   ]).finally(() => {
     clearTimeout(deadline);
-    if (inFlight === request) {
-      inFlight = null;
-      inFlightKey = null;
-    }
+    if (inFlight.get(key) === request) inFlight.delete(key);
   });
-  inFlight = request;
+  inFlight.set(key, request);
   return request;
 }

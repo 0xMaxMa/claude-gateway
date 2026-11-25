@@ -14,7 +14,7 @@ test('session command uses the dashboard measurement and observed model, then ex
   const usage=(n:number)=>({inputTokens:n,cacheCreationTokens:0,cacheReadTokens:0,outputTokens:1000,totalTokens:n+1000});
   recordTokenTurn(store,{id:decision.decisionId,sessionId:'session',role:'agent',category:'input',toolIds:[],inputTokens:0,totalTokens:0,startedAt:now,model:'observed-model',requests:[{id:'old',usage:usage(990000)},{id:'latest',usage:usage(179000)}]});
   const runtime=Object.assign(Object.create(AgentOrchestrationRuntime.prototype),{store});
-  const runner=Object.assign(Object.create(AgentRunner.prototype),{orchestration:runtime,dashboardContextWindow:jest.fn(async()=>200000),agentConfig:{claude:{model:'different-selected-model'}}});
+  const runner=Object.assign(Object.create(AgentRunner.prototype),{orchestration:runtime,dashboardContextWindow:jest.fn(()=>200000),agentConfig:{claude:{model:'different-selected-model'}}});
   expect(await runner.sessionContextInfo('session')).toMatchObject({text:'180K / 200K · 90%',contextUsedPct:90,contextTokens:tokenReport(store,'session').contextWindow!.used});
   expect(runner.dashboardContextWindow).toHaveBeenCalledWith('observed-model');
   jest.mocked(Date.now).mockReturnValue(now+3600000);
@@ -25,7 +25,7 @@ test('session command uses the dashboard measurement and observed model, then ex
 });
 
 test('missing measurements and unknown model capacity never become zero percent',async()=>{
- const runner=Object.assign(Object.create(AgentRunner.prototype),{orchestration:{sessionContextWindow:()=>null},dashboardContextWindow:async()=>null});
+ const runner=Object.assign(Object.create(AgentRunner.prototype),{orchestration:{sessionContextWindow:()=>null},dashboardContextWindow:()=>null});
  expect(await runner.sessionContextInfo('session')).toMatchObject({text:'—',contextUsedPct:null});
  runner.orchestration.sessionContextWindow=()=>({used:1200,model:'unknown'});
  expect(await runner.sessionContextInfo('session')).toMatchObject({text:'1.2K / —',contextUsedPct:null});
@@ -54,7 +54,7 @@ test('legacy session status retains measured usage while absent and stale values
  const runner = Object.assign(Object.create(AgentRunner.prototype), {
   sessionStore:{listSessions:async()=>({activeSessionId:'legacy',sessions:[meta]})},
   agentConfig:{claude:{model:'default-model'}},channelFor:()=> 'telegram',writeAutoForward:send,
-  dashboardContextWindow:jest.fn(async()=>200000),
+  dashboardContextWindow:jest.fn(()=>200000),
  });
  await runner.handleCommandSessionInfo('a','c');
  expect(send.mock.calls[0][1]).toContain('180K / 200K · 90%');

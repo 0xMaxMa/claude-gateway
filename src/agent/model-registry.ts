@@ -4,7 +4,7 @@
  * lists and resolves the same models.
  */
 
-import { fetchModelCatalog } from './model-catalog';
+import { cachedModelCatalog, fetchModelCatalog } from './model-catalog';
 import type { ModelConfig } from '../types';
 
 // Fable 5.1 takes the bare `fable` alias and Fable 5 is demoted to `fable5`,
@@ -80,6 +80,21 @@ export const isEffort = (value: unknown): value is Effort => EFFORT_LEVELS.inclu
 export async function availableModels(configured: ModelConfig[] | undefined): Promise<ModelConfig[]> {
   const staticModels = configured ?? DEFAULT_MODELS;
   return (await fetchModelCatalog(staticModels)) ?? staticModels;
+}
+
+/**
+ * {@link availableModels} without waiting on the network: the cached catalog,
+ * or the configured list until a background refresh lands. For status and
+ * listing paths, which must answer even while the catalog fetch hangs.
+ */
+export function availableModelsNow(configured: ModelConfig[] | undefined): ModelConfig[] {
+  const staticModels = configured ?? DEFAULT_MODELS;
+  return cachedModelCatalog(staticModels) ?? staticModels;
+}
+
+/** Start fetching the catalog without waiting for it, so the first status read after a start has it. */
+export function prefetchModelCatalog(configured: ModelConfig[] | undefined): void {
+  void fetchModelCatalog(configured ?? DEFAULT_MODELS);
 }
 
 /**

@@ -37,13 +37,13 @@ async function openSession(base: string | undefined, timeoutMs = 2000): Promise<
   return browser.open('42', '42').then(() => undefined, (error: unknown) => error);
 }
 
-test('a callback that does not answer in time is reported as busy, with timeout logged', async () => {
+test('a callback that does not answer in time is reported as a timeout, not as a busy agent', async () => {
   const base = await serve(() => { /* never responds */ });
   const failure = classifyCallbackFailure(await openSession(base, 200));
-  expect(failure).toMatchObject({ kind: 'busy', name: 'TimeoutError', timeout: true });
-  expect(formatCallbackFailure('session', failure)).toMatch(/^telegram channel: \/session failed \(kind=busy name=TimeoutError timeout=true /);
+  expect(failure).toMatchObject({ kind: 'timeout', name: 'TimeoutError', timeout: true });
+  expect(formatCallbackFailure('session', failure)).toMatch(/^telegram channel: \/session failed \(kind=timeout name=TimeoutError timeout=true /);
   expect(callbackFailureReply(failure.kind, 'session info', 'session'))
-    .toBe('The agent is busy and did not answer in time. Please try /session again in a moment.');
+    .toBe('The agent did not answer in time. Please try /session again in a moment.');
 });
 
 test('a non-OK status is kept for the log and stays a generic failure', async () => {

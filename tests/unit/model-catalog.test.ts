@@ -15,6 +15,7 @@ import path from 'path';
 import {
   parseModelCatalog,
   fetchModelCatalog,
+  cachedModelCatalog,
   catalogBaseUrl,
   baseUrlIsSecure,
   resetModelCatalogCache,
@@ -187,6 +188,65 @@ describe('model catalog — fetch policy', () => {
   });
 
   const ok = (body: unknown) => ({ ok: true, json: async () => body });
+
+  it('reads the cache without waiting, refreshing it in the background', async () => {
+    process.env.ANTHROPIC_BASE_URL = 'https://proxy.example.com';
+    let release!: (v: unknown) => void;
+    fetchMock.mockImplementationOnce(() => new Promise((r) => { release = r; }));
+    const t0 = Date.now();
+
+    // Nothing cached: answers null at once and starts one shared request.
+    expect(cachedModelCatalog(STATIC, t0)).toBeNull();
+    expect(cachedModelCatalog(STATIC, t0)).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    release(ok({ data: [{ id: 'live' }] }));
+    await expect(fetchModelCatalog(STATIC, t0)).resolves.toEqual(expect.arrayContaining([expect.objectContaining({ id: 'live' })]));
+    expect(cachedModelCatalog(STATIC, t0 + 1)!.map((m) => m.id)).toContain('live');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // Past the TTL: still answers with the stale copy while a refresh runs.
+    let releaseRefresh!: (v: unknown) => void;
+    fetchMock.mockImplementationOnce(() => new Promise((r) => { releaseRefresh = r; }));
+    expect(cachedModelCatalog(STATIC, t0 + 61_000)!.map((m) => m.id)).toContain('live');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    // Past the stale bound the configured list takes over (null).
+    expect(cachedModelCatalog(STATIC, t0 + 61 * 60_000)).toBeNull();
+    releaseRefresh({ ok: false });
+    await fetchModelCatalog(STATIC, t0 + 61_000); // settles the shared refresh and its deadline timer
+  });
+
+  it('keeps a cached catalog per configured list, so two callers do not evict each other', async () => {
+    process.env.ANTHROPIC_BASE_URL = 'https://proxy.example.com';
+    fetchMock.mockResolvedValue(ok({ data: [{ id: 'live' }] }));
+    const other = STATIC.slice(0, 1);
+    await fetchModelCatalog(STATIC);
+    await fetchModelCatalog(other);
+
+    expect(cachedModelCatalog(STATIC)!.map((m) => m.id)).toContain('live');
+    expect(cachedModelCatalog(other)!.map((m) => m.id)).toContain('live');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('shares one in-flight request per configured list when readers of two lists alternate', async () => {
+    process.env.ANTHROPIC_BASE_URL = 'https://proxy.example.com';
+    const releases: Array<(v: unknown) => void> = [];
+    fetchMock.mockImplementation(() => new Promise((r) => { releases.push(r); }));
+    const other = STATIC.slice(0, 1);
+
+    // A runner and the API router with different lists, read in turn while the fetch is slow.
+    for (let i = 0; i < 3; i++) {
+      expect(cachedModelCatalog(STATIC)).toBeNull();
+      expect(cachedModelCatalog(other)).toBeNull();
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    for (const release of releases) release(ok({ data: [{ id: 'live' }] }));
+    await Promise.all([fetchModelCatalog(STATIC), fetchModelCatalog(other)]);
+    expect(cachedModelCatalog(STATIC)!.map((m) => m.id)).toContain('live');
+    expect(cachedModelCatalog(other)!.map((m) => m.id)).toContain('live');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
 
   it('does not fetch at all when no base URL is configured', async () => {
     expect(catalogBaseUrl()).toBe('');
@@ -385,7 +445,8 @@ describe('model catalog — fetch policy', () => {
       fetchMock.mockImplementationOnce(() => new Promise(() => {}));
 
       const hung = [fetchModelCatalog(STATIC), fetchModelCatalog(STATIC)];
-      await jest.advanceTimersByTimeAsync(9_999);
+      // The 5 s abort signal plus 2 s of grace: under the 10 s receiver callback timeout.
+      await jest.advanceTimersByTimeAsync(6_999);
       expect(warn).not.toHaveBeenCalled();
       await jest.advanceTimersByTimeAsync(1);
       await expect(Promise.all(hung)).resolves.toEqual([null, null]);
