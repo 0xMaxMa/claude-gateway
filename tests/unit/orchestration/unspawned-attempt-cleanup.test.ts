@@ -63,10 +63,41 @@ test('a gateway that dies after the claim but before the spawn resumes the task 
   const { s, starts } = scheduler();
   await s.tick(); await settle();
   const after = store.task(task.taskId)!;
-  expect(after.failure?.code).not.toBe('CLEANUP_UNCONFIRMED');
-  expect(after.restartResume).toMatchObject({ count: 1 });
+  expect(after.state).toBe('running');
+  expect(after.failure).toBeUndefined();
   expect(starts).toEqual([task.taskId]);
   await s.close();
+});
+
+test('restarts before the spawn do not spend restart resumes or brief the worker about an interruption', async () => {
+  const task = spawn();
+  tasks.claim(task.taskId);
+  for (let restart = 0; restart <= 4; restart++) {
+    recoverOrchestration(store);
+    // The new attempt never gets past preparation, so the next restart again finds a claimed, unspawned attempt.
+    const s = new WorkerScheduler(tasks, { cleanup: attempt => cleanupDriver.cleanup(attempt), start: () => new Promise<WorkerHandle>(() => {}) });
+    await s.tick(); await settle();
+    expect(store.task(task.taskId)!.state).toBe('starting');
+  }
+  expect(store.task(task.taskId)!.restartResume).toBeUndefined();
+  expect(store.task(task.taskId)!.failure).toBeUndefined();
+});
+
+test('a subagent claimed but not spawned when the gateway restarted is cancelled with its resumed parent and frees its slot', async () => {
+  const parent = spawn('parent'), parentAttempt = tasks.claim(parent.taskId)!;
+  tasks.started(parentAttempt.attemptId, parentAttempt.generation);
+  const child = tasks.spawnSubagent(parentAttempt.attemptId, parentAttempt.generation, 'child', { title: 'Check', instructions: 'Check CI' });
+  expect(tasks.claim(child.taskId)).toBeDefined();
+  recoverOrchestration(store);
+  expect(store.task(child.taskId)!.state).toBe('needs_reconciliation');
+  // The parent's worker is proven gone after the restart; the subagent's attempt never spawned.
+  const s = new WorkerScheduler(tasks, {
+    cleanup: async attempt => attempt.taskId === parent.taskId || cleanupDriver.cleanup(attempt),
+    start: () => new Promise<WorkerHandle>(() => {}),
+  });
+  await s.tick(); await s.tick(); await settle();
+  expect(store.task(child.taskId)!.state).toBe('cancelled');
+  expect(heldSlots(child.taskId)).toBe(0);
 });
 
 test('cancelling an attempt that never spawned ends cancelled and frees its worker slot', async () => {

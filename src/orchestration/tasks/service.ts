@@ -947,6 +947,8 @@ export class TaskService {
       const { task, attempt } = this.active(attemptId, generation);
       if (task.state !== 'starting') throw new OrchestrationError('STATE_CONFLICT');
       attempt.state = 'running'; attempt.startedAt = Date.now(); attempt.processIdentity = identity;
+      // A started worker has spawned, whichever driver ran it.
+      if (attempt.processSpawn) attempt.processSpawn = 'requested';
       task.state = 'running'; task.appliedRevision = attempt.revision;
       if (task.restartResume) task.restartResume.pending = false;
       if(task.executionControl?.revision===attempt.revision)task.executionControl.phase='applied';
@@ -1461,10 +1463,13 @@ export class TaskService {
         this.notify(task);
         return;
       }
-      attempt.state = 'ended'; attempt.failure = task.failure = shutdownFailure();
-      task.activeAttemptId = undefined;
+      attempt.state = 'ended'; task.activeAttemptId = undefined;
       this.pool.release(task.taskId, false);
-      const resumed = this.resumeAfterRestart(task, attempt, hint);
+      // An attempt that never spawned interrupted nothing: it starts again without spending a resume (#666).
+      const unspawned = attempt.processSpawn === 'not_requested';
+      if (unspawned) { task.state = 'queued'; delete task.failure; }
+      else attempt.failure = task.failure = shutdownFailure();
+      const resumed = unspawned || this.resumeAfterRestart(task, attempt, hint);
       this.store.saveAttempt(attempt); this.store.saveTask(task, task.stateVersion);
       this.store.appendEvent(task.conversationId, 'task.restart_recovered', { stopped, state: task.state }, task.taskId);
       if (resumed) this.store.enqueue('schedule', `schedule:${task.taskId}:${task.stateVersion}`, { taskId: task.taskId });
