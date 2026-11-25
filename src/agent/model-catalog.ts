@@ -68,9 +68,8 @@ interface CatalogCache {
  */
 const cache = new Map<string, CatalogCache>();
 const MAX_CACHE_ENTRIES = 8;
-/** In-flight fetch, so N concurrent callers make one request, not N. */
-let inFlight: Promise<ModelConfig[] | null> | null = null;
-let inFlightKey: string | null = null;
+/** In-flight fetch per catalog key, so N concurrent callers make one request, not N. */
+const inFlight = new Map<string, Promise<ModelConfig[] | null>>();
 let warnedInsecureUrl = false;
 /**
  * Base URL whose last request hit {@link CATALOG_DEADLINE_MS}, and until when it
@@ -84,8 +83,7 @@ let hungUntil = 0;
 /** Reset module state. Tests only — each case needs a clean cache. */
 export function resetModelCatalogCache(): void {
   cache.clear();
-  inFlight = null;
-  inFlightKey = null;
+  inFlight.clear();
   warnedInsecureUrl = false;
   hungBase = null;
   hungUntil = 0;
@@ -303,7 +301,8 @@ export async function fetchModelCatalog(
   const key = catalogKey(base, fallback);
   const cached = cache.get(key);
   if (cached && now - cached.fetchedAt < CATALOG_TTL_MS) return cached.models;
-  if (inFlight && inFlightKey === key) return inFlight;
+  const pending = inFlight.get(key);
+  if (pending) return pending;
 
   // A catalog that is merely stale is still better than the static list, but
   // only while a fetch is actually failing — a successful one below replaces it.
@@ -323,7 +322,6 @@ export async function fetchModelCatalog(
     return null;
   }
 
-  inFlightKey = key;
   let abandoned = false;
   const attempt = (async (): Promise<ModelConfig[] | null> => {
     try {
@@ -374,11 +372,8 @@ export async function fetchModelCatalog(
     }),
   ]).finally(() => {
     clearTimeout(deadline);
-    if (inFlight === request) {
-      inFlight = null;
-      inFlightKey = null;
-    }
+    if (inFlight.get(key) === request) inFlight.delete(key);
   });
-  inFlight = request;
+  inFlight.set(key, request);
   return request;
 }

@@ -228,6 +228,26 @@ describe('model catalog — fetch policy', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it('shares one in-flight request per configured list when readers of two lists alternate', async () => {
+    process.env.ANTHROPIC_BASE_URL = 'https://proxy.example.com';
+    const releases: Array<(v: unknown) => void> = [];
+    fetchMock.mockImplementation(() => new Promise((r) => { releases.push(r); }));
+    const other = STATIC.slice(0, 1);
+
+    // A runner and the API router with different lists, read in turn while the fetch is slow.
+    for (let i = 0; i < 3; i++) {
+      expect(cachedModelCatalog(STATIC)).toBeNull();
+      expect(cachedModelCatalog(other)).toBeNull();
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    for (const release of releases) release(ok({ data: [{ id: 'live' }] }));
+    await Promise.all([fetchModelCatalog(STATIC), fetchModelCatalog(other)]);
+    expect(cachedModelCatalog(STATIC)!.map((m) => m.id)).toContain('live');
+    expect(cachedModelCatalog(other)!.map((m) => m.id)).toContain('live');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it('does not fetch at all when no base URL is configured', async () => {
     expect(catalogBaseUrl()).toBe('');
     await expect(fetchModelCatalog(STATIC)).resolves.toBeNull();
