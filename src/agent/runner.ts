@@ -3471,8 +3471,10 @@ export class AgentRunner extends EventEmitter {
       context = { used: meta.lastInputTokens!, total: null, model: meta.model ?? this.agentConfig.claude.model };
     }
     if (!context) return {contextUsedPct:null,contextTokens:null,contextWindow:null,contextModel:null,text:'—'};
-    const model = context.model ? contextModelId(context.model, this.agentConfig.claude.model) : null;
-    const total = model ? this.dashboardContextWindow(model) : null;
+    // The turn's own configured model; a legacy measurement has none and ran on the agent default.
+    const configured = 'configuredModel' in context ? context.configuredModel : undefined;
+    const model = context.model ? contextModelId(context.model, configured ?? this.agentConfig.claude.model) : null;
+    const total = context.model ? this.dashboardContextWindow(context.model, configured) : null;
     const pct = total && total > 0 ? Math.round(context.used / total * 100) : null;
     const format = (n:number) => n >= 1000000 ? `${Number((n/1000000).toFixed(2))}M` : n >= 1000 ? `${Number((n/1000).toFixed(2))}K` : String(n);
     return {contextUsedPct:pct,contextTokens:context.used,contextWindow:total,contextModel:model,
@@ -4849,11 +4851,11 @@ export class AgentRunner extends EventEmitter {
   }
 
   /** Never waits on the catalog fetch: `/session` and the dashboard only display this. */
-  dashboardContextWindow(measured: string): number | null {
+  dashboardContextWindow(measured: string, configured: string = this.agentConfig.claude.model): number | null {
     const lists = [this.availableModelsNow(), this.gatewayConfig.gateway.models ?? DEFAULT_MODELS];
     // The configured `[1m]` row first, then the measured id itself: a configured
     // suffix no list describes (`[200k]`) must still find the base model's window.
-    for (const id of new Set([contextModelId(measured, this.agentConfig.claude.model), measured])) {
+    for (const id of new Set([contextModelId(measured, configured), measured])) {
       for (const list of lists) {
         const window = list.find(m => m.id === id)?.contextWindow;
         if (window !== undefined) return window;

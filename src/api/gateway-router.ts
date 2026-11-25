@@ -1005,7 +1005,7 @@ export class GatewayRouter {
           let report = source ? await this.dashboardReader.read('report', source.filename, {workspace:source.workspace, jevEnabled:Boolean(this.gatewayConfig && this.configs.get(agentId) && jevAllowed(this.gatewayConfig,this.configs.get(agentId)!)), chatMemoryBudget:isolatedBudget, sessionId, offset, since:dashboardSince(req.query.scope ?? (reportPath==='/token-report'?'all':'24h'),Date.now(),this.gatewayConfig?.gateway?.timezone), historyFilename:source.historyFilename}) : await runner.getTokenReport(sessionId);
           if (!report) { res.status(404).json({ error: 'No recorded session token report' }); return; }
           if (runner.isSessionCompacting?.(sessionId)) report = {...report, activityStatus:'compacting'};
-          if (report.contextWindow) report.contextWindow.total = report.contextWindow.model ? runner.dashboardContextWindow?.(report.contextWindow.model) ?? null : null;
+          if (report.contextWindow) report.contextWindow.total = report.contextWindow.model ? runner.dashboardContextWindow?.(report.contextWindow.model, report.contextWindow.configuredModel) ?? null : null;
           if (reportPath === '/token-report') res.json(report);
           else res.type('html').send(generateTokenReportHtml(agentId, {...report, timezone:this.gatewayConfig?.gateway?.timezone, scope:dashboardRange(req.query.scope), sessionStatus: runner.agentSessionLiveStatus?.(sessionId) ?? 'stopped'}));
         } catch {
@@ -1022,7 +1022,7 @@ export class GatewayRouter {
       const detailRunner=this.agents.get(String(agentId));
       const source=detailRunner?.getDashboardSource?.();
       if(!source){res.status(404).json({error:'Unknown agent'});return;}
-      try{const detail=await this.dashboardReader.read('session',source.filename,{sessionId,offset,since:dashboardSince(req.query.scope,Date.now(),this.gatewayConfig?.gateway?.timezone),historyFilename:source.historyFilename});if(!detail){res.status(404).json({error:'Session not found'});return;}if(detailRunner?.isSessionCompacting?.(String(sessionId)))detail.activityStatus='compacting';if(detail.contextWindow)detail.contextWindow.total=detail.contextWindow.model?detailRunner?.dashboardContextWindow?.(detail.contextWindow.model)??null:null;res.json({...detail,sessionStatus:detailRunner?.agentSessionLiveStatus?.(String(sessionId))??'stopped'});}
+      try{const detail=await this.dashboardReader.read('session',source.filename,{sessionId,offset,since:dashboardSince(req.query.scope,Date.now(),this.gatewayConfig?.gateway?.timezone),historyFilename:source.historyFilename});if(!detail){res.status(404).json({error:'Session not found'});return;}if(detailRunner?.isSessionCompacting?.(String(sessionId)))detail.activityStatus='compacting';if(detail.contextWindow)detail.contextWindow.total=detail.contextWindow.model?detailRunner?.dashboardContextWindow?.(detail.contextWindow.model,detail.contextWindow.configuredModel)??null:null;res.json({...detail,sessionStatus:detailRunner?.agentSessionLiveStatus?.(String(sessionId))??'stopped'});}
       catch{res.status(503).json({error:'Dashboard data temporarily unavailable'});}
     });
 

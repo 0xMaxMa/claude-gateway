@@ -100,12 +100,31 @@ test('dashboard context capacity of a measured base id uses the configured suffi
  expect(window('claude-sonnet-5-5')).toBe(200000);
 });
 
+// #687: a session can run on a model other than the agent default (composer or
+// per-session selection), so the turn's own configured model decides the window.
+test('dashboard context capacity follows the model the turn was configured with, not the agent default', ()=>{
+ const context:any={availableModelsNow:()=>[],gatewayConfig:{gateway:{}},agentConfig:{claude:{model:'claude-sonnet-5-5'}}};
+ const window=(id:string,configured?:string)=>AgentRunner.prototype.dashboardContextWindow.call(context,id,configured);
+ expect(window('claude-opus-5-5','claude-opus-5-5[1m]')).toBe(1000000);
+ // A base-model turn keeps the base window even when the agent default is [1m].
+ context.agentConfig.claude.model='claude-sonnet-5-5[1m]';
+ expect(window('claude-sonnet-5-5','claude-sonnet-5-5')).toBe(200000);
+ expect(window('claude-sonnet-5-5')).toBe(1000000);
+});
+
+test('JSON report resolves capacity against the turn configured model',async()=>{
+ const {app,getTokenReport,dashboardContextWindow}=setup();
+ getTokenReport.mockResolvedValue({...report,contextWindow:{used:11000,total:null,model:'custom-model',configuredModel:'custom-model[1m]'}});
+ await supertest(app).get('/token-report').query({agentId:'agent',sessionId:'session'}).set('X-Api-Key','admin-secret');
+ expect(dashboardContextWindow).toHaveBeenCalledWith('custom-model','custom-model[1m]');
+});
+
 test('JSON report uses resolved capacity instead of guessing from the model ID',async()=>{
  const {app,getTokenReport,dashboardContextWindow}=setup();
  getTokenReport.mockResolvedValue({...report,contextWindow:{used:11000,total:null,model:'custom-model'}});
  const response=await supertest(app).get('/token-report').query({agentId:'agent',sessionId:'session'}).set('X-Api-Key','admin-secret');
  expect(response.body.contextWindow).toEqual({used:11000,total:32768,model:'custom-model'});
- expect(dashboardContextWindow).toHaveBeenCalledWith('custom-model');
+ expect(dashboardContextWindow).toHaveBeenCalledWith('custom-model',undefined);
 });
 
  test('reports live compaction without retaining stale status after it finishes',async()=>{
